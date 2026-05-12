@@ -180,6 +180,25 @@ fn arm_branch_instr(cond: u32, link: bool, pc: u32, target: u32) -> u32 {
         | ((offset_words as u32) & 0x00ff_ffff)
 }
 
+fn arm_data_proc_reg_shift_instr(
+    opcode: u32,
+    set_flags: bool,
+    rn: usize,
+    rd: usize,
+    rm: usize,
+    shift: u32,
+    amount: u32,
+) -> u32 {
+    0xe000_0000
+        | ((opcode & 0xf) << 21)
+        | (u32::from(set_flags) << 20)
+        | ((rn as u32) << 16)
+        | ((rd as u32) << 12)
+        | ((amount & 0x1f) << 7)
+        | ((shift & 0x3) << 5)
+        | rm as u32
+}
+
 fn arm_vcmp_single_instr(sd: usize, sm: usize) -> u32 {
     0xeeb4_0a40
         | (((sd as u32) >> 1) << 12)
@@ -2098,6 +2117,106 @@ fn qemu_oracle_arm_branch_condition_matrix_matches_interpreter() {
         folded ^= 128;
     }
 
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_arm_data_processing_shift_matrix_matches_interpreter() {
+    const CASES: &[(&str, u32, bool, u32, u32, u32, u32, bool)] = &[
+        ("ands", 0x0, true, 0xf0f0_0ff0, 0x1020_3040, 0, 3, true),
+        ("eors", 0x1, true, 0x55aa_33cc, 0xff00_0ff0, 1, 5, true),
+        ("subs", 0x2, true, 0x8000_0010, 0x7000_0001, 2, 7, true),
+        ("rsbs", 0x3, true, 0x1000_0000, 0x8000_0001, 3, 8, true),
+        ("adds", 0x4, true, 0x7fff_fff0, 0x0000_0011, 0, 1, true),
+        ("adcs", 0x5, true, 0xffff_fffe, 0x0000_0020, 1, 3, true),
+        ("sbcs", 0x6, true, 0x0000_0010, 0x8000_0000, 2, 2, false),
+        ("rscs", 0x7, true, 0x8000_0000, 0x0000_000f, 3, 4, true),
+        ("tst", 0x8, false, 0xf00f_00f0, 0x1111_2222, 0, 4, true),
+        ("teq", 0x9, false, 0xaaaa_5555, 0x1234_5678, 1, 6, true),
+        ("cmp", 0xa, false, 0x0000_0001, 0x8000_0000, 2, 3, true),
+        ("cmn", 0xb, false, 0x7fff_fff0, 0x0000_0010, 3, 12, true),
+        ("orrs", 0xc, true, 0x0f0f_0000, 0x0000_f0f0, 0, 2, true),
+        ("movs", 0xd, true, 0, 0x8000_0001, 1, 1, true),
+        ("bics", 0xe, true, 0xffff_00ff, 0x00ff_00ff, 2, 5, true),
+        ("mvns", 0xf, true, 0, 0x0000_ffff, 3, 16, true),
+    ];
+
+    let shift_suffix = |shift: u32, amount: u32| match shift {
+        0 => format!("lsl #{amount}"),
+        1 => format!("lsr #{amount}"),
+        2 => format!("asr #{amount}"),
+        3 => format!("ror #{amount}"),
+        _ => unreachable!(),
+    };
+
+    let mut body = String::from("mov r12, #0\n");
+    for (mnemonic, opcode, writes_result, lhs, rhs, shift, amount, carry_in) in CASES {
+        let suffix = shift_suffix(*shift, *amount);
+        body.push_str("mov r4, #0\n");
+        if *carry_in {
+            body.push_str("cmp r4, #0\n");
+        } else {
+            body.push_str("cmp r4, #1\n");
+        }
+        body.push_str(&format!(
+            "ldr r1, ={lhs:#010x}\n\
+             ldr r2, ={rhs:#010x}\n"
+        ));
+        match *opcode {
+            0x8..=0xb => {
+                body.push_str(&format!("{mnemonic} r1, r2, {suffix}\n"));
+            }
+            0xd | 0xf => {
+                body.push_str(&format!("{mnemonic} r0, r2, {suffix}\n"));
+            }
+            _ => {
+                body.push_str(&format!("{mnemonic} r0, r1, r2, {suffix}\n"));
+            }
+        }
+        if *writes_result {
+            body.push_str(
+                "eor r12, r12, r0\n\
+                 eor r12, r12, r0, lsr #8\n\
+                 eor r12, r12, r0, lsr #16\n\
+                 eor r12, r12, r0, lsr #24\n",
+            );
+        }
+        body.push_str(
+            "mrs r3, cpsr\n\
+             eor r12, r12, r3, lsr #28\n",
+        );
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (_, opcode, writes_result, lhs, rhs, shift, amount, carry_in) in CASES {
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, *lhs);
+        cpu.set_reg(2, *rhs);
+        cpu.cpsr.n = false;
+        cpu.cpsr.z = false;
+        cpu.cpsr.c = *carry_in;
+        cpu.cpsr.v = false;
+        cpu.execute_arm(
+            arm_data_proc_reg_shift_instr(*opcode, true, 1, 0, 2, *shift, *amount),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        if *writes_result {
+            folded ^= byte_fold(cpu.reg(0));
+        }
+        folded ^= (cpu.cpsr.to_u32() >> 28) & 0xf;
+    }
     cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);

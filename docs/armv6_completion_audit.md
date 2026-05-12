@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 56 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 57 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -68,6 +68,9 @@ Result: passing, with 36 unit tests, 56 QEMU oracle tests, and doc tests.
 - Thumb conditional and unconditional branches now have QEMU oracle coverage for
   taken/not-taken condition evaluation plus forward and backward offsets
 - ARM/Thumb core ALU, shifts, compares, flag-setting, and common load/store
+- ARM data-processing register/shift forms now have deterministic
+  pseudo-random QEMU oracle coverage across all 16 opcode slots, including
+  result and `NZCV` folding
 - ARM data-processing register-shifted-register invalid `PC` forms trap
   explicitly
 - ARM halfword/signed/doubleword transfers: `LDRH`, `STRH`, `LDRSB`, `LDRSH`,
