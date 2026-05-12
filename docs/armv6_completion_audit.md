@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 55 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 56 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -52,6 +52,8 @@ Result: passing, with 36 unit tests, 55 QEMU oracle tests, and doc tests.
 
 - ARM branches/interworking: `B`, `BL`, `BX`, `BXJ` as `BX`, `BLX <reg>`,
   `BLX <imm>`, Thumb `BL`, Thumb `BLX`, and ARM/Thumb writes to `PC`
+- ARM conditional `B`, backward branch offsets, and `BL` link behavior now
+  have QEMU oracle coverage
 - Thumb high-register `MOV PC, Rm` and `ADD PC, Rm` branch-exchange
   interworking
 - Thumb high-register non-PC `ADD`/`CMP`/`MOV` operations now have QEMU oracle

@@ -172,6 +172,14 @@ fn arm_umaal_instr(rd_lo: usize, rd_hi: usize, rn: usize, rm: usize) -> u32 {
     0xe040_0090 | ((rd_hi as u32) << 16) | ((rd_lo as u32) << 12) | ((rm as u32) << 8) | rn as u32
 }
 
+fn arm_branch_instr(cond: u32, link: bool, pc: u32, target: u32) -> u32 {
+    let offset_words = (target as i32 - (pc as i32 + 8)) / 4;
+    ((cond & 0xf) << 28)
+        | 0x0a00_0000
+        | (u32::from(link) << 24)
+        | ((offset_words as u32) & 0x00ff_ffff)
+}
+
 fn arm_vcmp_single_instr(sd: usize, sm: usize) -> u32 {
     0xeeb4_0a40
         | (((sd as u32) >> 1) << 12)
@@ -1983,6 +1991,114 @@ fn qemu_oracle_msr_apsr_flags_match_interpreter() {
     cpu.set_reg(0, 1);
     cpu.execute_arm(0xe328_f101, 0, &mut mem).unwrap(); // msr APSR_nzcvq, #0x40000000
     cpu.execute_arm(0x03a0_004d, 0, &mut mem).unwrap(); // moveq r0, #77
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_arm_branch_condition_matrix_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r6, #0\n\
+         mov r0, #0\n\
+         cmp r0, #0\n\
+         beq 1f\n\
+         b fail\n\
+         1:\n\
+         eor r6, r6, #1\n\
+         cmp r0, #0\n\
+         bne fail\n\
+         eor r6, r6, #2\n\
+         cmp r0, #0\n\
+         bcs 2f\n\
+         b fail\n\
+         2:\n\
+         eor r6, r6, #4\n\
+         cmp r0, #1\n\
+         bcc 3f\n\
+         b fail\n\
+         3:\n\
+         eor r6, r6, #8\n\
+         cmp r0, #1\n\
+         bmi 4f\n\
+         b fail\n\
+         4:\n\
+         eor r6, r6, #16\n\
+         mov r1, #1\n\
+         cmp r1, #0\n\
+         bpl 5f\n\
+         b fail\n\
+         5:\n\
+         eor r6, r6, #32\n\
+         mov r5, #0\n\
+         6:\n\
+         cmp r5, #0\n\
+         bne 7f\n\
+         add r5, r5, #1\n\
+         b 6b\n\
+         7:\n\
+         eor r6, r6, #64\n\
+         bl 8f\n\
+         eor r6, r6, #128\n\
+         mov r0, r6\n\
+         b done\n\
+         8:\n\
+         bx lr\n\
+         fail:\n\
+         mov r0, #0xee\n\
+         done:",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0u32;
+    let pc = 0x100;
+    let target = 0x120;
+    let fallthrough = pc + 4;
+    let cases: [(u32, bool, bool, bool, bool, bool, u32); 6] = [
+        (0, false, true, true, false, true, 1),
+        (1, false, true, true, false, false, 2),
+        (2, false, false, true, false, true, 4),
+        (3, false, false, false, false, true, 8),
+        (4, true, false, false, false, true, 16),
+        (5, false, false, false, false, true, 32),
+    ];
+
+    for (cond, n, z, c, v, expected_taken, bit) in cases {
+        cpu.set_pc(fallthrough);
+        cpu.cpsr.n = n;
+        cpu.cpsr.z = z;
+        cpu.cpsr.c = c;
+        cpu.cpsr.v = v;
+        cpu.execute_arm(arm_branch_instr(cond, false, pc, target), pc, &mut mem)
+            .unwrap();
+        let taken = cpu.pc() == target;
+        if taken == expected_taken {
+            folded ^= bit;
+        }
+    }
+
+    let pc = 0x200;
+    let target = 0x180;
+    cpu.set_pc(pc + 4);
+    cpu.execute_arm(arm_branch_instr(0xe, false, pc, target), pc, &mut mem)
+        .unwrap();
+    if cpu.pc() == target {
+        folded ^= 64;
+    }
+
+    let pc = 0x220;
+    let target = 0x240;
+    cpu.set_pc(pc + 4);
+    cpu.execute_arm(arm_branch_instr(0xe, true, pc, target), pc, &mut mem)
+        .unwrap();
+    if cpu.pc() == target && cpu.reg(14) == pc + 4 {
+        folded ^= 128;
+    }
+
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
