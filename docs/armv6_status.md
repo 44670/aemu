@@ -72,6 +72,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   `VLDM`/`VSTM`/`VPUSH`/`VPOP` forms
 - Explicit unpredictable traps for invalid VFPv2 load/store register ranges,
   empty VFP multiple-transfer lists, and writeback with `PC` as the base
+- Explicit unpredictable traps for VFPv2 double-register encodings that select
+  D16-D31 across core-register moves, `VMOV.32`, arithmetic, compare, and
+  conversion paths
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`, `VMSR`
 - VFP conversion subset: `VCVT` between `F32`, `F64`, `S32`, and `U32`,

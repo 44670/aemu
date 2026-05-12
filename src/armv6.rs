@@ -484,10 +484,10 @@ impl Cpu {
                 }
                 if (instr & 0x0f00) == 0x0b00 {
                     let dm = vfp_double_m(instr);
-                    self.set_dreg_bits(
+                    self.set_checked_dreg_bits(
                         dm,
                         u64::from(self.regs[rt]) | (u64::from(self.regs[rt2]) << 32),
-                    );
+                    )?;
                 } else {
                     let sm = vfp_single_m(instr);
                     if sm == 31 {
@@ -505,7 +505,7 @@ impl Cpu {
                     return Err(Trap::Unpredictable("VFP VMOV to invalid core registers"));
                 }
                 if (instr & 0x0f00) == 0x0b00 {
-                    let value = self.dreg_bits(vfp_double_m(instr));
+                    let value = self.checked_dreg_bits(vfp_double_m(instr))?;
                     self.write_reg_arm(rt, value as u32);
                     self.write_reg_arm(rt2, (value >> 32) as u32);
                 } else {
@@ -548,9 +548,9 @@ impl Cpu {
             }
             let dn = vfp_double_n(instr);
             let shift = ((instr >> 21) & 1) * 32;
-            let value = self.dreg_bits(dn);
+            let value = self.checked_dreg_bits(dn)?;
             let mask = 0xffff_ffff_u64 << shift;
-            self.set_dreg_bits(dn, (value & !mask) | (u64::from(self.regs[rt]) << shift));
+            self.set_checked_dreg_bits(dn, (value & !mask) | (u64::from(self.regs[rt]) << shift))?;
             return Ok(true);
         }
 
@@ -561,7 +561,7 @@ impl Cpu {
             }
             let dn = vfp_double_n(instr);
             let shift = ((instr >> 21) & 1) * 32;
-            self.write_reg_arm(rt, (self.dreg_bits(dn) >> shift) as u32);
+            self.write_reg_arm(rt, (self.checked_dreg_bits(dn)? >> shift) as u32);
             return Ok(true);
         }
 
@@ -606,14 +606,14 @@ impl Cpu {
             let dn = vfp_double_d(instr);
             let dm = vfp_double_m(instr);
             self.set_fpscr_compare_f64(
-                f64::from_bits(self.dreg_bits(dn)),
-                f64::from_bits(self.dreg_bits(dm)),
+                f64::from_bits(self.checked_dreg_bits(dn)?),
+                f64::from_bits(self.checked_dreg_bits(dm)?),
             );
             return Ok(true);
         }
         if (instr & 0x0fbf_0fff) == 0x0eb5_0b40 {
             let dn = vfp_double_d(instr);
-            self.set_fpscr_compare_f64(f64::from_bits(self.dreg_bits(dn)), 0.0);
+            self.set_fpscr_compare_f64(f64::from_bits(self.checked_dreg_bits(dn)?), 0.0);
             return Ok(true);
         }
 
@@ -622,13 +622,16 @@ impl Cpu {
             0x0eb7_0ac0 => {
                 let dd = vfp_double_d(instr);
                 let sm = vfp_single_m(instr);
-                self.set_dreg_bits(dd, f64::from(f32::from_bits(self.sregs[sm])).to_bits());
+                self.set_checked_dreg_bits(
+                    dd,
+                    f64::from(f32::from_bits(self.sregs[sm])).to_bits(),
+                )?;
                 return Ok(true);
             }
             0x0eb7_0bc0 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] = (f64::from_bits(self.dreg_bits(dm)) as f32).to_bits();
+                self.sregs[sd] = (f64::from_bits(self.checked_dreg_bits(dm)?) as f32).to_bits();
                 return Ok(true);
             }
             0x0ebd_0ac0 => {
@@ -660,27 +663,27 @@ impl Cpu {
             0x0ebd_0bc0 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] = (f64::from_bits(self.dreg_bits(dm)) as i32) as u32;
+                self.sregs[sd] = (f64::from_bits(self.checked_dreg_bits(dm)?) as i32) as u32;
                 return Ok(true);
             }
             0x0ebd_0b40 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
                 self.sregs[sd] =
-                    vfp_round_to_i32_bits(f64::from_bits(self.dreg_bits(dm)), self.fpscr);
+                    vfp_round_to_i32_bits(f64::from_bits(self.checked_dreg_bits(dm)?), self.fpscr);
                 return Ok(true);
             }
             0x0ebc_0bc0 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] = f64::from_bits(self.dreg_bits(dm)) as u32;
+                self.sregs[sd] = f64::from_bits(self.checked_dreg_bits(dm)?) as u32;
                 return Ok(true);
             }
             0x0ebc_0b40 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
                 self.sregs[sd] =
-                    vfp_round_to_u32_bits(f64::from_bits(self.dreg_bits(dm)), self.fpscr);
+                    vfp_round_to_u32_bits(f64::from_bits(self.checked_dreg_bits(dm)?), self.fpscr);
                 return Ok(true);
             }
             0x0eb8_0ac0 => {
@@ -698,13 +701,13 @@ impl Cpu {
             0x0eb8_0bc0 => {
                 let dd = vfp_double_d(instr);
                 let sm = vfp_single_m(instr);
-                self.set_dreg_bits(dd, ((self.sregs[sm] as i32) as f64).to_bits());
+                self.set_checked_dreg_bits(dd, ((self.sregs[sm] as i32) as f64).to_bits())?;
                 return Ok(true);
             }
             0x0eb8_0b40 => {
                 let dd = vfp_double_d(instr);
                 let sm = vfp_single_m(instr);
-                self.set_dreg_bits(dd, (self.sregs[sm] as f64).to_bits());
+                self.set_checked_dreg_bits(dd, (self.sregs[sm] as f64).to_bits())?;
                 return Ok(true);
             }
             _ => {}
@@ -727,8 +730,8 @@ impl Cpu {
         if matches!(unary, 0x0eb0_0b40 | 0x0eb1_0b40 | 0x0eb0_0bc0 | 0x0eb1_0bc0) {
             let dd = vfp_double_d(instr);
             let dm = vfp_double_m(instr);
-            let value = self.dreg_bits(dm);
-            self.set_dreg_bits(
+            let value = self.checked_dreg_bits(dm)?;
+            self.set_checked_dreg_bits(
                 dd,
                 match unary {
                     0x0eb0_0b40 => value,
@@ -737,7 +740,7 @@ impl Cpu {
                     0x0eb1_0bc0 => f64::from_bits(value).sqrt().to_bits(),
                     _ => unreachable!(),
                 },
-            );
+            )?;
             return Ok(true);
         }
 
@@ -767,10 +770,10 @@ impl Cpu {
                 let dd = vfp_double_d(instr);
                 let dn = vfp_double_n(instr);
                 let dm = vfp_double_m(instr);
-                let dst = f64::from_bits(self.dreg_bits(dd));
-                let lhs = f64::from_bits(self.dreg_bits(dn));
-                let rhs = f64::from_bits(self.dreg_bits(dm));
-                self.set_dreg_bits(dd, op_kind.eval_f64(dst, lhs, rhs).to_bits());
+                let dst = f64::from_bits(self.checked_dreg_bits(dd)?);
+                let lhs = f64::from_bits(self.checked_dreg_bits(dn)?);
+                let rhs = f64::from_bits(self.checked_dreg_bits(dm)?);
+                self.set_checked_dreg_bits(dd, op_kind.eval_f64(dst, lhs, rhs).to_bits())?;
             }
             return Ok(true);
         }
@@ -2478,6 +2481,25 @@ impl Cpu {
     fn set_dreg_bits(&mut self, idx: usize, value: u64) {
         self.sregs[idx * 2] = value as u32;
         self.sregs[idx * 2 + 1] = (value >> 32) as u32;
+    }
+
+    fn checked_dreg_bits(&self, idx: usize) -> Result<u64> {
+        self.check_dreg(idx)?;
+        Ok(self.dreg_bits(idx))
+    }
+
+    fn set_checked_dreg_bits(&mut self, idx: usize, value: u64) -> Result<()> {
+        self.check_dreg(idx)?;
+        self.set_dreg_bits(idx, value);
+        Ok(())
+    }
+
+    fn check_dreg(&self, idx: usize) -> Result<()> {
+        if idx >= 16 {
+            Err(Trap::Unpredictable("VFP double register out of range"))
+        } else {
+            Ok(())
+        }
     }
 
     fn set_fpscr_compare_f32(&mut self, lhs: f32, rhs: f32) {
@@ -4857,6 +4879,39 @@ mod tests {
         cpu.set_sreg(8, 4);
         cpu.execute_arm(0xeeb8_3bc4, 0, &mut mem).unwrap(); // vcvt.f64.s32 d3, s8
         assert_eq!(f64::from_bits(cpu.dreg(3)), 4.0);
+    }
+
+    #[test]
+    fn vfpv2_double_register_ranges_trap() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_dreg(13, 2.0f64.to_bits());
+        cpu.set_dreg(14, 1.0f64.to_bits());
+        cpu.execute_arm(0xee3e_fb0d, 0, &mut mem).unwrap(); // vadd.f64 d15, d14, d13
+        assert_eq!(f64::from_bits(cpu.dreg(15)), 3.0);
+
+        for (instr, comment) in [
+            (0xec43_2b30, "vmov d16, r2, r3"),
+            (0xec51_0b30, "vmov r0, r1, d16"),
+            (0xee00_7b90, "vmov.32 d16[0], r7"),
+            (0xee10_6b90, "vmov.32 r6, d16[0]"),
+            (0xee70_0b01, "vadd.f64 d16, d0, d1"),
+            (0xee30_2b81, "vadd.f64 d2, d16, d1"),
+            (0xee30_2b20, "vadd.f64 d2, d0, d16"),
+            (0xeef4_0b41, "vcmp.f64 d16, d1"),
+            (0xeeb4_0b60, "vcmp.f64 d0, d16"),
+            (0xeef7_0ae0, "vcvt.f64.f32 d16, s1"),
+            (0xeeb7_1be0, "vcvt.f32.f64 s2, d16"),
+            (0xeef8_0bc4, "vcvt.f64.s32 d16, s8"),
+        ] {
+            let err = cpu.execute_arm(instr, 0, &mut mem).unwrap_err();
+            assert_eq!(
+                err,
+                Trap::Unpredictable("VFP double register out of range"),
+                "{comment}"
+            );
+        }
     }
 
     #[test]
