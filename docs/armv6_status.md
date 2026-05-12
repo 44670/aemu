@@ -84,12 +84,14 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   arithmetic and unary operations, including scalar destination/source-bank
   handling and invalid vector length/stride traps
 - Basic cumulative FPSCR exception flags for VFPv2 divide-by-zero, invalid
-  square-root/divide, and invalid float-to-integer conversions: `DZC` for
-  finite nonzero divide by zero and `IOC` for negative square root, zero
-  divided by zero, NaN conversion, out-of-range conversion, and negative
-  unsigned conversion; `IXC` for inexact float-to-integer conversions that
-  round without raising `IOC`, inexact integer-to-single conversions, and
-  double-to-single narrowing; `OFC`/`UFC` for overflowing or underflowing
+  square-root/divide, invalid float-to-integer conversions, and selected
+  arithmetic cases: `DZC` for finite nonzero divide by zero and `IOC` for
+  negative square root, zero divided by zero, invalid single-precision
+  arithmetic, NaN conversion, out-of-range conversion, and negative unsigned
+  conversion; `IXC` for inexact single-precision arithmetic, inexact
+  float-to-integer conversions that round without raising `IOC`, inexact
+  integer-to-single conversions, and double-to-single narrowing; `OFC`/`UFC`
+  for overflowing or underflowing single-precision arithmetic and
   double-to-single narrowing
 - VFP status/compare subset: single and double `VCMP`/`VCMPE`, compare with
   zero, `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
@@ -122,9 +124,10 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   multiply, and absolute-difference cases has not been audited
   instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags remain incomplete
-  beyond basic `IOC`/`DZC` divide, square-root, compare-NaN, and conversion
-  invalid cases, plus basic conversion `IXC`/`OFC`/`UFC` cases; several less
-  common arithmetic and conversion edge cases still need an
+  beyond basic `IOC`/`DZC` divide, square-root, compare-NaN, selected
+  single-precision arithmetic, and conversion invalid cases, plus basic
+  conversion `IXC`/`OFC`/`UFC` cases; double-precision arithmetic flags and
+  less common arithmetic/conversion edge cases still need an
   instruction-by-instruction audit. VFPv3 fixed-point conversions are outside
   the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15

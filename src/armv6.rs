@@ -844,10 +844,7 @@ impl Cpu {
                 let sn = vfp_single_n(instr);
                 let sm = vfp_single_m(instr);
                 self.exec_vfp_3op_f32(sd, sn, sm, |dst, lhs, rhs| {
-                    (
-                        op_kind.eval_f32(dst, lhs, rhs).to_bits(),
-                        op_kind.exception_flags_f32(lhs, rhs),
-                    )
+                    op_kind.eval_f32_with_flags(dst, lhs, rhs)
                 })?;
             } else {
                 let dd = vfp_double_d(instr);
@@ -3020,17 +3017,71 @@ enum VfpBinaryOp {
 }
 
 impl VfpBinaryOp {
-    fn eval_f32(self, dst: f32, lhs: f32, rhs: f32) -> f32 {
+    fn eval_f32_with_flags(self, dst: f32, lhs: f32, rhs: f32) -> (u32, u32) {
         match self {
-            Self::MulAdd => dst + (lhs * rhs),
-            Self::MulSub => dst - (lhs * rhs),
-            Self::NegMulSub => -dst + (lhs * rhs),
-            Self::NegMulAdd => -dst - (lhs * rhs),
-            Self::Mul => lhs * rhs,
-            Self::NegMul => -(lhs * rhs),
-            Self::Add => lhs + rhs,
-            Self::Sub => lhs - rhs,
-            Self::Div => lhs / rhs,
+            Self::MulAdd => {
+                let product = lhs * rhs;
+                let mut flags = vfp_mul_exception_flags_f32(lhs, rhs, product);
+                let result = dst + product;
+                flags |= vfp_add_exception_flags_f32(dst, product, result);
+                (result.to_bits(), flags)
+            }
+            Self::MulSub => {
+                let product = lhs * rhs;
+                let mut flags = vfp_mul_exception_flags_f32(lhs, rhs, product);
+                let result = dst - product;
+                flags |= vfp_sub_exception_flags_f32(dst, product, result);
+                (result.to_bits(), flags)
+            }
+            Self::NegMulSub => {
+                let product = lhs * rhs;
+                let mut flags = vfp_mul_exception_flags_f32(lhs, rhs, product);
+                let result = -dst + product;
+                flags |= vfp_add_exception_flags_f32(-dst, product, result);
+                (result.to_bits(), flags)
+            }
+            Self::NegMulAdd => {
+                let product = lhs * rhs;
+                let mut flags = vfp_mul_exception_flags_f32(lhs, rhs, product);
+                let result = -dst - product;
+                flags |= vfp_sub_exception_flags_f32(-dst, product, result);
+                (result.to_bits(), flags)
+            }
+            Self::Mul => {
+                let result = lhs * rhs;
+                (
+                    result.to_bits(),
+                    vfp_mul_exception_flags_f32(lhs, rhs, result),
+                )
+            }
+            Self::NegMul => {
+                let product = lhs * rhs;
+                (
+                    (-product).to_bits(),
+                    vfp_mul_exception_flags_f32(lhs, rhs, product),
+                )
+            }
+            Self::Add => {
+                let result = lhs + rhs;
+                (
+                    result.to_bits(),
+                    vfp_add_exception_flags_f32(lhs, rhs, result),
+                )
+            }
+            Self::Sub => {
+                let result = lhs - rhs;
+                (
+                    result.to_bits(),
+                    vfp_sub_exception_flags_f32(lhs, rhs, result),
+                )
+            }
+            Self::Div => {
+                let result = lhs / rhs;
+                (
+                    result.to_bits(),
+                    vfp_div_exception_flags_f32(lhs, rhs, result),
+                )
+            }
         }
     }
 
@@ -3048,13 +3099,6 @@ impl VfpBinaryOp {
         }
     }
 
-    fn exception_flags_f32(self, lhs: f32, rhs: f32) -> u32 {
-        match self {
-            Self::Div => vfp_div_exception_flags_f32(lhs, rhs),
-            _ => 0,
-        }
-    }
-
     fn exception_flags_f64(self, lhs: f64, rhs: f64) -> u32 {
         match self {
             Self::Div => vfp_div_exception_flags_f64(lhs, rhs),
@@ -3065,8 +3109,9 @@ impl VfpBinaryOp {
 
 fn vfp_sqrt_f32(value: u32) -> (u32, u32) {
     let value = f32::from_bits(value);
-    let flags = if value < 0.0 { FPSCR_IOC } else { 0 };
-    (value.sqrt().to_bits(), flags)
+    let result = value.sqrt();
+    let flags = vfp_sqrt_exception_flags_f32(value, result);
+    (result.to_bits(), flags)
 }
 
 fn vfp_sqrt_f64(value: u64) -> (u64, u32) {
@@ -3075,18 +3120,102 @@ fn vfp_sqrt_f64(value: u64) -> (u64, u32) {
     (value.sqrt().to_bits(), flags)
 }
 
-fn vfp_div_exception_flags_f32(lhs: f32, rhs: f32) -> u32 {
-    if rhs == 0.0 {
-        if lhs == 0.0 {
-            FPSCR_IOC
-        } else if lhs.is_finite() {
-            FPSCR_DZC
-        } else {
-            0
-        }
+fn vfp_add_exception_flags_f32(lhs: f32, rhs: f32, result: f32) -> u32 {
+    if f32_is_signaling_nan_bits(lhs.to_bits())
+        || f32_is_signaling_nan_bits(rhs.to_bits())
+        || (lhs.is_infinite()
+            && rhs.is_infinite()
+            && lhs.is_sign_positive() != rhs.is_sign_positive())
+    {
+        return FPSCR_IOC;
+    }
+
+    if lhs.is_finite() && rhs.is_finite() {
+        vfp_rounded_f32_exception_flags(result, f64::from(lhs) + f64::from(rhs))
     } else {
         0
     }
+}
+
+fn vfp_sub_exception_flags_f32(lhs: f32, rhs: f32, result: f32) -> u32 {
+    if f32_is_signaling_nan_bits(lhs.to_bits())
+        || f32_is_signaling_nan_bits(rhs.to_bits())
+        || (lhs.is_infinite()
+            && rhs.is_infinite()
+            && lhs.is_sign_positive() == rhs.is_sign_positive())
+    {
+        return FPSCR_IOC;
+    }
+
+    if lhs.is_finite() && rhs.is_finite() {
+        vfp_rounded_f32_exception_flags(result, f64::from(lhs) - f64::from(rhs))
+    } else {
+        0
+    }
+}
+
+fn vfp_mul_exception_flags_f32(lhs: f32, rhs: f32, result: f32) -> u32 {
+    if f32_is_signaling_nan_bits(lhs.to_bits())
+        || f32_is_signaling_nan_bits(rhs.to_bits())
+        || ((lhs == 0.0 && rhs.is_infinite()) || (rhs == 0.0 && lhs.is_infinite()))
+    {
+        return FPSCR_IOC;
+    }
+
+    if lhs.is_finite() && rhs.is_finite() {
+        vfp_rounded_f32_exception_flags(result, f64::from(lhs) * f64::from(rhs))
+    } else {
+        0
+    }
+}
+
+fn vfp_div_exception_flags_f32(lhs: f32, rhs: f32, result: f32) -> u32 {
+    if f32_is_signaling_nan_bits(lhs.to_bits())
+        || f32_is_signaling_nan_bits(rhs.to_bits())
+        || ((lhs == 0.0 && rhs == 0.0) || (lhs.is_infinite() && rhs.is_infinite()))
+    {
+        return FPSCR_IOC;
+    }
+
+    if rhs == 0.0 {
+        if lhs.is_finite() { FPSCR_DZC } else { 0 }
+    } else if lhs.is_finite() && rhs.is_finite() {
+        vfp_rounded_f32_exception_flags(result, f64::from(lhs) / f64::from(rhs))
+    } else {
+        0
+    }
+}
+
+fn vfp_sqrt_exception_flags_f32(value: f32, result: f32) -> u32 {
+    if f32_is_signaling_nan_bits(value.to_bits()) || value < 0.0 {
+        return FPSCR_IOC;
+    }
+
+    if value.is_finite() {
+        vfp_rounded_f32_exception_flags(result, f64::from(value).sqrt())
+    } else {
+        0
+    }
+}
+
+fn vfp_rounded_f32_exception_flags(result: f32, exact: f64) -> u32 {
+    if !exact.is_finite() {
+        return 0;
+    }
+
+    if result.is_infinite() {
+        return FPSCR_OFC | FPSCR_IXC;
+    }
+
+    if f64::from(result) == exact {
+        return 0;
+    }
+
+    let mut flags = FPSCR_IXC;
+    if result == 0.0 || result.is_subnormal() {
+        flags |= FPSCR_UFC;
+    }
+    flags
 }
 
 fn vfp_div_exception_flags_f64(lhs: f64, rhs: f64) -> u32 {
@@ -5439,6 +5568,66 @@ mod tests {
         cpu.set_dreg(1, 0.0f64.to_bits());
         cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
         assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_IOC);
+    }
+
+    #[test]
+    fn vfpv2_single_arithmetic_exception_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+        let mask = FPSCR_IOC | FPSCR_DZC | FPSCR_OFC | FPSCR_UFC | FPSCR_IXC;
+
+        cpu.set_sreg(0, 1.0f32.to_bits());
+        cpu.set_sreg(1, (2.0f32).powi(-25).to_bits());
+        cpu.execute_arm(0xee30_1a20, 0, &mut mem).unwrap(); // vadd.f32 s2, s0, s1
+        assert_eq!(f32::from_bits(cpu.sreg(2)), 1.0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, f32::MAX.to_bits());
+        cpu.set_sreg(1, 2.0f32.to_bits());
+        cpu.execute_arm(0xee20_1a20, 0, &mut mem).unwrap(); // vmul.f32 s2, s0, s1
+        assert_eq!(f32::from_bits(cpu.sreg(2)), f32::INFINITY);
+        assert_eq!(cpu.fpscr & mask, FPSCR_OFC | FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, f32::MIN_POSITIVE.to_bits());
+        cpu.set_sreg(1, 0.5f32.to_bits());
+        cpu.execute_arm(0xee20_1a20, 0, &mut mem).unwrap(); // vmul.f32 s2, s0, s1
+        assert_eq!(cpu.sreg(2), 0x0040_0000);
+        assert_eq!(cpu.fpscr & mask, 0);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 1);
+        cpu.set_sreg(1, 0.5f32.to_bits());
+        cpu.execute_arm(0xee20_1a20, 0, &mut mem).unwrap(); // vmul.f32 s2, s0, s1
+        assert_eq!(cpu.sreg(2), 0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_UFC | FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 1.0f32.to_bits());
+        cpu.set_sreg(1, 3.0f32.to_bits());
+        cpu.execute_arm(0xee80_1a20, 0, &mut mem).unwrap(); // vdiv.f32 s2, s0, s1
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(16, 2.0f32.to_bits());
+        cpu.execute_arm(0xeef1_7ac8, 0, &mut mem).unwrap(); // vsqrt.f32 s15, s16
+        assert_eq!(f32::from_bits(cpu.sreg(15)), 2.0f32.sqrt());
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, f32::INFINITY.to_bits());
+        cpu.set_sreg(1, f32::NEG_INFINITY.to_bits());
+        cpu.execute_arm(0xee30_1a20, 0, &mut mem).unwrap(); // vadd.f32 s2, s0, s1
+        assert_eq!(cpu.fpscr & mask, FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 1.0f32.to_bits());
+        cpu.set_sreg(1, 1.0f32.to_bits());
+        cpu.set_sreg(2, (2.0f32).powi(-25).to_bits());
+        cpu.execute_arm(0xee00_0a81, 0, &mut mem).unwrap(); // vmla.f32 s0, s1, s2
+        assert_eq!(f32::from_bits(cpu.sreg(0)), 1.0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
     }
 
     #[test]
