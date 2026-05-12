@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 36 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 37 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -78,6 +78,8 @@ Result: passing, with 36 unit tests, 36 QEMU oracle tests, and doc tests.
 - ARMv6 dual 16-bit DSP multiply now has QEMU oracle matrix coverage for
   `SMLAD{X}`, `SMLSD{X}`, `SMUAD{X}`, `SMUSD{X}`, `SMLALD{X}`, and
   `SMLSLD{X}` variants
+- ARMv6 high-word signed multiply now has QEMU oracle matrix coverage for
+  `SMMUL`, `SMMULR`, `SMMLA`, `SMMLAR`, `SMMLS`, and `SMMLSR`
 - ARMv6 sum-of-absolute-differences has QEMU oracle coverage for both `USAD8`
   and `USADA8`
 - ARMv6 extension, packing, selection, reversal, saturation, parallel add/sub,
