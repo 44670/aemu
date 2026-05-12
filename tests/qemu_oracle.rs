@@ -82,6 +82,25 @@ fn arm_signed_halfword_instr(
         | rm as u32
 }
 
+fn arm_dual16_multiply_instr(
+    long: bool,
+    subtract: bool,
+    exchange: bool,
+    rd_or_hi: usize,
+    ra_or_lo: usize,
+    rm: usize,
+    rn: usize,
+) -> u32 {
+    0xe700_0010
+        | (u32::from(long) << 22)
+        | ((rd_or_hi as u32) << 16)
+        | ((ra_or_lo as u32) << 12)
+        | ((rm as u32) << 8)
+        | (u32::from(subtract) << 6)
+        | (u32::from(exchange) << 5)
+        | rn as u32
+}
+
 #[test]
 fn qemu_oracle_usad8_matches_interpreter() {
     let asm = oracle_program(
@@ -281,6 +300,102 @@ fn qemu_oracle_smlad_matches_interpreter() {
     cpu.set_reg(2, 0x0005_0007);
     cpu.set_reg(3, 10);
     cpu.execute_arm(0xe700_3211, 0, &mut mem).unwrap();
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_dual16_dsp_multiply_matrix_matches_interpreter() {
+    const WORD_CASES: &[(&str, bool, bool, bool)] = &[
+        ("smlad", false, false, true),
+        ("smladx", false, true, true),
+        ("smlsd", true, false, true),
+        ("smlsdx", true, true, true),
+        ("smuad", false, false, false),
+        ("smuadx", false, true, false),
+        ("smusd", true, false, false),
+        ("smusdx", true, true, false),
+    ];
+    const LONG_CASES: &[(&str, bool, bool)] = &[
+        ("smlald", false, false),
+        ("smlaldx", false, true),
+        ("smlsld", true, false),
+        ("smlsldx", true, true),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (idx, (mnemonic, _, _, accumulate)) in WORD_CASES.iter().enumerate() {
+        let rn = 0x0003_fffeu32.rotate_left(idx as u32 * 3);
+        let rm = 0x7ffd_0004u32.rotate_right(idx as u32 * 5);
+        let ra = 0x0100_0000u32.wrapping_add(idx as u32 * 23);
+        body.push_str(&format!(
+            "ldr r1, ={rn:#010x}\n\
+             ldr r2, ={rm:#010x}\n"
+        ));
+        if *accumulate {
+            body.push_str(&format!(
+                "ldr r3, ={ra:#010x}\n\
+                 {mnemonic} r0, r1, r2, r3\n"
+            ));
+        } else {
+            body.push_str(&format!("{mnemonic} r0, r1, r2\n"));
+        }
+        body.push_str("eor r12, r12, r0\n");
+    }
+    for (idx, (mnemonic, _, _)) in LONG_CASES.iter().enumerate() {
+        let rn = 0x8001_7fffu32.rotate_left(idx as u32 * 4);
+        let rm = 0xfffd_0002u32.rotate_right(idx as u32 * 6);
+        let lo = 0x0000_0100u32.wrapping_add(idx as u32 * 3);
+        let hi = 0xffff_fffeu32.wrapping_sub(idx as u32);
+        body.push_str(&format!(
+            "ldr r4, ={lo:#010x}\n\
+             ldr r5, ={hi:#010x}\n\
+             ldr r1, ={rn:#010x}\n\
+             ldr r2, ={rm:#010x}\n\
+             {mnemonic} r4, r5, r1, r2\n\
+             eor r12, r12, r4\n\
+             eor r12, r12, r5\n"
+        ));
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (idx, (_, subtract, exchange, accumulate)) in WORD_CASES.iter().enumerate() {
+        cpu.set_reg(1, 0x0003_fffeu32.rotate_left(idx as u32 * 3));
+        cpu.set_reg(2, 0x7ffd_0004u32.rotate_right(idx as u32 * 5));
+        let ra = if *accumulate { 3 } else { 15 };
+        if *accumulate {
+            cpu.set_reg(3, 0x0100_0000u32.wrapping_add(idx as u32 * 23));
+        }
+        cpu.execute_arm(
+            arm_dual16_multiply_instr(false, *subtract, *exchange, 0, ra, 2, 1),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(0);
+    }
+    for (idx, (_, subtract, exchange)) in LONG_CASES.iter().enumerate() {
+        cpu.set_reg(4, 0x0000_0100u32.wrapping_add(idx as u32 * 3));
+        cpu.set_reg(5, 0xffff_fffeu32.wrapping_sub(idx as u32));
+        cpu.set_reg(1, 0x8001_7fffu32.rotate_left(idx as u32 * 4));
+        cpu.set_reg(2, 0xfffd_0002u32.rotate_right(idx as u32 * 6));
+        cpu.execute_arm(
+            arm_dual16_multiply_instr(true, *subtract, *exchange, 5, 4, 2, 1),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(4) ^ cpu.reg(5);
+    }
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }

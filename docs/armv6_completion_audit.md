@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 34 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 35 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -75,6 +75,9 @@ Result: passing, with 36 unit tests, 34 QEMU oracle tests, and doc tests.
   invalid `PC` register forms
 - ARMv5TE signed halfword multiply now has QEMU oracle matrix coverage for all
   `SMLAxy`, `SMLALxy`, `SMULxy`, `SMLAWy`, and `SMULWy` variants
+- ARMv6 dual 16-bit DSP multiply now has QEMU oracle matrix coverage for
+  `SMLAD{X}`, `SMLSD{X}`, `SMUAD{X}`, `SMUSD{X}`, `SMLALD{X}`, and
+  `SMLSLD{X}` variants
 - ARMv6 extension, packing, selection, reversal, saturation, parallel add/sub,
   and absolute-difference families listed in `docs/armv6_status.md`, with
   broader QEMU oracle coverage across representative signed, unsigned,
