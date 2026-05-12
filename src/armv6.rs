@@ -694,53 +694,73 @@ impl Cpu {
             0x0ebd_0ac0 => {
                 let sd = vfp_single_d(instr);
                 let sm = vfp_single_m(instr);
-                self.sregs[sd] = (f32::from_bits(self.sregs[sm]) as i32) as u32;
+                let (result, exception_flags) =
+                    vfp_trunc_to_i32_bits(f64::from(f32::from_bits(self.sregs[sm])));
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebd_0a40 => {
                 let sd = vfp_single_d(instr);
                 let sm = vfp_single_m(instr);
-                self.sregs[sd] =
+                let (result, exception_flags) =
                     vfp_round_to_i32_bits(f64::from(f32::from_bits(self.sregs[sm])), self.fpscr);
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebc_0ac0 => {
                 let sd = vfp_single_d(instr);
                 let sm = vfp_single_m(instr);
-                self.sregs[sd] = f32::from_bits(self.sregs[sm]) as u32;
+                let (result, exception_flags) =
+                    vfp_trunc_to_u32_bits(f64::from(f32::from_bits(self.sregs[sm])));
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebc_0a40 => {
                 let sd = vfp_single_d(instr);
                 let sm = vfp_single_m(instr);
-                self.sregs[sd] =
+                let (result, exception_flags) =
                     vfp_round_to_u32_bits(f64::from(f32::from_bits(self.sregs[sm])), self.fpscr);
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebd_0bc0 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] = (f64::from_bits(self.checked_dreg_bits(dm)?) as i32) as u32;
+                let (result, exception_flags) =
+                    vfp_trunc_to_i32_bits(f64::from_bits(self.checked_dreg_bits(dm)?));
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebd_0b40 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] =
+                let (result, exception_flags) =
                     vfp_round_to_i32_bits(f64::from_bits(self.checked_dreg_bits(dm)?), self.fpscr);
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebc_0bc0 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] = f64::from_bits(self.checked_dreg_bits(dm)?) as u32;
+                let (result, exception_flags) =
+                    vfp_trunc_to_u32_bits(f64::from_bits(self.checked_dreg_bits(dm)?));
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebc_0b40 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] =
+                let (result, exception_flags) =
                     vfp_round_to_u32_bits(f64::from_bits(self.checked_dreg_bits(dm)?), self.fpscr);
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0eb8_0ac0 => {
@@ -3058,12 +3078,44 @@ fn vfp_div_exception_flags_f64(lhs: f64, rhs: f64) -> u32 {
     }
 }
 
-fn vfp_round_to_i32_bits(value: f64, fpscr: u32) -> u32 {
-    vfp_round_by_fpscr(value, fpscr) as i32 as u32
+fn vfp_trunc_to_i32_bits(value: f64) -> (u32, u32) {
+    vfp_i32_result_bits(value.trunc())
 }
 
-fn vfp_round_to_u32_bits(value: f64, fpscr: u32) -> u32 {
-    vfp_round_by_fpscr(value, fpscr) as u32
+fn vfp_round_to_i32_bits(value: f64, fpscr: u32) -> (u32, u32) {
+    vfp_i32_result_bits(vfp_round_by_fpscr(value, fpscr))
+}
+
+fn vfp_trunc_to_u32_bits(value: f64) -> (u32, u32) {
+    vfp_u32_result_bits(value.trunc())
+}
+
+fn vfp_round_to_u32_bits(value: f64, fpscr: u32) -> (u32, u32) {
+    vfp_u32_result_bits(vfp_round_by_fpscr(value, fpscr))
+}
+
+fn vfp_i32_result_bits(rounded: f64) -> (u32, u32) {
+    if rounded.is_nan() {
+        (0, FPSCR_IOC)
+    } else if rounded > f64::from(i32::MAX) {
+        (i32::MAX as u32, FPSCR_IOC)
+    } else if rounded < f64::from(i32::MIN) {
+        (i32::MIN as u32, FPSCR_IOC)
+    } else {
+        (rounded as i32 as u32, 0)
+    }
+}
+
+fn vfp_u32_result_bits(rounded: f64) -> (u32, u32) {
+    if rounded.is_nan() {
+        (0, FPSCR_IOC)
+    } else if rounded < 0.0 {
+        (0, FPSCR_IOC)
+    } else if rounded > f64::from(u32::MAX) {
+        (u32::MAX, FPSCR_IOC)
+    } else {
+        (rounded as u32, 0)
+    }
 }
 
 fn vfp_round_by_fpscr(value: f64, fpscr: u32) -> f64 {
@@ -5305,6 +5357,48 @@ mod tests {
         cpu.set_dreg(1, 0.0f64.to_bits());
         cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
         assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_IOC);
+    }
+
+    #[test]
+    fn vfpv2_conversion_invalid_flags_and_saturation() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_sreg(0, f32::NAN.to_bits());
+        cpu.execute_arm(0xeefd_0ac0, 0, &mut mem).unwrap(); // vcvt.s32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, (-1.0f32).to_bits());
+        cpu.execute_arm(0xeefc_0ac0, 0, &mut mem).unwrap(); // vcvt.u32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 2_147_483_648.0f32.to_bits());
+        cpu.execute_arm(0xeefd_0ac0, 0, &mut mem).unwrap(); // vcvt.s32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), i32::MAX as u32);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::NEG_INFINITY.to_bits());
+        cpu.execute_arm(0xeefd_0bc0, 0, &mut mem).unwrap(); // vcvt.s32.f64 s1, d0
+        assert_eq!(cpu.sreg(1), i32::MIN as u32);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::NAN.to_bits());
+        cpu.execute_arm(0xeefc_0bc0, 0, &mut mem).unwrap(); // vcvt.u32.f64 s1, d0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+
+        cpu.set_reg(2, 2 << 22); // Round toward minus infinity.
+        cpu.execute_arm(0xeee1_2a10, 0, &mut mem).unwrap(); // vmsr fpscr, r2
+        cpu.set_sreg(0, (-0.25f32).to_bits());
+        cpu.execute_arm(0xeefc_0a40, 0, &mut mem).unwrap(); // vcvtr.u32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
     }
 
     #[test]

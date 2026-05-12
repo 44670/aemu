@@ -83,9 +83,11 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - FPSCR VFP short-vector `LEN`/`STRIDE` support for vectorizable VFPv2
   arithmetic and unary operations, including scalar destination/source-bank
   handling and invalid vector length/stride traps
-- Basic cumulative FPSCR exception flags for VFPv2 divide-by-zero and invalid
-  square-root/divide cases: `DZC` for finite nonzero divide by zero and `IOC`
-  for negative square root or zero divided by zero
+- Basic cumulative FPSCR exception flags for VFPv2 divide-by-zero, invalid
+  square-root/divide, and invalid float-to-integer conversions: `DZC` for
+  finite nonzero divide by zero and `IOC` for negative square root, zero
+  divided by zero, NaN conversion, out-of-range conversion, and negative
+  unsigned conversion
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
   privileged traps for user-mode `FPEXC`/`FPINST` accesses; compare remains
@@ -116,9 +118,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   multiply, and absolute-difference cases has not been audited
   instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags remain incomplete
-  beyond basic `IOC`/`DZC` divide and square-root cases, and several less
-  common edge cases still need an instruction-by-instruction audit. VFPv3
-  fixed-point conversions are outside the ARMv6/VFPv2 baseline.
+  beyond basic `IOC`/`DZC` divide, square-root, and conversion invalid cases,
+  and several less common edge cases still need an instruction-by-instruction
+  audit. VFPv3 fixed-point conversions are outside the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.
 - Thumb-2 is intentionally not implemented for the ARMv6 baseline, but
