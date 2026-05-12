@@ -1781,6 +1781,16 @@ impl Cpu {
         let set_flags = instr & (1 << 20) != 0;
         let rn = ((instr >> 16) & 0xf) as usize;
         let rd = ((instr >> 12) & 0xf) as usize;
+        if !immediate && instr & (1 << 4) != 0 {
+            let rm = (instr & 0xf) as usize;
+            let rs = ((instr >> 8) & 0xf) as usize;
+            let write_result = !matches!(opcode, 0x8..=0xb);
+            if rn == 15 || rm == 15 || rs == 15 || (write_result && rd == 15) {
+                return Err(Trap::Unpredictable(
+                    "data-processing register shift with PC register",
+                ));
+            }
+        }
         let lhs = self.arm_read_reg(rn, pc);
         let shifted = if immediate {
             let (value, carry) = arm_expand_imm(instr & 0xfff);
@@ -3145,6 +3155,24 @@ mod tests {
             | reglist
     }
 
+    fn arm_data_processing_register_shift(
+        opcode: u32,
+        set_flags: bool,
+        rn: usize,
+        rd: usize,
+        rm: usize,
+        rs: usize,
+    ) -> u32 {
+        0xe000_0000
+            | ((opcode & 0xf) << 21)
+            | enc_bit(set_flags, 20)
+            | ((rn as u32) << 16)
+            | ((rd as u32) << 12)
+            | ((rs as u32) << 8)
+            | 0x10
+            | (rm as u32)
+    }
+
     #[test]
     fn arm_data_processing_function() {
         let mut cpu = Cpu::new();
@@ -3474,6 +3502,83 @@ mod tests {
         assert_eq!(cpu.reg(3), u32::MAX);
         assert!(!cpu.cpsr.c);
         assert!(cpu.cpsr.n);
+    }
+
+    #[test]
+    fn arm_data_processing_register_shift_traps_pc_forms() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 3);
+        cpu.set_reg(3, 4);
+        cpu.execute_arm(
+            arm_data_processing_register_shift(0x4, false, 1, 0, 2, 3),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // add r0, r1, r2, lsl r3
+        assert_eq!(cpu.reg(0), 49);
+
+        let err = cpu
+            .execute_arm(
+                arm_data_processing_register_shift(0x4, false, 15, 0, 2, 3),
+                0,
+                &mut mem,
+            )
+            .unwrap_err(); // add r0, pc, r2, lsl r3
+        assert_eq!(
+            err,
+            Trap::Unpredictable("data-processing register shift with PC register")
+        );
+
+        let err = cpu
+            .execute_arm(
+                arm_data_processing_register_shift(0x4, false, 1, 0, 15, 3),
+                0,
+                &mut mem,
+            )
+            .unwrap_err(); // add r0, r1, pc, lsl r3
+        assert_eq!(
+            err,
+            Trap::Unpredictable("data-processing register shift with PC register")
+        );
+
+        let err = cpu
+            .execute_arm(
+                arm_data_processing_register_shift(0x4, false, 1, 0, 2, 15),
+                0,
+                &mut mem,
+            )
+            .unwrap_err(); // add r0, r1, r2, lsl pc
+        assert_eq!(
+            err,
+            Trap::Unpredictable("data-processing register shift with PC register")
+        );
+
+        let err = cpu
+            .execute_arm(
+                arm_data_processing_register_shift(0x4, false, 1, 15, 2, 3),
+                0,
+                &mut mem,
+            )
+            .unwrap_err(); // add pc, r1, r2, lsl r3
+        assert_eq!(
+            err,
+            Trap::Unpredictable("data-processing register shift with PC register")
+        );
+
+        let err = cpu
+            .execute_arm(
+                arm_data_processing_register_shift(0xa, true, 15, 0, 2, 3),
+                0,
+                &mut mem,
+            )
+            .unwrap_err(); // cmp pc, r2, lsl r3
+        assert_eq!(
+            err,
+            Trap::Unpredictable("data-processing register shift with PC register")
+        );
     }
 
     #[test]

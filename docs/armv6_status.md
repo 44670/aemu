@@ -13,6 +13,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   writes to `PC`
 - ARM data processing: `AND`, `EOR`, `SUB`, `RSB`, `ADD`, `ADC`, `SBC`,
   `RSC`, `TST`, `TEQ`, `CMP`, `CMN`, `ORR`, `MOV`, `BIC`, `MVN`
+- Explicit unpredictable traps for data-processing register-shifted-register
+  forms that use `PC` as an operand, shift register, or destination
 - ARM multiply: `MUL`, `MLA`, `UMULL`, `UMLAL`, `SMULL`, `SMLAL`
 - ARMv5TE signed halfword multiply/accumulate: `SMLAxy`, `SMLALxy`,
   `SMULxy`, `SMLAWy`, `SMULWy`

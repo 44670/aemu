@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 30 unit tests, 32 QEMU oracle tests, and doc tests.
+Result: passing, with 31 unit tests, 32 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -55,6 +55,8 @@ Result: passing, with 30 unit tests, 32 QEMU oracle tests, and doc tests.
 - Thumb high-register `MOV PC, Rm` and `ADD PC, Rm` branch-exchange
   interworking
 - ARM/Thumb core ALU, shifts, compares, flag-setting, and common load/store
+- ARM data-processing register-shifted-register invalid `PC` forms trap
+  explicitly
 - ARM halfword/signed/doubleword transfers: `LDRH`, `STRH`, `LDRSB`, `LDRSH`,
   `LDRD`, `STRD`
 - ARM/Thumb block transfer basics, including explicit traps for empty
