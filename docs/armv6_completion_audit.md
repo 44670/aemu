@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 72 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 73 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -109,6 +109,8 @@ Result: passing, with 36 unit tests, 72 QEMU oracle tests, and doc tests.
 - Thumb load/store forms now have QEMU oracle matrix coverage for immediate
   word/byte/halfword transfers, register-offset word/byte/halfword/signed
   transfers, and SP-relative transfers
+- Thumb `POP {pc}` interworking now has QEMU oracle coverage for loading an
+  ARM target address from the stack
 - Thumb-1 invalid high-register `ADD/CMP`, empty `PUSH/POP`, and `STMIA`
   base-in-list forms trap explicitly
 - ARMv5TE and ARMv6 multiply/DSP families listed in `docs/armv6_status.md`,

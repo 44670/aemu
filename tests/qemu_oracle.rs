@@ -4216,6 +4216,48 @@ fn qemu_oracle_thumb_push_pop_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb_pop_pc_interworking_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         ldr r0, =stack\n\
+         mov sp, r0\n\
+         pop {pc}\n\
+         .arm\n\
+         arm_target:\n\
+         mov r0, #0x64\n\
+         mov r7, #1\n\
+         svc #0\n\
+         .data\n\
+         .align 2\n\
+         stack: .word arm_target\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 0x200);
+    mem.store32(0x100, 0x2000).unwrap();
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    cpu.set_reg(13, 0x100);
+    cpu.execute_thumb(0xbd00, 0, &mut mem).unwrap(); // pop {pc}
+    assert_eq!(cpu.reg(13), 0x104);
+    assert!(!cpu.cpsr.t);
+    assert_eq!(cpu.pc(), 0x2000);
+    cpu.execute_arm(0xe3a0_0064, 0x2000, &mut mem).unwrap(); // mov r0, #0x64
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_thumb_ldm_base_in_list_suppresses_writeback() {
     let asm = ".syntax unified\n\
          .arch armv6\n\
