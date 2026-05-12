@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 74 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 75 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -64,6 +64,8 @@ Result: passing, with 36 unit tests, 74 QEMU oracle tests, and doc tests.
   switching to ARM state and returning to Thumb through `BX LR`
 - Thumb `BLX <reg>` interworking now has QEMU oracle coverage for register
   targets that enter ARM state and return to Thumb through `BX LR`
+- Thumb `BX <reg>` interworking now has QEMU oracle coverage for register
+  targets that enter ARM state
 - Thumb long `BL` immediate now has QEMU oracle coverage for Thumb-to-Thumb
   call/return link semantics
 - Thumb high-register `MOV PC, Rm` and `ADD PC, Rm` branch-exchange
