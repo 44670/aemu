@@ -2380,6 +2380,68 @@ fn qemu_oracle_exclusive_width_success_failure_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_condition_failed_strex_preserves_monitor() {
+    let mut body = String::from(
+        ".arch armv6k\n\
+         ldr r1, =data\n\
+         ldr r2, =0x11223344\n\
+         str r2, [r1]\n\
+         ldrex r0, [r1]\n\
+         mov r4, #0x7e\n\
+         cmp r4, #0\n\
+         ldr r3, =0xaabbccdd\n\
+         strexeq r4, r3, [r1]\n\
+         strex r5, r3, [r1]\n\
+         ldr r6, [r1]\n\
+         mov r7, #0\n",
+    );
+    let fold_reg = |body: &mut String, reg: &str| {
+        body.push_str(&format!(
+            "eor r7, r7, {reg}\n\
+             eor r7, r7, {reg}, lsr #8\n\
+             eor r7, r7, {reg}, lsr #16\n\
+             eor r7, r7, {reg}, lsr #24\n"
+        ));
+    };
+    fold_reg(&mut body, "r0");
+    fold_reg(&mut body, "r4");
+    fold_reg(&mut body, "r5");
+    fold_reg(&mut body, "r6");
+    body.push_str(
+        "mov r0, r7\n\
+         .data\n\
+         .align 2\n\
+         data: .word 0\n\
+         .text",
+    );
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x4000, 0x40);
+    let base = 0x4000;
+    mem.store32(base, 0x1122_3344).unwrap();
+
+    cpu.set_reg(1, base);
+    cpu.execute_arm(0xe191_0f9f, 0, &mut mem).unwrap(); // ldrex r0, [r1]
+    cpu.set_reg(4, 0x7e);
+    cpu.execute_arm(0xe354_0000, 0, &mut mem).unwrap(); // cmp r4, #0
+    cpu.set_reg(3, 0xaabb_ccdd);
+    cpu.execute_arm(0x0181_4f93, 0, &mut mem).unwrap(); // strexeq r4, r3, [r1]
+    cpu.execute_arm(0xe181_5f93, 0, &mut mem).unwrap(); // strex r5, r3, [r1]
+
+    let folded = byte_fold(cpu.reg(0))
+        ^ byte_fold(cpu.reg(4))
+        ^ byte_fold(cpu.reg(5))
+        ^ byte_fold(mem.load32(base).unwrap());
+
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_swap_matches_interpreter() {
     let asm = oracle_program(
         "ldr r1, =data\n\
