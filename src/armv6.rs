@@ -3290,6 +3290,7 @@ fn vfp_add_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
         FPSCR_IOC
     } else if lhs.is_finite() && rhs.is_finite() {
         vfp_overflow_exception_flags_f64(result)
+            | vfp_absorbed_add_inexact_exception_flags_f64(lhs, rhs, result)
     } else {
         0
     }
@@ -3305,6 +3306,7 @@ fn vfp_sub_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
         FPSCR_IOC
     } else if lhs.is_finite() && rhs.is_finite() {
         vfp_overflow_exception_flags_f64(result)
+            | vfp_absorbed_sub_inexact_exception_flags_f64(lhs, rhs, result)
     } else {
         0
     }
@@ -3327,6 +3329,22 @@ fn vfp_mul_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
 fn vfp_overflow_exception_flags_f64(result: f64) -> u32 {
     if result.is_infinite() {
         FPSCR_OFC | FPSCR_IXC
+    } else {
+        0
+    }
+}
+
+fn vfp_absorbed_add_inexact_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
+    if result.is_finite() && ((result == lhs && rhs != 0.0) || (result == rhs && lhs != 0.0)) {
+        FPSCR_IXC
+    } else {
+        0
+    }
+}
+
+fn vfp_absorbed_sub_inexact_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
+    if result.is_finite() && ((result == lhs && rhs != 0.0) || (result == -rhs && lhs != 0.0)) {
+        FPSCR_IXC
     } else {
         0
     }
@@ -5815,6 +5833,26 @@ mod tests {
         cpu.execute_arm(0xee07_6b08, 0, &mut mem).unwrap(); // vmla.f64 d6, d7, d8
         assert_eq!(f64::from_bits(cpu.dreg(6)), f64::INFINITY);
         assert_eq!(cpu.fpscr & mask, FPSCR_OFC | FPSCR_IXC);
+    }
+
+    #[test]
+    fn vfpv2_double_absorbed_inexact_exception_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+        let mask = FPSCR_IOC | FPSCR_DZC | FPSCR_OFC | FPSCR_UFC | FPSCR_IXC;
+
+        cpu.set_dreg(0, 1.0f64.to_bits());
+        cpu.set_dreg(1, (f64::EPSILON / 2.0).to_bits());
+        cpu.execute_arm(0xee30_2b01, 0, &mut mem).unwrap(); // vadd.f64 d2, d0, d1
+        assert_eq!(f64::from_bits(cpu.dreg(2)), 1.0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 1.0f64.to_bits());
+        cpu.set_dreg(1, (f64::EPSILON / 4.0).to_bits());
+        cpu.execute_arm(0xee30_2b41, 0, &mut mem).unwrap(); // vsub.f64 d2, d0, d1
+        assert_eq!(f64::from_bits(cpu.dreg(2)), 1.0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
     }
 
     #[test]

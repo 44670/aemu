@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 48 unit tests, 92 QEMU oracle tests, and doc tests.
+Result: passing, with 49 unit tests, 93 QEMU oracle tests, and doc tests.
 
 Additional oracle verification:
 
@@ -43,7 +43,7 @@ Additional oracle verification:
 cargo test --test qemu_oracle -- --nocapture
 ```
 
-Result: passing, with 92 QEMU oracle tests and no skip diagnostics.
+Result: passing, with 93 QEMU oracle tests and no skip diagnostics.
 
 ## Prompt-To-Artifact Checklist
 
@@ -262,6 +262,9 @@ Result: passing, with 92 QEMU oracle tests and no skip diagnostics.
   zero-result underflow multiply, divide, and multiply-accumulate cases, while
   exact subnormal multiplication remains flag-clean, with direct unit and QEMU
   oracle coverage
+- VFPv2 double-precision add/sub now sets cumulative `IXC` for selected cases
+  where a nonzero operand is rounded away, with direct unit and QEMU oracle
+  coverage
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user
@@ -282,10 +285,11 @@ Result: passing, with 92 QEMU oracle tests and no skip diagnostics.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
   divide/square-root/compare-NaN/conversion-invalid cases, selected
   single-precision arithmetic flags, selected double invalid/overflow
-  arithmetic flags, and basic conversion `IXC`/`OFC`/`UFC`; double-precision
-  subnormal-underflow/general inexact behavior, broader NaN propagation, and
-  broader conversion exception behavior remain simplified or missing. VFPv3
-  fixed-point conversions remain outside the ARMv6/VFPv2 baseline.
+  arithmetic flags, selected double absorbed-operand `IXC`, and basic
+  conversion `IXC`/`OFC`/`UFC`; double-precision subnormal-underflow/broader
+  general inexact behavior, broader NaN propagation, and broader conversion
+  exception behavior remain simplified or missing. VFPv3 fixed-point
+  conversions remain outside the ARMv6/VFPv2 baseline.
 - The exclusive monitor remains a single-core approximation and does not model
   multiprocessor/global monitor effects.
 - Unpredictable cases are only partially checked; many are simplified to keep
