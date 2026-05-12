@@ -2933,6 +2933,18 @@ impl VecMemory {
         }
     }
 
+    pub fn base(&self) -> u32 {
+        self.base
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     pub fn load_bytes(&mut self, addr: u32, bytes: &[u8]) -> Result<()> {
         for (idx, byte) in bytes.iter().copied().enumerate() {
             self.store8(addr.wrapping_add(idx as u32), byte)?;
