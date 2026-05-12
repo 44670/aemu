@@ -28,11 +28,23 @@ const DT_INIT_ARRAYSZ: u32 = 27;
 pub struct ElfDynamicInfo {
     pub path: PathBuf,
     pub needed: Vec<String>,
+    pub symbols: Vec<ElfDynamicSymbol>,
     pub imports: Vec<ElfImport>,
     pub dynsym: Option<ElfSymbolTableInfo>,
     pub relocations: ElfRelocationInfo,
+    pub relocation_entries: Vec<ElfRelocation>,
     pub init: Option<u32>,
     pub init_array: Option<ElfTableRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElfDynamicSymbol {
+    pub name: Option<String>,
+    pub value: u32,
+    pub size: u32,
+    pub binding: SymbolBinding,
+    pub kind: SymbolKind,
+    pub shndx: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +138,50 @@ impl fmt::Display for PltRelKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElfRelocation {
+    pub table: RelocationTable,
+    pub offset: u32,
+    pub kind: ArmRelocationKind,
+    pub symbol_index: u32,
+    pub symbol_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocationTable {
+    Rel,
+    PltRel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmRelocationKind {
+    Abs32,
+    Rel32,
+    Copy,
+    GlobDat,
+    JumpSlot,
+    Relative,
+    Target1,
+    V4Bx,
+    Other(u8),
+}
+
+impl fmt::Display for ArmRelocationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Abs32 => write!(f, "R_ARM_ABS32"),
+            Self::Rel32 => write!(f, "R_ARM_REL32"),
+            Self::Copy => write!(f, "R_ARM_COPY"),
+            Self::GlobDat => write!(f, "R_ARM_GLOB_DAT"),
+            Self::JumpSlot => write!(f, "R_ARM_JUMP_SLOT"),
+            Self::Relative => write!(f, "R_ARM_RELATIVE"),
+            Self::Target1 => write!(f, "R_ARM_TARGET1"),
+            Self::V4Bx => write!(f, "R_ARM_V4BX"),
+            Self::Other(value) => write!(f, "R_ARM_{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElfDynamicError {
     NotElf,
     UnsupportedClass(u8),
@@ -135,6 +191,7 @@ pub enum ElfDynamicError {
     BadProgramHeader,
     BadSectionHeader,
     BadDynamicTable,
+    BadRelocationTable,
     BadStringTable,
 }
 
@@ -151,6 +208,7 @@ impl fmt::Display for ElfDynamicError {
             Self::BadProgramHeader => write!(f, "bad ELF program header table"),
             Self::BadSectionHeader => write!(f, "bad ELF section header table"),
             Self::BadDynamicTable => write!(f, "bad ELF dynamic table"),
+            Self::BadRelocationTable => write!(f, "bad ELF relocation table"),
             Self::BadStringTable => write!(f, "bad ELF string table"),
         }
     }
@@ -167,17 +225,21 @@ pub fn parse_elf_dynamic_bytes(
     let sections = parse_section_headers(bytes, &header)?;
     let dynamics = parse_dynamic_entries(bytes, &programs)?;
     let needed = parse_needed(bytes, &programs, &dynamics)?;
-    let imports = parse_imports(bytes, &sections)?;
+    let symbols = parse_dyn_symbols(bytes, &sections)?;
+    let imports = parse_imports(&symbols);
+    let relocation_entries = parse_relocation_entries(bytes, &programs, &dynamics, &symbols)?;
 
     Ok(ElfDynamicInfo {
         path,
         needed,
+        symbols,
         imports,
         dynsym: dynamic_value(&dynamics, DT_SYMTAB).map(|addr| ElfSymbolTableInfo {
             addr,
             entry_size: dynamic_value(&dynamics, DT_SYMENT),
         }),
         relocations: parse_relocation_info(&dynamics),
+        relocation_entries,
         init: dynamic_value(&dynamics, DT_INIT),
         init_array: match (
             dynamic_value(&dynamics, DT_INIT_ARRAY),
@@ -374,11 +436,11 @@ fn parse_needed(
     Ok(needed)
 }
 
-fn parse_imports(
+fn parse_dyn_symbols(
     bytes: &[u8],
     sections: &[SectionHeader],
-) -> Result<Vec<ElfImport>, ElfDynamicError> {
-    let mut imports = Vec::new();
+) -> Result<Vec<ElfDynamicSymbol>, ElfDynamicError> {
+    let mut symbols_out = Vec::new();
     for section in sections
         .iter()
         .filter(|section| section.sh_type == SHT_DYNSYM)
@@ -403,26 +465,50 @@ fn parse_imports(
         for idx in 0..count {
             let off = idx * entsize as usize;
             let name_off = le_u32(symbols, off)? as usize;
+            let value = le_u32(symbols, off + 4)?;
+            let size = le_u32(symbols, off + 8)?;
             let info = symbols
                 .get(off + 12)
                 .copied()
                 .ok_or(ElfDynamicError::Truncated("dynamic symbol"))?;
             let shndx = le_u16(symbols, off + 14)?;
-            if shndx != SHN_UNDEF || name_off == 0 {
-                continue;
-            }
-            let name = read_string(strings, name_off)?;
-            if name.is_empty() {
-                continue;
-            }
-            imports.push(ElfImport {
+            let name = if name_off == 0 {
+                None
+            } else {
+                Some(read_string(strings, name_off)?)
+            };
+            symbols_out.push(ElfDynamicSymbol {
                 name,
+                value,
+                size,
                 binding: SymbolBinding::from(info >> 4),
                 kind: SymbolKind::from(info & 0xf),
+                shndx,
             });
         }
     }
-    Ok(imports)
+    Ok(symbols_out)
+}
+
+fn parse_imports(symbols: &[ElfDynamicSymbol]) -> Vec<ElfImport> {
+    let mut imports = Vec::new();
+    for symbol in symbols {
+        if symbol.shndx != SHN_UNDEF {
+            continue;
+        }
+        let Some(name) = &symbol.name else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        imports.push(ElfImport {
+            name: name.clone(),
+            binding: symbol.binding,
+            kind: symbol.kind,
+        });
+    }
+    imports
 }
 
 fn parse_relocation_info(dynamics: &[DynamicEntry]) -> ElfRelocationInfo {
@@ -446,6 +532,72 @@ fn parse_relocation_info(dynamics: &[DynamicEntry]) -> ElfRelocationInfo {
         plt_rel,
         plt_rel_kind: dynamic_value(dynamics, DT_PLTREL).map(PltRelKind::from),
     }
+}
+
+fn parse_relocation_entries(
+    bytes: &[u8],
+    programs: &[ProgramHeader],
+    dynamics: &[DynamicEntry],
+    symbols: &[ElfDynamicSymbol],
+) -> Result<Vec<ElfRelocation>, ElfDynamicError> {
+    let info = parse_relocation_info(dynamics);
+    let mut entries = Vec::new();
+    if let Some(range) = info.rel {
+        parse_rel_table(
+            bytes,
+            programs,
+            range,
+            RelocationTable::Rel,
+            symbols,
+            &mut entries,
+        )?;
+    }
+    if let Some(range) = info.plt_rel {
+        if matches!(info.plt_rel_kind, None | Some(PltRelKind::Rel)) {
+            parse_rel_table(
+                bytes,
+                programs,
+                range,
+                RelocationTable::PltRel,
+                symbols,
+                &mut entries,
+            )?;
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_rel_table(
+    bytes: &[u8],
+    programs: &[ProgramHeader],
+    range: ElfTableRange,
+    table: RelocationTable,
+    symbols: &[ElfDynamicSymbol],
+    out: &mut Vec<ElfRelocation>,
+) -> Result<(), ElfDynamicError> {
+    if range.size % 8 != 0 {
+        return Err(ElfDynamicError::BadRelocationTable);
+    }
+    let Some(file_off) = virtual_to_file_offset(programs, range.addr) else {
+        return Err(ElfDynamicError::BadRelocationTable);
+    };
+    let rels = bounded_bytes(bytes, file_off, range.size)?;
+    for chunk in rels.chunks_exact(8) {
+        let offset = le_u32(chunk, 0)?;
+        let info = le_u32(chunk, 4)?;
+        let symbol_index = info >> 8;
+        let symbol_name = symbols
+            .get(symbol_index as usize)
+            .and_then(|symbol| symbol.name.clone());
+        out.push(ElfRelocation {
+            table,
+            offset,
+            kind: ArmRelocationKind::from((info & 0xff) as u8),
+            symbol_index,
+            symbol_name,
+        });
+    }
+    Ok(())
 }
 
 fn dynamic_value(dynamics: &[DynamicEntry], tag: u32) -> Option<u32> {
@@ -529,6 +681,22 @@ impl From<u32> for PltRelKind {
     }
 }
 
+impl From<u8> for ArmRelocationKind {
+    fn from(value: u8) -> Self {
+        match value {
+            2 => Self::Abs32,
+            3 => Self::Rel32,
+            20 => Self::Copy,
+            21 => Self::GlobDat,
+            22 => Self::JumpSlot,
+            23 => Self::Relative,
+            38 => Self::Target1,
+            40 => Self::V4Bx,
+            other => Self::Other(other),
+        }
+    }
+}
+
 fn le_u16(bytes: &[u8], off: usize) -> Result<u16, ElfDynamicError> {
     let bytes = bytes
         .get(off..off + 2)
@@ -580,19 +748,45 @@ mod tests {
         assert_eq!(
             info.relocations.rel,
             Some(ElfTableRange {
-                addr: 0x1500,
-                size: 24
+                addr: 0x1320,
+                size: 16
             })
         );
         assert_eq!(info.relocations.rel_entry_size, Some(8));
         assert_eq!(
             info.relocations.plt_rel,
             Some(ElfTableRange {
-                addr: 0x1600,
-                size: 16
+                addr: 0x1340,
+                size: 8
             })
         );
         assert_eq!(info.relocations.plt_rel_kind, Some(PltRelKind::Rel));
+        assert_eq!(
+            info.relocation_entries,
+            vec![
+                ElfRelocation {
+                    table: RelocationTable::Rel,
+                    offset: 0x2000,
+                    kind: ArmRelocationKind::Relative,
+                    symbol_index: 0,
+                    symbol_name: None,
+                },
+                ElfRelocation {
+                    table: RelocationTable::Rel,
+                    offset: 0x2004,
+                    kind: ArmRelocationKind::GlobDat,
+                    symbol_index: 1,
+                    symbol_name: Some("puts".to_string()),
+                },
+                ElfRelocation {
+                    table: RelocationTable::PltRel,
+                    offset: 0x2010,
+                    kind: ArmRelocationKind::JumpSlot,
+                    symbol_index: 2,
+                    symbol_name: Some("glDrawArrays".to_string()),
+                },
+            ]
+        );
         assert_eq!(info.init, Some(0x1234));
         assert_eq!(
             info.init_array,
@@ -658,6 +852,11 @@ mod tests {
         let dynsym_vaddr = 0x11c0u32;
         let shstr_off = 0x220usize;
         let shoff = 0x260usize;
+        let rel_off = 0x320usize;
+        let rel_vaddr = 0x1320u32;
+        let plt_rel_off = 0x340usize;
+        let plt_rel_vaddr = 0x1340u32;
+        let file_size = 0x360usize;
 
         let mut dynstr = Vec::new();
         dynstr.push(0);
@@ -677,7 +876,7 @@ mod tests {
         let dynstr_name = push_str(&mut shstr, ".dynstr");
         let shstr_name = push_str(&mut shstr, ".shstrtab");
 
-        let mut bytes = vec![0; shoff + 4 * 40];
+        let mut bytes = vec![0; file_size];
         write_elf_header(&mut bytes, 52, 2, shoff as u32, 4);
 
         write_phdr(
@@ -686,8 +885,8 @@ mod tests {
             PT_LOAD,
             0,
             0x1000,
-            shoff as u32,
-            shoff as u32,
+            file_size as u32,
+            file_size as u32,
         );
         write_phdr(
             &mut bytes,
@@ -706,12 +905,12 @@ mod tests {
         push_dynamic(&mut dyn_entries, DT_STRSZ, dynstr.len() as u32);
         push_dynamic(&mut dyn_entries, DT_SYMTAB, dynsym_vaddr);
         push_dynamic(&mut dyn_entries, DT_SYMENT, 16);
-        push_dynamic(&mut dyn_entries, DT_REL, 0x1500);
-        push_dynamic(&mut dyn_entries, DT_RELSZ, 24);
+        push_dynamic(&mut dyn_entries, DT_REL, rel_vaddr);
+        push_dynamic(&mut dyn_entries, DT_RELSZ, 16);
         push_dynamic(&mut dyn_entries, DT_RELENT, 8);
         push_dynamic(&mut dyn_entries, DT_PLTREL, DT_REL);
-        push_dynamic(&mut dyn_entries, DT_JMPREL, 0x1600);
-        push_dynamic(&mut dyn_entries, DT_PLTRELSZ, 16);
+        push_dynamic(&mut dyn_entries, DT_JMPREL, plt_rel_vaddr);
+        push_dynamic(&mut dyn_entries, DT_PLTRELSZ, 8);
         push_dynamic(&mut dyn_entries, DT_INIT, 0x1234);
         push_dynamic(&mut dyn_entries, DT_INIT_ARRAY, 0x1700);
         push_dynamic(&mut dyn_entries, DT_INIT_ARRAYSZ, 8);
@@ -721,6 +920,9 @@ mod tests {
         bytes[dynstr_off..dynstr_off + dynstr.len()].copy_from_slice(&dynstr);
         bytes[dynsym_off..dynsym_off + dynsym.len()].copy_from_slice(&dynsym);
         bytes[shstr_off..shstr_off + shstr.len()].copy_from_slice(&shstr);
+        write_rel(&mut bytes, rel_off, 0x2000, 0, 23);
+        write_rel(&mut bytes, rel_off + 8, 0x2004, 1, 21);
+        write_rel(&mut bytes, plt_rel_off, 0x2010, 2, 22);
 
         write_shdr(
             &mut bytes,
@@ -821,6 +1023,11 @@ mod tests {
     fn push_dynamic(out: &mut Vec<u8>, tag: u32, value: u32) {
         push_u32(out, tag);
         push_u32(out, value);
+    }
+
+    fn write_rel(bytes: &mut [u8], off: usize, offset: u32, symbol_index: u32, kind: u8) {
+        write_u32(bytes, off, offset);
+        write_u32(bytes, off + 4, (symbol_index << 8) | u32::from(kind));
     }
 
     fn push_str(out: &mut Vec<u8>, value: &str) -> u32 {

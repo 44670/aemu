@@ -70,11 +70,13 @@ cargo run -- imports-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk 
 Observed dependency/import counts:
 
 ```text
-libfmod.so: needs liblog.so, libstdc++.so, libm.so, libc.so, libdl.so; 106 imports
-libgnustl_shared.so: needs libm.so, libc.so, libdl.so; 117 imports
+libfmod.so: needs liblog.so, libstdc++.so, libm.so, libc.so, libdl.so;
+  106 imports, 1,829 relocation entries
+libgnustl_shared.so: needs libm.so, libc.so, libdl.so;
+  117 imports, 2,719 relocation entries
 libminecraftpe.so: needs libfmod.so, libgnustl_shared.so, liblog.so,
   libandroid.so, libGLESv1_CM.so, libEGL.so, libGLESv2.so, libOpenSLES.so,
-  libz.so, libm.so, libdl.so, libc.so; 683 imports
+  libz.so, libm.so, libdl.so, libc.so; 683 imports, 114,460 relocation entries
 ```
 
 The parser also verifies representative Minecraft imports such as

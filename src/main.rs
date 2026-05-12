@@ -285,6 +285,7 @@ fn print_dynamic_info(info: &aemu::elf_dynamic::ElfDynamicInfo, limit: Option<us
         None => println!("dynsym: <none>"),
     }
     print_relocations(&info.relocations);
+    println!("relocation_entries: {}", info.relocation_entries.len());
     if let Some(init) = info.init {
         println!("init: {init:#010x}");
     }

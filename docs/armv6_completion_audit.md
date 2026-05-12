@@ -292,6 +292,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   `DT_REL`/PLT relocation table ranges, and init/init-array metadata, with
   optional local Minecraft coverage for `libGLESv2.so`, `glCreateShader`, and
   `eglGetProcAddress`.
+- ARM `REL` relocation entries are decoded for normal and PLT tables,
+  including symbol-index/name association for imported bindings; the local
+  Minecraft `libminecraftpe.so` reports 114,460 decoded relocation entries.
 
 ## Known Incomplete Or Weakly Verified Areas
 

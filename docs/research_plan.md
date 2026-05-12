@@ -97,8 +97,9 @@ useful, but it does not replace the browser WebGL backend.
    libraries before loading. Initial ELF `PT_LOAD` segment planning and
    `VecMemory` materialization exists. Dynamic metadata parsing now reports
    `DT_NEEDED`, dynamic symbol imports, relocation table ranges, and init
-   arrays; relocation application, symbol binding, and dependency ordering are
-   still pending.
+   arrays. ARM `REL` relocation entries are decoded and associated with dynamic
+   symbol names; relocation application, symbol binding, and dependency
+   ordering are still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.
