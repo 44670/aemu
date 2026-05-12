@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 38 unit tests, 82 QEMU oracle tests, and doc tests.
+Result: passing, with 38 unit tests, 83 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -82,6 +82,8 @@ Result: passing, with 38 unit tests, 82 QEMU oracle tests, and doc tests.
   `MOV`/`CMP`/`ADD`/`SUB` immediate operations
 - Thumb literal load, PC-relative add, SP-relative add, and SP adjust forms now
   have QEMU oracle coverage
+- Thumb ARMv6 `SXTH`, `SXTB`, `UXTH`, `UXTB`, `REV`, `REV16`, and `REVSH`
+  extension instructions now have QEMU oracle coverage
 - Thumb conditional and unconditional branches now have QEMU oracle coverage for
   taken/not-taken condition evaluation plus forward and backward offsets
 - ARM/Thumb core ALU, shifts, compares, flag-setting, and common load/store

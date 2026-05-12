@@ -4248,6 +4248,88 @@ fn qemu_oracle_thumb_load_store_matrix_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb_armv6_extend_reverse_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         movs r7, #0\n\
+         ldr r1, =0xffff80ff\n\
+         sxth r0, r1\n\
+         eors r7, r0\n\
+         ldr r3, =0x12345680\n\
+         sxtb r2, r3\n\
+         eors r7, r2\n\
+         ldr r5, =0xaaaabEEF\n\
+         uxth r4, r5\n\
+         eors r7, r4\n\
+         ldr r1, =0x1234567f\n\
+         uxtb r0, r1\n\
+         eors r7, r0\n\
+         ldr r1, =0x11223344\n\
+         rev r0, r1\n\
+         eors r7, r0\n\
+         ldr r3, =0xa1b2c3d4\n\
+         rev16 r2, r3\n\
+         eors r7, r2\n\
+         ldr r5, =0x11223380\n\
+         revsh r4, r5\n\
+         eors r7, r4\n\
+         setend le\n\
+         mov r0, r7\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    let mut folded = 0;
+
+    cpu.set_reg(1, 0xffff_80ff);
+    cpu.execute_thumb(0xb208, 0, &mut mem).unwrap(); // sxth r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(3, 0x1234_5680);
+    cpu.execute_thumb(0xb25a, 0, &mut mem).unwrap(); // sxtb r2, r3
+    folded ^= cpu.reg(2);
+
+    cpu.set_reg(5, 0xaaaa_beef);
+    cpu.execute_thumb(0xb2ac, 0, &mut mem).unwrap(); // uxth r4, r5
+    folded ^= cpu.reg(4);
+
+    cpu.set_reg(1, 0x1234_567f);
+    cpu.execute_thumb(0xb2c8, 0, &mut mem).unwrap(); // uxtb r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(1, 0x1122_3344);
+    cpu.execute_thumb(0xba08, 0, &mut mem).unwrap(); // rev r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(3, 0xa1b2_c3d4);
+    cpu.execute_thumb(0xba5a, 0, &mut mem).unwrap(); // rev16 r2, r3
+    folded ^= cpu.reg(2);
+
+    cpu.set_reg(5, 0x1122_3380);
+    cpu.execute_thumb(0xbaec, 0, &mut mem).unwrap(); // revsh r4, r5
+    folded ^= cpu.reg(4);
+
+    cpu.execute_thumb(0xb650, 0, &mut mem).unwrap(); // setend le
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_thumb_blx_immediate_interworking_matches_interpreter() {
     let asm = oracle_program(
         "mov r4, #0\n\
