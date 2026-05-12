@@ -2162,6 +2162,45 @@ fn qemu_oracle_exclusive_word_success_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_exclusive_word_failure_matches_interpreter() {
+    let asm = oracle_program(
+        ".arch armv6k\n\
+         ldr r1, =data\n\
+         ldr r2, =0x11223344\n\
+         str r2, [r1]\n\
+         ldrex r0, [r1]\n\
+         clrex\n\
+         ldr r3, =0xaabbccdd\n\
+         strex r4, r3, [r1]\n\
+         ldr r5, [r1]\n\
+         eor r0, r4, r5\n\
+         eor r0, r0, r5, lsr #8\n\
+         eor r0, r0, r5, lsr #16\n\
+         eor r0, r0, r5, lsr #24\n\
+         .data\n\
+         .align 2\n\
+         data: .word 0\n\
+         .text",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x1000, 0x100);
+    mem.store32(0x1040, 0x1122_3344).unwrap();
+    cpu.set_reg(1, 0x1040);
+    cpu.execute_arm(0xe191_0f9f, 0, &mut mem).unwrap(); // ldrex r0, [r1]
+    cpu.execute_arm(0xf57f_f01f, 0, &mut mem).unwrap(); // clrex
+    cpu.set_reg(3, 0xaabb_ccdd);
+    cpu.execute_arm(0xe181_4f93, 0, &mut mem).unwrap(); // strex r4, r3, [r1]
+    let value = mem.load32(0x1040).unwrap();
+    cpu.set_reg(0, cpu.reg(4) ^ byte_fold(value));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_swap_matches_interpreter() {
     let asm = oracle_program(
         "ldr r1, =data\n\
