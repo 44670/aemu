@@ -4741,6 +4741,81 @@ fn qemu_oracle_vfp_load_store_matrix_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_vfp_odd_double_multiple_writeback_matches_interpreter() {
+    let mut body = String::from(
+        ".fpu vfp\n\
+         mov r12, #0\n\
+         ldr r0, =data\n\
+         mov r6, r0\n\
+         ldr r2, =0x11223344\n\
+         ldr r3, =0x55667788\n\
+         vmov d0, r2, r3\n\
+         .word 0xeca00b03\n\
+         sub r4, r0, r6\n\
+         ldr r5, [r6]\n\
+         ldr r7, [r6, #4]\n",
+    );
+    let fold_reg = |body: &mut String, reg: &str| {
+        body.push_str(&format!(
+            "eor r12, r12, {reg}\n\
+             eor r12, r12, {reg}, lsr #8\n\
+             eor r12, r12, {reg}, lsr #16\n\
+             eor r12, r12, {reg}, lsr #24\n"
+        ));
+    };
+    fold_reg(&mut body, "r4");
+    fold_reg(&mut body, "r5");
+    fold_reg(&mut body, "r7");
+    body.push_str(
+        "ldr r0, =data + 16\n\
+         mov r6, r0\n\
+         .word 0xecb01b03\n\
+         sub r4, r0, r6\n\
+         vmov r5, r7, d1\n",
+    );
+    fold_reg(&mut body, "r4");
+    fold_reg(&mut body, "r5");
+    fold_reg(&mut body, "r7");
+    body.push_str(
+        "mov r0, r12\n\
+         .pushsection .data\n\
+         .align 3\n\
+         data:\n\
+         .space 16\n\
+         .word 0x99aabbcc\n\
+         .word 0xddeeff00\n\
+         .space 8\n\
+         .popsection\n",
+    );
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x3000, 0x100);
+    let base = 0x3000;
+    let mut folded = 0;
+
+    cpu.set_reg(0, base);
+    cpu.set_dreg(0, 0x5566_7788_1122_3344);
+    cpu.execute_arm(0xeca0_0b03, 0, &mut mem).unwrap(); // vstmia r0!, odd imm8=3
+    folded ^= byte_fold(cpu.reg(0).wrapping_sub(base));
+    folded ^= byte_fold(mem.load32(base).unwrap());
+    folded ^= byte_fold(mem.load32(base + 4).unwrap());
+
+    cpu.set_reg(0, base + 16);
+    mem.store32(base + 16, 0x99aa_bbcc).unwrap();
+    mem.store32(base + 20, 0xddee_ff00).unwrap();
+    cpu.execute_arm(0xecb0_1b03, 0, &mut mem).unwrap(); // vldmia r0!, odd imm8=3
+    folded ^= byte_fold(cpu.reg(0).wrapping_sub(base + 16));
+    folded ^= double_byte_fold(cpu.dreg(1));
+
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_vcvt_matches_interpreter() {
     let asm = oracle_program(
         "ldr r0, =0x40600000\n\
