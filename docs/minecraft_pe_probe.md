@@ -51,6 +51,16 @@ cargo run -- probe-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk
 This APK is useful for HLE/API research, but not for validating the
 ARMv6/`armeabi` interpreter path.
 
+The APK run planner makes the loader-side blocker explicit:
+
+```sh
+cargo run -- plan-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk
+```
+
+Result: no `lib/armeabi/*.so` group is present. All three native libraries are
+under `lib/armeabi-v7a/` and require ARMv7/Thumb-2; `libfmod.so` and
+`libminecraftpe.so` also require NEON.
+
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:
 

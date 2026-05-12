@@ -1,3 +1,4 @@
+pub mod apk_plan;
 pub mod armv6;
 pub mod elf_probe;
 pub mod host;

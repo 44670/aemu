@@ -27,11 +27,25 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("plan-apk") => {
+            let Some(path) = args.next() else {
+                eprintln!("usage: aemu plan-apk <app.apk>");
+                std::process::exit(2);
+            };
+            match aemu::apk_plan::analyze_apk(Path::new(&path)) {
+                Ok(plan) => print_apk_plan(&plan),
+                Err(err) => {
+                    eprintln!("plan failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("sdl2-shell") => run_sdl2_shell(args.collect()),
         _ => {
             eprintln!("usage:");
             eprintln!("  aemu probe-so <lib.so>");
             eprintln!("  aemu probe-apk <app.apk>");
+            eprintln!("  aemu plan-apk <app.apk>");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -94,6 +108,59 @@ fn probe_apk(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn print_apk_plan(plan: &aemu::apk_plan::ApkRunPlan) {
+    println!("apk: {}", plan.path.display());
+    println!("runtime target: Android 4.x ARMv6 / armeabi");
+    println!("native libraries: {}", plan.native_libraries.len());
+
+    let abi_counts = plan.abi_counts();
+    if abi_counts.is_empty() {
+        println!("abi groups: <none>");
+    } else {
+        println!("abi groups:");
+        for (abi, count) in abi_counts {
+            println!("  {abi}: {count}");
+        }
+    }
+
+    println!(
+        "selected ABI: {}",
+        if plan.has_target_abi() {
+            aemu::apk_plan::ARMV6_TARGET_ABI
+        } else {
+            "<none>"
+        }
+    );
+    println!(
+        "result: {}",
+        if plan.is_armv6_runnable() {
+            "ready for ARMv6 ELF loader"
+        } else {
+            "blocked for ARMv6 interpreter"
+        }
+    );
+
+    let blockers = plan.summary_blockers();
+    if !blockers.is_empty() {
+        println!("blockers:");
+        for blocker in blockers {
+            println!("  - {blocker}");
+        }
+    }
+
+    if !plan.native_libraries.is_empty() {
+        println!("libraries:");
+        for library in &plan.native_libraries {
+            let status = if library.armv6_blockers.is_empty() {
+                "compatible"
+            } else {
+                "blocked"
+            };
+            println!("  {} [{}]: {status}", library.entry_name, library.abi);
+        }
+    }
 }
 
 #[cfg(feature = "sdl2")]

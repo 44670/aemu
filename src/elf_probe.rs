@@ -70,7 +70,22 @@ impl ElfProbe {
             .unwrap_or(false)
     }
 
-    fn attr_value(&self, name: &str) -> Option<&str> {
+    pub fn fp_arch(&self) -> Option<&str> {
+        self.attr_value("Tag_FP_arch")
+    }
+
+    pub fn requires_vfp3_or_newer(&self) -> bool {
+        self.fp_arch()
+            .map(|value| {
+                matches!(
+                    value,
+                    "VFPv3" | "VFPv3-D16" | "VFPv4" | "VFPv4-D16" | "FPv5-A" | "FPv5-D16"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn attr_value(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
             .find(|attr| attr.name == name)

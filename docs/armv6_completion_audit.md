@@ -24,8 +24,8 @@ test with functions
 ## Current Evidence
 
 - Interpreter implementation: `src/armv6.rs`
-- ELF probe, APK ZIP extraction, and Minecraft APK probe tests:
-  `src/elf_probe.rs`, `src/zip_probe.rs`
+- ELF probe, APK ZIP extraction, APK run planning, and Minecraft APK probe
+  tests: `src/elf_probe.rs`, `src/zip_probe.rs`, `src/apk_plan.rs`
 - QEMU oracle tests: `tests/qemu_oracle.rs`
 - Coverage tracker: `docs/armv6_status.md`
 - Local Minecraft probe: `docs/minecraft_pe_probe.md`
@@ -282,6 +282,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   coverage for the `TPIDRURW` roundtrip path
 - CP15 barrier HLE no-ops for ARMv6-style DMB, DSB, and ISB/prefetch-flush
   `MCR` forms
+- APK run planning now selects only `lib/armeabi/*.so` for the ARMv6
+  interpreter path and reports incompatible native-library blockers such as
+  ARMv7, Thumb-2, VFPv3+, and NEON before the ELF loader exists.
 
 ## Known Incomplete Or Weakly Verified Areas
 

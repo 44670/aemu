@@ -92,6 +92,9 @@ useful, but it does not replace the browser WebGL backend.
    complete.
 3. Add an ELF loader/linker for `armeabi` `.so` files and imported-symbol
    dispatch into HLE shims.
+   Current status: initial APK run planning selects `lib/armeabi` as the only
+   ARMv6 interpreter ABI and reports concrete blockers for incompatible native
+   libraries before loading.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.
