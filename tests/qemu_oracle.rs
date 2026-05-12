@@ -320,6 +320,14 @@ fn thumb_adjust_sp(subtract: bool, imm7: u16) -> u16 {
     0xb000 | (u16::from(subtract) << 7) | (imm7 & 0x7f)
 }
 
+fn thumb_cond_branch_instr(cond: u16, imm8: u16) -> u16 {
+    0xd000 | ((cond & 0xf) << 8) | (imm8 & 0xff)
+}
+
+fn thumb_uncond_branch_instr(imm11: u16) -> u16 {
+    0xe000 | (imm11 & 0x7ff)
+}
+
 fn thumb_alu_instr(op: u16, rm: usize, rd: usize) -> u16 {
     0x4000 | ((op & 0xf) << 6) | ((rm as u16) << 3) | rd as u16
 }
@@ -507,7 +515,7 @@ fn qemu_oracle_signed_halfword_multiply_matrix_matches_interpreter() {
 
     let mut cpu = Cpu::new();
     let mut mem = VecMemory::new(0, 4);
-    let mut folded = 0;
+    let mut folded = 0u32;
     for (idx, (_, x, y)) in XY.iter().enumerate() {
         cpu.set_reg(1, 0x8001_7fffu32.rotate_left(idx as u32 * 3));
         cpu.set_reg(2, 0x0002_fffeu32.rotate_right(idx as u32 * 5));
@@ -2813,6 +2821,137 @@ fn qemu_oracle_thumb_literal_pc_sp_matrix_matches_interpreter() {
     cpu.execute_thumb(thumb_add_sub_instr(false, true, 5, 4, 4), 0, &mut mem)
         .unwrap(); // subs r4, r4, r5
     folded ^= cpu.reg(4);
+
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_thumb_branch_condition_matrix_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         movs r6, #0\n\
+         movs r0, #0\n\
+         cmp r0, #0\n\
+         beq 1f\n\
+         b fail\n\
+         1:\n\
+         movs r4, #1\n\
+         eors r6, r4\n\
+         cmp r0, #0\n\
+         bne fail\n\
+         movs r4, #2\n\
+         eors r6, r4\n\
+         cmp r0, #0\n\
+         bcs 2f\n\
+         b fail\n\
+         2:\n\
+         movs r4, #4\n\
+         eors r6, r4\n\
+         cmp r0, #1\n\
+         bcc 3f\n\
+         b fail\n\
+         3:\n\
+         movs r4, #8\n\
+         eors r6, r4\n\
+         cmp r0, #1\n\
+         bmi 4f\n\
+         b fail\n\
+         4:\n\
+         movs r4, #16\n\
+         eors r6, r4\n\
+         movs r1, #1\n\
+         cmp r1, #0\n\
+         bpl 5f\n\
+         b fail\n\
+         5:\n\
+         movs r4, #32\n\
+         eors r6, r4\n\
+         b 6f\n\
+         b fail\n\
+         6:\n\
+         movs r4, #64\n\
+         eors r6, r4\n\
+         movs r5, #0\n\
+         7:\n\
+         cmp r5, #0\n\
+         bne 8f\n\
+         adds r5, #1\n\
+         b 7b\n\
+         8:\n\
+         movs r4, #128\n\
+         eors r6, r4\n\
+         mov r0, r6\n\
+         movs r7, #1\n\
+         svc #0\n\
+         fail:\n\
+         movs r0, #0xee\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    let mut folded = 0;
+    let pc = 0x100;
+    let target = 0x110;
+    let fallthrough = pc + 2;
+    let imm8 = ((target as i32 - (pc as i32 + 4)) / 2) as u16;
+    let cases: [(u16, bool, bool, bool, bool, bool, u32); 6] = [
+        (0, false, true, true, false, true, 1),
+        (1, false, true, true, false, false, 2),
+        (2, false, false, true, false, true, 4),
+        (3, false, false, false, false, true, 8),
+        (4, true, false, false, false, true, 16),
+        (5, false, false, false, false, true, 32),
+    ];
+
+    for (cond, n, z, c, v, expected_taken, bit) in cases {
+        cpu.set_pc(fallthrough);
+        cpu.cpsr.n = n;
+        cpu.cpsr.z = z;
+        cpu.cpsr.c = c;
+        cpu.cpsr.v = v;
+        cpu.execute_thumb(thumb_cond_branch_instr(cond, imm8), pc, &mut mem)
+            .unwrap();
+        let taken = cpu.pc() == target;
+        if taken == expected_taken {
+            folded ^= bit;
+        }
+    }
+
+    let pc = 0x120;
+    let target = 0x130;
+    let imm11 = ((target as i32 - (pc as i32 + 4)) / 2) as u16;
+    cpu.set_pc(pc + 2);
+    cpu.execute_thumb(thumb_uncond_branch_instr(imm11), pc, &mut mem)
+        .unwrap();
+    if cpu.pc() == target {
+        folded ^= 64;
+    }
+
+    let pc = 0x140;
+    let target = 0x130;
+    let imm11 = (((target as i32 - (pc as i32 + 4)) / 2) & 0x7ff) as u16;
+    cpu.set_pc(pc + 2);
+    cpu.execute_thumb(thumb_uncond_branch_instr(imm11), pc, &mut mem)
+        .unwrap();
+    if cpu.pc() == target {
+        folded ^= 128;
+    }
 
     cpu.set_reg(0, folded);
 
