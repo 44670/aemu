@@ -3995,6 +3995,50 @@ fn qemu_oracle_thumb_blx_immediate_interworking_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb_bl_immediate_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r4, #0\n\
+         adr r1, thumb_start\n\
+         add r1, r1, #1\n\
+         bx r1\n\
+         .thumb\n\
+         .thumb_func\n\
+         thumb_start:\n\
+         .hword 0xf000\n\
+         .hword 0xf806\n\
+         eors r4, r0\n\
+         mov r0, r4\n\
+         b done_thumb\n\
+         nop\n\
+         nop\n\
+         nop\n\
+         thumb_sub:\n\
+         movs r0, #0x6b\n\
+         bx lr\n\
+         done_thumb:\n\
+         bx pc\n\
+         nop\n\
+         .arm",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    cpu.set_reg(4, 0);
+    cpu.execute_thumb(0xf000, 0x2000, &mut mem).unwrap(); // BL prefix
+    cpu.execute_thumb(0xf806, 0x2002, &mut mem).unwrap(); // BL suffix to Thumb
+    cpu.set_reg(0, 0x6b);
+    cpu.execute_thumb(0x4770, 0x2012, &mut mem).unwrap(); // bx lr
+    cpu.execute_thumb(0x4044, 0x2004, &mut mem).unwrap(); // eors r4, r0
+    cpu.set_reg(0, cpu.reg(4));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_thumb_push_pop_matches_interpreter() {
     let asm = ".syntax unified\n\
          .arch armv6\n\
