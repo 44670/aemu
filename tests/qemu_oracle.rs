@@ -1614,6 +1614,65 @@ fn qemu_oracle_clz_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_reversal_and_clz_matrix_matches_interpreter() {
+    const VALUES: &[u32] = &[
+        0x0000_0000,
+        0x0000_0001,
+        0x8000_0000,
+        0x00f0_0000,
+        0x1122_3344,
+        0x0000_80ff,
+        0xffff_0001,
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    let fold_reg = |body: &mut String, reg: &str| {
+        body.push_str(&format!(
+            "eor r12, r12, {reg}\n\
+             eor r12, r12, {reg}, lsr #8\n\
+             eor r12, r12, {reg}, lsr #16\n\
+             eor r12, r12, {reg}, lsr #24\n"
+        ));
+    };
+    for value in VALUES {
+        body.push_str(&format!(
+            "ldr r1, ={value:#010x}\n\
+             rev r0, r1\n"
+        ));
+        fold_reg(&mut body, "r0");
+        body.push_str("rev16 r0, r1\n");
+        fold_reg(&mut body, "r0");
+        body.push_str("revsh r0, r1\n");
+        fold_reg(&mut body, "r0");
+        body.push_str("clz r0, r1\n");
+        fold_reg(&mut body, "r0");
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for value in VALUES {
+        cpu.set_reg(1, *value);
+        cpu.execute_arm(0xe6bf_0f31, 0, &mut mem).unwrap(); // rev r0, r1
+        folded ^= byte_fold(cpu.reg(0));
+        cpu.execute_arm(0xe6bf_0fb1, 0, &mut mem).unwrap(); // rev16 r0, r1
+        folded ^= byte_fold(cpu.reg(0));
+        cpu.execute_arm(0xe6ff_0fb1, 0, &mut mem).unwrap(); // revsh r0, r1
+        folded ^= byte_fold(cpu.reg(0));
+        cpu.execute_arm(0xe16f_0f11, 0, &mut mem).unwrap(); // clz r0, r1
+        folded ^= byte_fold(cpu.reg(0));
+    }
+
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_adc_sbc_rsc_flags_match_interpreter() {
     let asm = oracle_program(
         "mov r9, #0\n\
