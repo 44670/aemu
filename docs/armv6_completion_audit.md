@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 57 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 58 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -71,6 +71,9 @@ Result: passing, with 36 unit tests, 57 QEMU oracle tests, and doc tests.
 - ARM data-processing register/shift forms now have deterministic
   pseudo-random QEMU oracle coverage across all 16 opcode slots, including
   result and `NZCV` folding
+- ARM data-processing rotated-immediate forms now have deterministic QEMU
+  oracle coverage across all 16 opcode slots, including immediate expansion,
+  result, and `NZCV` folding
 - ARM data-processing register-shifted-register invalid `PC` forms trap
   explicitly
 - ARM halfword/signed/doubleword transfers: `LDRH`, `STRH`, `LDRSB`, `LDRSH`,
