@@ -3320,7 +3320,7 @@ fn vfp_mul_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
         FPSCR_IOC
     } else if lhs.is_finite() && rhs.is_finite() {
         vfp_overflow_exception_flags_f64(result)
-            | vfp_zero_underflow_exception_flags_f64(lhs, rhs, result)
+            | vfp_mul_rounding_exception_flags_f64(lhs, rhs, result)
     } else {
         0
     }
@@ -3347,6 +3347,67 @@ fn vfp_absorbed_sub_inexact_exception_flags_f64(lhs: f64, rhs: f64, result: f64)
         FPSCR_IXC
     } else {
         0
+    }
+}
+
+fn vfp_mul_rounding_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
+    if result.is_infinite() || f64_mul_result_exact(lhs, rhs, result) {
+        return 0;
+    }
+
+    let mut flags = FPSCR_IXC;
+    if result == 0.0 || result.is_subnormal() {
+        flags |= FPSCR_UFC;
+    }
+    flags
+}
+
+fn f64_mul_result_exact(lhs: f64, rhs: f64, result: f64) -> bool {
+    let lhs = f64_finite_magnitude(lhs);
+    let rhs = f64_finite_magnitude(rhs);
+    let result = f64_finite_magnitude(result);
+    scaled_magnitudes_equal(
+        lhs.significand * rhs.significand,
+        lhs.exponent + rhs.exponent,
+        result.significand,
+        result.exponent,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct F64Magnitude {
+    significand: u128,
+    exponent: i32,
+}
+
+fn f64_finite_magnitude(value: f64) -> F64Magnitude {
+    let bits = value.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & 0x000f_ffff_ffff_ffff;
+    if exponent == 0 {
+        F64Magnitude {
+            significand: u128::from(fraction),
+            exponent: -1074,
+        }
+    } else {
+        F64Magnitude {
+            significand: u128::from((1u64 << 52) | fraction),
+            exponent: exponent - 1023 - 52,
+        }
+    }
+}
+
+fn scaled_magnitudes_equal(lhs: u128, lhs_exp: i32, rhs: u128, rhs_exp: i32) -> bool {
+    if lhs == 0 || rhs == 0 {
+        return lhs == rhs;
+    }
+
+    if lhs_exp >= rhs_exp {
+        let shift = (lhs_exp - rhs_exp) as u32;
+        shift < 128 && lhs.checked_shl(shift) == Some(rhs)
+    } else {
+        let shift = (rhs_exp - lhs_exp) as u32;
+        shift < 128 && rhs.checked_shl(shift) == Some(lhs)
     }
 }
 
@@ -5853,6 +5914,32 @@ mod tests {
         cpu.execute_arm(0xee30_2b41, 0, &mut mem).unwrap(); // vsub.f64 d2, d0, d1
         assert_eq!(f64::from_bits(cpu.dreg(2)), 1.0);
         assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+    }
+
+    #[test]
+    fn vfpv2_double_multiply_inexact_exception_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+        let mask = FPSCR_IOC | FPSCR_DZC | FPSCR_OFC | FPSCR_UFC | FPSCR_IXC;
+
+        cpu.set_dreg(0, 1.1f64.to_bits());
+        cpu.set_dreg(1, 1.1f64.to_bits());
+        cpu.execute_arm(0xee20_2b01, 0, &mut mem).unwrap(); // vmul.f64 d2, d0, d1
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::MIN_POSITIVE.to_bits());
+        cpu.set_dreg(1, 0.1f64.to_bits());
+        cpu.execute_arm(0xee20_2b01, 0, &mut mem).unwrap(); // vmul.f64 d2, d0, d1
+        assert!(f64::from_bits(cpu.dreg(2)).is_subnormal());
+        assert_eq!(cpu.fpscr & mask, FPSCR_UFC | FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::MIN_POSITIVE.to_bits());
+        cpu.set_dreg(1, 0.5f64.to_bits());
+        cpu.execute_arm(0xee20_2b01, 0, &mut mem).unwrap(); // vmul.f64 d2, d0, d1
+        assert_eq!(cpu.dreg(2), 0x0008_0000_0000_0000);
+        assert_eq!(cpu.fpscr & mask, 0);
     }
 
     #[test]

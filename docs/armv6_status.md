@@ -95,8 +95,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   double-to-single narrowing; `OFC`/`IXC` for selected double-precision
   arithmetic overflow; `UFC`/`IXC` for selected double-precision zero-result
   underflow; `IXC` for selected double-precision add/sub cases where a
-  nonzero operand is rounded away; `OFC`/`UFC` for overflowing or underflowing
-  single-precision arithmetic and
+  nonzero operand is rounded away; `IXC`/`UFC` for double-precision multiply
+  exactness and inexact subnormal cases; `OFC`/`UFC` for overflowing or
+  underflowing single-precision arithmetic and
   double-to-single narrowing
 - VFP status/compare subset: single and double `VCMP`/`VCMPE`, compare with
   zero, `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
@@ -132,8 +133,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   beyond basic `IOC`/`DZC` divide, square-root, compare-NaN, selected
   single-precision arithmetic, selected double invalid/overflow arithmetic, and
   conversion invalid cases, plus basic conversion `IXC`/`OFC`/`UFC` cases;
-  double-precision subnormal-underflow/broader general inexact behavior and
-  less common arithmetic/conversion edge cases still need an
+  double-precision division/square-root inexact behavior and less common
+  arithmetic/conversion edge cases still need an
   instruction-by-instruction audit. VFPv3 fixed-point conversions are outside
   the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
