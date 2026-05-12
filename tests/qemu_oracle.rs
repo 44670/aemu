@@ -1303,6 +1303,131 @@ fn qemu_oracle_scalar_saturation_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_scalar_saturation_q_flag_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r6, #0\n\
+         mov r12, #0\n\
+         msr APSR_nzcvq, r12\n\
+         ldr r1, =0x7fffffff\n\
+         mov r2, #1\n\
+         qadd r0, r1, r2\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #1\n\
+         msr APSR_nzcvq, r12\n\
+         mov r1, #1\n\
+         mov r2, #2\n\
+         qadd r0, r1, r2\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #2\n\
+         msr APSR_nzcvq, r12\n\
+         mov r1, #0\n\
+         ldr r2, =0x80000000\n\
+         qsub r0, r1, r2\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #4\n\
+         msr APSR_nzcvq, r12\n\
+         ldr r1, =0x70000000\n\
+         ldr r2, =0x70000000\n\
+         qdadd r0, r1, r2\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #8\n\
+         msr APSR_nzcvq, r12\n\
+         ldr r1, =0x80000000\n\
+         ldr r2, =0x70000000\n\
+         qdsub r0, r1, r2\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #16\n\
+         msr APSR_nzcvq, r12\n\
+         mov r1, #200\n\
+         ssat r0, #8, r1\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #32\n\
+         msr APSR_nzcvq, r12\n\
+         mov r1, #42\n\
+         ssat r0, #8, r1\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #64\n\
+         msr APSR_nzcvq, r12\n\
+         mvn r3, #0\n\
+         usat r2, #7, r3\n\
+         mrs r3, cpsr\n\
+         and r3, r3, #0x08000000\n\
+         cmp r3, #0\n\
+         eorne r6, r6, #128\n\
+         mov r0, r6",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    fn fold_q(cpu: &mut Cpu, folded: &mut u32, bit: u32) {
+        if cpu.cpsr.q {
+            *folded ^= bit;
+        }
+        cpu.cpsr.q = false;
+    }
+
+    cpu.cpsr.q = false;
+    cpu.set_reg(1, 0x7fff_ffff);
+    cpu.set_reg(2, 1);
+    cpu.execute_arm(0xe102_0051, 0, &mut mem).unwrap(); // qadd r0, r1, r2
+    fold_q(&mut cpu, &mut folded, 1);
+
+    cpu.set_reg(1, 1);
+    cpu.set_reg(2, 2);
+    cpu.execute_arm(0xe102_0051, 0, &mut mem).unwrap(); // qadd r0, r1, r2
+    fold_q(&mut cpu, &mut folded, 2);
+
+    cpu.set_reg(1, 0);
+    cpu.set_reg(2, 0x8000_0000);
+    cpu.execute_arm(0xe122_0051, 0, &mut mem).unwrap(); // qsub r0, r1, r2
+    fold_q(&mut cpu, &mut folded, 4);
+
+    cpu.set_reg(1, 0x7000_0000);
+    cpu.set_reg(2, 0x7000_0000);
+    cpu.execute_arm(0xe142_0051, 0, &mut mem).unwrap(); // qdadd r0, r1, r2
+    fold_q(&mut cpu, &mut folded, 8);
+
+    cpu.set_reg(1, 0x8000_0000);
+    cpu.set_reg(2, 0x7000_0000);
+    cpu.execute_arm(0xe162_0051, 0, &mut mem).unwrap(); // qdsub r0, r1, r2
+    fold_q(&mut cpu, &mut folded, 16);
+
+    cpu.set_reg(1, 200);
+    cpu.execute_arm(0xe6a7_0011, 0, &mut mem).unwrap(); // ssat r0, #8, r1
+    fold_q(&mut cpu, &mut folded, 32);
+
+    cpu.set_reg(1, 42);
+    cpu.execute_arm(0xe6a7_0011, 0, &mut mem).unwrap(); // ssat r0, #8, r1
+    fold_q(&mut cpu, &mut folded, 64);
+
+    cpu.set_reg(3, u32::MAX);
+    cpu.execute_arm(0xe6e7_2013, 0, &mut mem).unwrap(); // usat r2, #7, r3
+    fold_q(&mut cpu, &mut folded, 128);
+
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_saturate_instructions_match_interpreter() {
     let asm = oracle_program(
         "ldr r1, =0x00000123\n\
