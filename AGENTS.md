@@ -242,6 +242,12 @@ Local Minecraft PE probe notes live in:
 docs/minecraft_pe_probe.md
 ```
 
+Current Minecraft runtime completion audit and blocker evidence live in:
+
+```text
+docs/minecraft_runtime_audit.md
+```
+
 The current research and milestone plan lives in:
 
 ```text
