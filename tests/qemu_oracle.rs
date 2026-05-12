@@ -749,6 +749,187 @@ fn qemu_oracle_dual16_dsp_multiply_matrix_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_dsp_multiply_q_flags_match_interpreter() {
+    let mut body = String::from("mov r6, #0\nmov r12, #0\n");
+    let fold_q = |body: &mut String, bit: u32| {
+        body.push_str(&format!(
+            "mrs r4, cpsr\n\
+             tst r4, #0x08000000\n\
+             eorne r6, r6, #{bit}\n\
+             msr APSR_nzcvq, r12\n"
+        ));
+    };
+
+    body.push_str(
+        "msr APSR_nzcvq, r12\n\
+         ldr r1, =0x80008000\n\
+         ldr r2, =0x80008000\n\
+         smuad r0, r1, r2\n",
+    );
+    fold_q(&mut body, 1);
+
+    body.push_str(
+        "ldr r1, =0x00010002\n\
+         ldr r2, =0x00030004\n\
+         smuad r0, r1, r2\n",
+    );
+    fold_q(&mut body, 2);
+
+    body.push_str(
+        "ldr r1, =0x80008000\n\
+         ldr r2, =0x80008000\n\
+         mvn r3, #0\n\
+         smlad r0, r1, r2, r3\n",
+    );
+    fold_q(&mut body, 4);
+
+    body.push_str(
+        "ldr r1, =0x80008000\n\
+         ldr r2, =0x80008000\n\
+         mov r3, #0\n\
+         smlad r0, r1, r2, r3\n",
+    );
+    fold_q(&mut body, 8);
+
+    body.push_str(
+        "ldr r1, =0x00007fff\n\
+         ldr r2, =0x00007fff\n\
+         ldr r3, =0x70000000\n\
+         smlsd r0, r1, r2, r3\n",
+    );
+    fold_q(&mut body, 16);
+
+    body.push_str(
+        "ldr r1, =0x7fff8000\n\
+         ldr r2, =0x80007fff\n\
+         smusd r0, r1, r2\n",
+    );
+    fold_q(&mut body, 32);
+
+    body.push_str(
+        "ldr r1, =0x00007fff\n\
+         ldr r2, =0x00007fff\n\
+         ldr r3, =0x70000000\n\
+         smlabb r0, r1, r2, r3\n",
+    );
+    fold_q(&mut body, 64);
+
+    body.push_str(
+        "ldr r1, =0x7fffffff\n\
+         ldr r2, =0x00007fff\n\
+         ldr r3, =0x50000000\n\
+         smlawb r0, r1, r2, r3\n",
+    );
+    fold_q(&mut body, 128);
+    body.push_str("mov r0, r6");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    fn fold_cpu_q(cpu: &mut Cpu, folded: &mut u32, bit: u32) {
+        if cpu.cpsr.q {
+            *folded ^= bit;
+        }
+        cpu.cpsr.q = false;
+    }
+
+    cpu.cpsr.q = false;
+    cpu.set_reg(1, 0x8000_8000);
+    cpu.set_reg(2, 0x8000_8000);
+    cpu.execute_arm(
+        arm_dual16_multiply_instr(false, false, false, 0, 15, 2, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smuad r0, r1, r2
+    fold_cpu_q(&mut cpu, &mut folded, 1);
+
+    cpu.set_reg(1, 0x0001_0002);
+    cpu.set_reg(2, 0x0003_0004);
+    cpu.execute_arm(
+        arm_dual16_multiply_instr(false, false, false, 0, 15, 2, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smuad r0, r1, r2
+    fold_cpu_q(&mut cpu, &mut folded, 2);
+
+    cpu.set_reg(1, 0x8000_8000);
+    cpu.set_reg(2, 0x8000_8000);
+    cpu.set_reg(3, u32::MAX);
+    cpu.execute_arm(
+        arm_dual16_multiply_instr(false, false, false, 0, 3, 2, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smlad r0, r1, r2, r3
+    fold_cpu_q(&mut cpu, &mut folded, 4);
+
+    cpu.set_reg(1, 0x8000_8000);
+    cpu.set_reg(2, 0x8000_8000);
+    cpu.set_reg(3, 0);
+    cpu.execute_arm(
+        arm_dual16_multiply_instr(false, false, false, 0, 3, 2, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smlad r0, r1, r2, r3
+    fold_cpu_q(&mut cpu, &mut folded, 8);
+
+    cpu.set_reg(1, 0x0000_7fff);
+    cpu.set_reg(2, 0x0000_7fff);
+    cpu.set_reg(3, 0x7000_0000);
+    cpu.execute_arm(
+        arm_dual16_multiply_instr(false, true, false, 0, 3, 2, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smlsd r0, r1, r2, r3
+    fold_cpu_q(&mut cpu, &mut folded, 16);
+
+    cpu.set_reg(1, 0x7fff_8000);
+    cpu.set_reg(2, 0x8000_7fff);
+    cpu.execute_arm(
+        arm_dual16_multiply_instr(false, true, false, 0, 15, 2, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smusd r0, r1, r2
+    fold_cpu_q(&mut cpu, &mut folded, 32);
+
+    cpu.set_reg(1, 0x0000_7fff);
+    cpu.set_reg(2, 0x0000_7fff);
+    cpu.set_reg(3, 0x7000_0000);
+    cpu.execute_arm(
+        arm_signed_halfword_instr(0xe100_0080, 0, 3, 2, 1, 0, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smlabb r0, r1, r2, r3
+    fold_cpu_q(&mut cpu, &mut folded, 64);
+
+    cpu.set_reg(1, 0x7fff_ffff);
+    cpu.set_reg(2, 0x0000_7fff);
+    cpu.set_reg(3, 0x5000_0000);
+    cpu.execute_arm(
+        arm_signed_halfword_instr(0xe120_0080, 0, 3, 2, 1, 0, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // smlawb r0, r1, r2, r3
+    fold_cpu_q(&mut cpu, &mut folded, 128);
+
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_dsp_multiply_matrix_matches_interpreter() {
     let asm = oracle_program(
         "ldr r1, =0x00030004\n\

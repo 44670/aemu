@@ -21,7 +21,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - ARMv6 DSP multiply families: `SMLAD`, `SMLADX`, `SMLSD`, `SMLSDX`,
   `SMUAD`, `SMUADX`, `SMUSD`, `SMUSDX`, `SMLALD`, `SMLALDX`, `SMLSLD`,
   `SMLSLDX`, `SMMUL`, `SMMULR`, `SMMLA`, `SMMLAR`, `SMMLS`, `SMMLSR`,
-  `UMAAL`
+  `UMAAL`, including sticky `Q` updates for the applicable signed halfword,
+  word-by-halfword, and dual 16-bit add/subtract forms
 - Explicit unpredictable traps for invalid `PC` multiply/DSP register forms,
   while preserving accumulator-as-`PC` no-accumulate encodings where valid
 - ARMv6 unsigned sum of absolute differences: `USAD8`, `USADA8`
