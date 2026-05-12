@@ -44,7 +44,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - ARM synchronization/swap subset: `SWP`, `SWPB`, `LDREX`, `STREX`,
   `LDREXB`, `LDREXH`, `LDREXD`, `STREXB`, `STREXH`, `STREXD`, `CLREX`
   with explicit traps for invalid `PC`, `SWP` base overlap,
-  doubleword-pair, and status-register overlap forms
+  doubleword-pair, and status-register overlap forms; normal guest stores
+  that overlap the reserved byte range clear the local exclusive reservation
 - ARM no-op/hint/system handling: `PLD`, ARM hint encodings, `SETEND LE`,
   and explicit privileged traps for `CPS`, `RFE`, and `SRS`
 - Explicit undefined traps for non-baseline ARMv6T2/ARMv7 A32 encodings that
@@ -120,7 +121,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   ARMv6T2 targets would need it.
 - Exception, signal, and privileged/system behavior is only stubbed or trapped
   enough for user-mode HLE work.
-- Exclusive monitor behavior is approximate and single-address only.
+- Exclusive monitor behavior is still a single-core approximation and does not
+  model multiprocessor/global monitor effects.
 - Some unpredictable edge cases are simplified.
 - QEMU oracle coverage is still family-focused; no broad randomized
   differential suite exists yet.

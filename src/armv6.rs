@@ -125,6 +125,12 @@ struct VfpVectorPlan {
     delta_m: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExclusiveReservation {
+    addr: u32,
+    size: u8,
+}
+
 #[derive(Debug, Clone)]
 pub struct Cpu {
     regs: [u32; 16],
@@ -134,7 +140,7 @@ pub struct Cpu {
     pub cp15_tpidruro: u32,
     pub cpsr: Cpsr,
     thumb_bl_prefix: Option<u32>,
-    exclusive_addr: Option<u32>,
+    exclusive_reservation: Option<ExclusiveReservation>,
 }
 
 impl Default for Cpu {
@@ -153,7 +159,7 @@ impl Cpu {
             cp15_tpidruro: 0,
             cpsr: Cpsr::default(),
             thumb_bl_prefix: None,
-            exclusive_addr: None,
+            exclusive_reservation: None,
         }
     }
 
@@ -227,7 +233,7 @@ impl Cpu {
             return self.exec_arm_blx_immediate(instr, pc);
         }
         if instr == 0xf57f_f01f {
-            self.exclusive_addr = None;
+            self.exclusive_reservation = None;
             return Ok(());
         }
 
@@ -413,8 +419,8 @@ impl Cpu {
                         self.set_dreg_bits(first + idx, lo | (hi << 32));
                     } else {
                         let value = self.dreg_bits(first + idx);
-                        mem.store32(addr, value as u32)?;
-                        mem.store32(addr.wrapping_add(4), (value >> 32) as u32)?;
+                        self.store32(mem, addr, value as u32)?;
+                        self.store32(mem, addr.wrapping_add(4), (value >> 32) as u32)?;
                     }
                     addr = addr.wrapping_add(8);
                 }
@@ -428,7 +434,7 @@ impl Cpu {
                     if load {
                         self.sregs[first + idx] = mem.load32(addr)?;
                     } else {
-                        mem.store32(addr, self.sregs[first + idx])?;
+                        self.store32(mem, addr, self.sregs[first + idx])?;
                     }
                     addr = addr.wrapping_add(4);
                 }
@@ -475,11 +481,11 @@ impl Cpu {
                     return Err(Trap::Unpredictable("VFP double register out of range"));
                 }
                 let value = self.dreg_bits(dd);
-                mem.store32(addr, value as u32)?;
-                mem.store32(addr.wrapping_add(4), (value >> 32) as u32)?;
+                self.store32(mem, addr, value as u32)?;
+                self.store32(mem, addr.wrapping_add(4), (value >> 32) as u32)?;
             } else {
                 let sd = vfp_single_d(instr);
-                mem.store32(addr, self.sregs[sd])?;
+                self.store32(mem, addr, self.sregs[sd])?;
             }
             return Ok(true);
         }
@@ -1246,9 +1252,9 @@ impl Cpu {
                 mem.load32(addr)?
             };
             if byte {
-                mem.store8(addr, self.arm_read_reg(rm, pc) as u8)?;
+                self.store8(mem, addr, self.arm_read_reg(rm, pc) as u8)?;
             } else {
-                mem.store32(addr, self.arm_read_reg(rm, pc))?;
+                self.store32(mem, addr, self.arm_read_reg(rm, pc))?;
             }
             self.write_reg_arm(rd, old);
             return Ok(true);
@@ -1289,7 +1295,16 @@ impl Cpu {
                 }
                 _ => unreachable!(),
             }
-            self.exclusive_addr = Some(addr);
+            self.exclusive_reservation = Some(ExclusiveReservation {
+                addr,
+                size: match exclusive_load_key {
+                    0x0190_0f9f => 4,
+                    0x01b0_0f9f => 8,
+                    0x01d0_0f9f => 1,
+                    0x01f0_0f9f => 2,
+                    _ => unreachable!(),
+                },
+            });
             return Ok(true);
         }
 
@@ -1320,7 +1335,11 @@ impl Cpu {
                 }
             }
             let addr = self.arm_read_reg(rn, pc);
-            if self.exclusive_addr == Some(addr) {
+            if self
+                .exclusive_reservation
+                .map(|reservation| reservation.addr == addr)
+                .unwrap_or(false)
+            {
                 match exclusive_store_key {
                     0x0180_0f90 => mem.store32(addr, self.arm_read_reg(rm, pc))?,
                     0x01a0_0f90 => {
@@ -1335,7 +1354,7 @@ impl Cpu {
             } else {
                 self.write_reg_arm(rd, 1);
             }
-            self.exclusive_addr = None;
+            self.exclusive_reservation = None;
             return Ok(true);
         }
 
@@ -1701,15 +1720,15 @@ impl Cpu {
             };
             self.write_reg_arm(rd, value);
         } else if op == 0b01 {
-            mem.store16(addr, self.arm_read_reg(rd, pc) as u16)?;
+            self.store16(mem, addr, self.arm_read_reg(rd, pc) as u16)?;
         } else if op == 0b10 {
             let lo = mem.load32(addr)?;
             let hi = mem.load32(addr.wrapping_add(4))?;
             self.write_reg_arm(rd, lo);
             self.write_reg_arm(rd + 1, hi);
         } else if op == 0b11 {
-            mem.store32(addr, self.arm_read_reg(rd, pc))?;
-            mem.store32(addr.wrapping_add(4), self.arm_read_reg(rd + 1, pc))?;
+            self.store32(mem, addr, self.arm_read_reg(rd, pc))?;
+            self.store32(mem, addr.wrapping_add(4), self.arm_read_reg(rd + 1, pc))?;
         } else {
             return Err(Trap::UndefinedArm { pc, instr });
         }
@@ -1785,9 +1804,9 @@ impl Cpu {
             };
             self.write_reg_arm(rd, value);
         } else if b {
-            mem.store8(addr, self.arm_read_reg(rd, pc) as u8)?;
+            self.store8(mem, addr, self.arm_read_reg(rd, pc) as u8)?;
         } else {
-            mem.store32(addr, self.arm_read_reg(rd, pc))?;
+            self.store32(mem, addr, self.arm_read_reg(rd, pc))?;
         }
         if !p || w {
             self.write_reg_arm(rn, off_addr);
@@ -1844,7 +1863,7 @@ impl Cpu {
                 let value = mem.load32(addr)?;
                 self.write_reg_arm(reg, value);
             } else {
-                mem.store32(addr, self.arm_read_reg(reg, pc))?;
+                self.store32(mem, addr, self.arm_read_reg(reg, pc))?;
             }
             addr = addr.wrapping_add(4);
         }
@@ -2190,9 +2209,9 @@ impl Cpu {
             let rd = (instr & 0x7) as usize;
             let addr = self.regs[rb].wrapping_add(self.regs[ro]);
             match op {
-                0 => mem.store32(addr, self.regs[rd])?,
-                1 => mem.store16(addr, self.regs[rd] as u16)?,
-                2 => mem.store8(addr, self.regs[rd] as u8)?,
+                0 => self.store32(mem, addr, self.regs[rd])?,
+                1 => self.store16(mem, addr, self.regs[rd] as u16)?,
+                2 => self.store8(mem, addr, self.regs[rd] as u8)?,
                 3 => self.regs[rd] = sign_extend(u32::from(mem.load8(addr)?), 8) as u32,
                 4 => self.regs[rd] = mem.load32(addr)?,
                 5 => self.regs[rd] = u32::from(mem.load16(addr)?),
@@ -2218,9 +2237,9 @@ impl Cpu {
                     mem.load32(addr)?
                 };
             } else if byte {
-                mem.store8(addr, self.regs[rd] as u8)?;
+                self.store8(mem, addr, self.regs[rd] as u8)?;
             } else {
-                mem.store32(addr, self.regs[rd])?;
+                self.store32(mem, addr, self.regs[rd])?;
             }
             return Ok(());
         }
@@ -2234,7 +2253,7 @@ impl Cpu {
             if load {
                 self.regs[rd] = u32::from(mem.load16(addr)?);
             } else {
-                mem.store16(addr, self.regs[rd] as u16)?;
+                self.store16(mem, addr, self.regs[rd] as u16)?;
             }
             return Ok(());
         }
@@ -2246,7 +2265,7 @@ impl Cpu {
             if load {
                 self.regs[rd] = mem.load32(addr)?;
             } else {
-                mem.store32(addr, self.regs[rd])?;
+                self.store32(mem, addr, self.regs[rd])?;
             }
             return Ok(());
         }
@@ -2355,12 +2374,12 @@ impl Cpu {
                 let mut addr = self.regs[13];
                 for reg in 0..8 {
                     if list & (1 << reg) != 0 {
-                        mem.store32(addr, self.regs[reg])?;
+                        self.store32(mem, addr, self.regs[reg])?;
                         addr = addr.wrapping_add(4);
                     }
                 }
                 if r {
-                    mem.store32(addr, self.regs[14])?;
+                    self.store32(mem, addr, self.regs[14])?;
                 }
             }
             return Ok(());
@@ -2395,7 +2414,7 @@ impl Cpu {
                 if load {
                     self.regs[reg] = mem.load32(addr)?;
                 } else {
-                    mem.store32(addr, self.regs[reg])?;
+                    self.store32(mem, addr, self.regs[reg])?;
                 }
                 addr = addr.wrapping_add(4);
             }
@@ -2548,6 +2567,37 @@ impl Cpu {
         self.check_dreg(idx)?;
         self.set_dreg_bits(idx, value);
         Ok(())
+    }
+
+    fn store8<M: Memory>(&mut self, mem: &mut M, addr: u32, value: u8) -> Result<()> {
+        mem.store8(addr, value)?;
+        self.clear_exclusive_if_store_overlaps(addr, 1);
+        Ok(())
+    }
+
+    fn store16<M: Memory>(&mut self, mem: &mut M, addr: u32, value: u16) -> Result<()> {
+        mem.store16(addr, value)?;
+        self.clear_exclusive_if_store_overlaps(addr, 2);
+        Ok(())
+    }
+
+    fn store32<M: Memory>(&mut self, mem: &mut M, addr: u32, value: u32) -> Result<()> {
+        mem.store32(addr, value)?;
+        self.clear_exclusive_if_store_overlaps(addr, 4);
+        Ok(())
+    }
+
+    fn clear_exclusive_if_store_overlaps(&mut self, addr: u32, size: u8) {
+        let Some(reservation) = self.exclusive_reservation else {
+            return;
+        };
+        let store_start = u64::from(addr);
+        let store_end = store_start + u64::from(size);
+        let res_start = u64::from(reservation.addr);
+        let res_end = res_start + u64::from(reservation.size);
+        if store_start < res_end && res_start < store_end {
+            self.exclusive_reservation = None;
+        }
     }
 
     fn check_dreg(&self, idx: usize) -> Result<()> {
@@ -4575,6 +4625,38 @@ mod tests {
         assert_eq!(cpu.reg(6), 0);
         assert_eq!(mem.load32(0x5050).unwrap(), 0xaaaa_bbbb);
         assert_eq!(mem.load32(0x5054).unwrap(), 0xcccc_dddd);
+
+        mem.store32(0x5060, 0x1111_1111).unwrap();
+        cpu.set_reg(4, 0x5060);
+        cpu.execute_arm(0xe194_0f9f, 0, &mut mem).unwrap(); // ldrex r0, [r4]
+        cpu.set_reg(2, 0x2222_2222);
+        cpu.execute_arm(0xe584_2000, 0, &mut mem).unwrap(); // str r2, [r4]
+        cpu.set_reg(3, 0x3333_3333);
+        cpu.execute_arm(0xe184_0f93, 0, &mut mem).unwrap(); // strex r0, r3, [r4]
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(mem.load32(0x5060).unwrap(), 0x2222_2222);
+
+        mem.store32(0x5068, 0x1111_1111).unwrap();
+        mem.store32(0x506c, 0x4444_4444).unwrap();
+        cpu.set_reg(4, 0x5068);
+        cpu.execute_arm(0xe194_0f9f, 0, &mut mem).unwrap(); // ldrex r0, [r4]
+        cpu.set_reg(2, 0x2222_2222);
+        cpu.execute_arm(0xe584_2004, 0, &mut mem).unwrap(); // str r2, [r4, #4]
+        cpu.set_reg(3, 0x3333_3333);
+        cpu.execute_arm(0xe184_0f93, 0, &mut mem).unwrap(); // strex r0, r3, [r4]
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(mem.load32(0x5068).unwrap(), 0x3333_3333);
+        assert_eq!(mem.load32(0x506c).unwrap(), 0x2222_2222);
+
+        mem.store16(0x5070, 0x1111).unwrap();
+        cpu.set_reg(4, 0x5070);
+        cpu.execute_arm(0xe1f4_0f9f, 0, &mut mem).unwrap(); // ldrexh r0, [r4]
+        cpu.set_reg(2, 0x22);
+        cpu.execute_arm(0xe5c4_2001, 0, &mut mem).unwrap(); // strb r2, [r4, #1]
+        cpu.set_reg(3, 0x3333);
+        cpu.execute_arm(0xe1e4_0f93, 0, &mut mem).unwrap(); // strexh r0, r3, [r4]
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(mem.load16(0x5070).unwrap(), 0x2211);
 
         cpu.execute_arm(0xf57f_f01f, 0, &mut mem).unwrap(); // clrex
         cpu.set_reg(3, 0x1234_5678);

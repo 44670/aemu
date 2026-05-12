@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 38 unit tests, 83 QEMU oracle tests, and doc tests.
+Result: passing, with 38 unit tests, 84 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -171,6 +171,9 @@ Result: passing, with 38 unit tests, 83 QEMU oracle tests, and doc tests.
   oracle coverage for success and failed store-after-`CLREX` paths
 - ARM conditional execution around exclusives now has QEMU oracle coverage
   showing a skipped conditional `STREX` preserves the monitor for a later store
+- ARMv6 exclusive monitor handling now clears the local reservation on normal
+  guest stores that overlap the reserved byte range, with QEMU oracle coverage
+  for overlapping word/halfword cases and a non-overlapping store case
 - ARM/Thumb no-op/control/hint handling listed in `docs/armv6_status.md`
 - Explicit user-mode privileged traps for `CPS`, `RFE`, and `SRS`
 - Non-baseline ARMv6T2/ARMv7 A32 encodings for `MOVW`, `MOVT`, bitfield
@@ -237,6 +240,8 @@ Result: passing, with 38 unit tests, 83 QEMU oracle tests, and doc tests.
 - VFP FPSCR exception flags and uncommon edge cases remain simplified or
   missing; VFPv3 fixed-point conversions remain outside the ARMv6/VFPv2
   baseline.
+- The exclusive monitor remains a single-core approximation and does not model
+  multiprocessor/global monitor effects.
 - Unpredictable cases are only partially checked; many are simplified to keep
   the HLE interpreter practical.
 - QEMU oracle coverage is representative, not exhaustive or randomized.
