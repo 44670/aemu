@@ -67,6 +67,8 @@ pub enum Isa {
 }
 
 const VFP_FPSID_ARM1136: u32 = 0x4101_20b4;
+const FPSCR_IOC: u32 = 1 << 0;
+const FPSCR_DZC: u32 = 1 << 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cpsr {
@@ -773,10 +775,10 @@ impl Cpu {
             let sd = vfp_single_d(instr);
             let sm = vfp_single_m(instr);
             self.exec_vfp_2op_f32(sd, sm, |value| match unary {
-                0x0eb0_0a40 => value,
-                0x0eb1_0a40 => value ^ 0x8000_0000,
-                0x0eb0_0ac0 => value & 0x7fff_ffff,
-                0x0eb1_0ac0 => f32::from_bits(value).sqrt().to_bits(),
+                0x0eb0_0a40 => (value, 0),
+                0x0eb1_0a40 => (value ^ 0x8000_0000, 0),
+                0x0eb0_0ac0 => (value & 0x7fff_ffff, 0),
+                0x0eb1_0ac0 => vfp_sqrt_f32(value),
                 _ => unreachable!(),
             })?;
             return Ok(true);
@@ -785,10 +787,10 @@ impl Cpu {
             let dd = vfp_double_d(instr);
             let dm = vfp_double_m(instr);
             self.exec_vfp_2op_f64(dd, dm, |value| match unary {
-                0x0eb0_0b40 => value,
-                0x0eb1_0b40 => value ^ 0x8000_0000_0000_0000,
-                0x0eb0_0bc0 => value & 0x7fff_ffff_ffff_ffff,
-                0x0eb1_0bc0 => f64::from_bits(value).sqrt().to_bits(),
+                0x0eb0_0b40 => (value, 0),
+                0x0eb1_0b40 => (value ^ 0x8000_0000_0000_0000, 0),
+                0x0eb0_0bc0 => (value & 0x7fff_ffff_ffff_ffff, 0),
+                0x0eb1_0bc0 => vfp_sqrt_f64(value),
                 _ => unreachable!(),
             })?;
             return Ok(true);
@@ -813,14 +815,20 @@ impl Cpu {
                 let sn = vfp_single_n(instr);
                 let sm = vfp_single_m(instr);
                 self.exec_vfp_3op_f32(sd, sn, sm, |dst, lhs, rhs| {
-                    op_kind.eval_f32(dst, lhs, rhs).to_bits()
+                    (
+                        op_kind.eval_f32(dst, lhs, rhs).to_bits(),
+                        op_kind.exception_flags_f32(lhs, rhs),
+                    )
                 })?;
             } else {
                 let dd = vfp_double_d(instr);
                 let dn = vfp_double_n(instr);
                 let dm = vfp_double_m(instr);
                 self.exec_vfp_3op_f64(dd, dn, dm, |dst, lhs, rhs| {
-                    op_kind.eval_f64(dst, lhs, rhs).to_bits()
+                    (
+                        op_kind.eval_f64(dst, lhs, rhs).to_bits(),
+                        op_kind.exception_flags_f64(lhs, rhs),
+                    )
                 })?;
             }
             return Ok(true);
@@ -2610,12 +2618,14 @@ impl Cpu {
 
     fn exec_vfp_2op_f32<F>(&mut self, mut vd: usize, mut vm: usize, op: F) -> Result<()>
     where
-        F: Fn(u32) -> u32,
+        F: Fn(u32) -> (u32, u32),
     {
         let plan = self.vfp_vector_plan(false, vd, vm)?;
         let mut src = self.sregs[vm];
         for lane in 0..plan.count {
-            self.sregs[vd] = op(src);
+            let (result, exception_flags) = op(src);
+            self.sregs[vd] = result;
+            self.fpscr |= exception_flags;
             if lane + 1 == plan.count {
                 break;
             }
@@ -2630,14 +2640,16 @@ impl Cpu {
 
     fn exec_vfp_2op_f64<F>(&mut self, mut vd: usize, mut vm: usize, op: F) -> Result<()>
     where
-        F: Fn(u64) -> u64,
+        F: Fn(u64) -> (u64, u32),
     {
         self.check_dreg(vd)?;
         self.check_dreg(vm)?;
         let plan = self.vfp_vector_plan(true, vd, vm)?;
         let mut src = self.dreg_bits(vm);
         for lane in 0..plan.count {
-            self.set_dreg_bits(vd, op(src));
+            let (result, exception_flags) = op(src);
+            self.set_dreg_bits(vd, result);
+            self.fpscr |= exception_flags;
             if lane + 1 == plan.count {
                 break;
             }
@@ -2658,14 +2670,16 @@ impl Cpu {
         op: F,
     ) -> Result<()>
     where
-        F: Fn(f32, f32, f32) -> u32,
+        F: Fn(f32, f32, f32) -> (u32, u32),
     {
         let plan = self.vfp_vector_plan(false, vd, vm)?;
         let mut lhs = self.sregs[vn];
         let mut rhs = self.sregs[vm];
         for lane in 0..plan.count {
             let dst = f32::from_bits(self.sregs[vd]);
-            self.sregs[vd] = op(dst, f32::from_bits(lhs), f32::from_bits(rhs));
+            let (result, exception_flags) = op(dst, f32::from_bits(lhs), f32::from_bits(rhs));
+            self.sregs[vd] = result;
+            self.fpscr |= exception_flags;
             if lane + 1 == plan.count {
                 break;
             }
@@ -2688,7 +2702,7 @@ impl Cpu {
         op: F,
     ) -> Result<()>
     where
-        F: Fn(f64, f64, f64) -> u64,
+        F: Fn(f64, f64, f64) -> (u64, u32),
     {
         self.check_dreg(vd)?;
         self.check_dreg(vn)?;
@@ -2698,7 +2712,9 @@ impl Cpu {
         let mut rhs = self.dreg_bits(vm);
         for lane in 0..plan.count {
             let dst = f64::from_bits(self.dreg_bits(vd));
-            self.set_dreg_bits(vd, op(dst, f64::from_bits(lhs), f64::from_bits(rhs)));
+            let (result, exception_flags) = op(dst, f64::from_bits(lhs), f64::from_bits(rhs));
+            self.set_dreg_bits(vd, result);
+            self.fpscr |= exception_flags;
             if lane + 1 == plan.count {
                 break;
             }
@@ -2985,6 +3001,60 @@ impl VfpBinaryOp {
             Self::Sub => lhs - rhs,
             Self::Div => lhs / rhs,
         }
+    }
+
+    fn exception_flags_f32(self, lhs: f32, rhs: f32) -> u32 {
+        match self {
+            Self::Div => vfp_div_exception_flags_f32(lhs, rhs),
+            _ => 0,
+        }
+    }
+
+    fn exception_flags_f64(self, lhs: f64, rhs: f64) -> u32 {
+        match self {
+            Self::Div => vfp_div_exception_flags_f64(lhs, rhs),
+            _ => 0,
+        }
+    }
+}
+
+fn vfp_sqrt_f32(value: u32) -> (u32, u32) {
+    let value = f32::from_bits(value);
+    let flags = if value < 0.0 { FPSCR_IOC } else { 0 };
+    (value.sqrt().to_bits(), flags)
+}
+
+fn vfp_sqrt_f64(value: u64) -> (u64, u32) {
+    let value = f64::from_bits(value);
+    let flags = if value < 0.0 { FPSCR_IOC } else { 0 };
+    (value.sqrt().to_bits(), flags)
+}
+
+fn vfp_div_exception_flags_f32(lhs: f32, rhs: f32) -> u32 {
+    if rhs == 0.0 {
+        if lhs == 0.0 {
+            FPSCR_IOC
+        } else if lhs.is_finite() {
+            FPSCR_DZC
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+fn vfp_div_exception_flags_f64(lhs: f64, rhs: f64) -> u32 {
+    if rhs == 0.0 {
+        if lhs == 0.0 {
+            FPSCR_IOC
+        } else if lhs.is_finite() {
+            FPSCR_DZC
+        } else {
+            0
+        }
+    } else {
+        0
     }
 }
 
@@ -5198,6 +5268,43 @@ mod tests {
         cpu.execute_arm(0xeeb7_7bc8, 0, &mut mem).unwrap(); // vcvt.f32.f64 s14, d8
         assert_eq!(f32::from_bits(cpu.sreg(14)), 2.5);
         assert_eq!(cpu.sreg(15), 0xffff_ffff);
+    }
+
+    #[test]
+    fn vfpv2_basic_exception_flags_are_cumulative() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_sreg(0, 1.0f32.to_bits());
+        cpu.set_sreg(1, 0.0f32.to_bits());
+        cpu.execute_arm(0xee80_1a20, 0, &mut mem).unwrap(); // vdiv.f32 s2, s0, s1
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_DZC);
+
+        cpu.set_sreg(6, (-1.0f32).to_bits());
+        cpu.execute_arm(0xeeb1_2ac3, 0, &mut mem).unwrap(); // vsqrt.f32 s4, s6
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_IOC | FPSCR_DZC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 0.0f32.to_bits());
+        cpu.set_sreg(1, 0.0f32.to_bits());
+        cpu.execute_arm(0xee80_1a20, 0, &mut mem).unwrap(); // vdiv.f32 s2, s0, s1
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 1.0f64.to_bits());
+        cpu.set_dreg(1, 0.0f64.to_bits());
+        cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_DZC);
+
+        cpu.set_dreg(6, (-1.0f64).to_bits());
+        cpu.execute_arm(0xeeb1_4bc6, 0, &mut mem).unwrap(); // vsqrt.f64 d4, d6
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_IOC | FPSCR_DZC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 0.0f64.to_bits());
+        cpu.set_dreg(1, 0.0f64.to_bits());
+        cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_DZC), FPSCR_IOC);
     }
 
     #[test]
