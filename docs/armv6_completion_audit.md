@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 48 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 49 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -110,6 +110,8 @@ Result: passing, with 36 unit tests, 48 QEMU oracle tests, and doc tests.
   broader QEMU oracle coverage across representative signed, unsigned,
   halving, and saturating parallel add/sub variants, plus shifted scalar
   saturation forms and direct invalid `PC` form traps
+- ARMv6 signed/unsigned extend-add families now have QEMU oracle matrix
+  coverage across byte, halfword, dual-byte, add/non-add, and rotation forms
 - ARMv6 parallel add/sub families now also have a full 36-variant QEMU oracle
   matrix across signed, unsigned, saturating, and halving
   `*ADD16`/`*ASX`/`*SAX`/`*SUB16`/`*ADD8`/`*SUB8` encodings

@@ -65,6 +65,15 @@ fn arm_parallel_media_instr(family: u32, op: u32, rd: usize, rn: usize, rm: usiz
     0xe600_0f10 | (family << 20) | ((rn as u32) << 16) | ((rd as u32) << 12) | (op << 5) | rm as u32
 }
 
+fn arm_extend_instr(key: u32, rn: usize, rd: usize, rm: usize, rotate: u32) -> u32 {
+    0xe000_0000
+        | key
+        | ((rn as u32) << 16)
+        | ((rd as u32) << 12)
+        | ((rotate & 0x3) << 10)
+        | rm as u32
+}
+
 fn arm_signed_halfword_instr(
     base: u32,
     rd_or_hi: usize,
@@ -1328,6 +1337,70 @@ fn qemu_oracle_extend_and_reverse_match_interpreter() {
         0,
         cpu.reg(0) ^ cpu.reg(2) ^ cpu.reg(4) ^ cpu.reg(6) ^ cpu.reg(9),
     );
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_extend_add_matrix_matches_interpreter() {
+    const CASES: &[(&str, u32, bool)] = &[
+        ("sxtb16", 0x0680_0070, false),
+        ("sxtab16", 0x0680_0070, true),
+        ("sxtb", 0x06a0_0070, false),
+        ("sxtab", 0x06a0_0070, true),
+        ("sxth", 0x06b0_0070, false),
+        ("sxtah", 0x06b0_0070, true),
+        ("uxtb16", 0x06c0_0070, false),
+        ("uxtab16", 0x06c0_0070, true),
+        ("uxtb", 0x06e0_0070, false),
+        ("uxtab", 0x06e0_0070, true),
+        ("uxth", 0x06f0_0070, false),
+        ("uxtah", 0x06f0_0070, true),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (idx, (mnemonic, _, add)) in CASES.iter().enumerate() {
+        let rotate = ((idx % 4) * 8) as u32;
+        let base = 0x0100_2000u32.wrapping_add(idx as u32 * 0x0001_0101);
+        let value = 0x807f_01feu32.rotate_left(idx as u32 * 3);
+        let rotate_suffix = if rotate == 0 {
+            String::new()
+        } else {
+            format!(", ror #{rotate}")
+        };
+        body.push_str(&format!(
+            "ldr r1, ={base:#010x}\n\
+             ldr r2, ={value:#010x}\n"
+        ));
+        if *add {
+            body.push_str(&format!("{mnemonic} r0, r1, r2{rotate_suffix}\n"));
+        } else {
+            body.push_str(&format!("{mnemonic} r0, r2{rotate_suffix}\n"));
+        }
+        body.push_str("eor r12, r12, r0\n");
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (idx, (_, key, add)) in CASES.iter().enumerate() {
+        let base = 0x0100_2000u32.wrapping_add(idx as u32 * 0x0001_0101);
+        let value = 0x807f_01feu32.rotate_left(idx as u32 * 3);
+        let rotate = (idx % 4) as u32;
+        cpu.set_reg(1, base);
+        cpu.set_reg(2, value);
+        let rn = if *add { 1 } else { 15 };
+        cpu.execute_arm(arm_extend_instr(*key, rn, 0, 2, rotate), 0, &mut mem)
+            .unwrap();
+        folded ^= cpu.reg(0);
+    }
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
