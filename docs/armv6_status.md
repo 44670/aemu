@@ -87,11 +87,12 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   square-root/divide, invalid float-to-integer conversions, and selected
   arithmetic cases: `DZC` for finite nonzero divide by zero and `IOC` for
   negative square root, zero divided by zero, invalid single-precision
-  arithmetic, NaN conversion, out-of-range conversion, and negative unsigned
-  conversion; `IXC` for inexact single-precision arithmetic, inexact
-  float-to-integer conversions that round without raising `IOC`, inexact
-  integer-to-single conversions, and double-to-single narrowing; `OFC`/`UFC`
-  for overflowing or underflowing single-precision arithmetic and
+  arithmetic, selected invalid double-precision arithmetic, NaN conversion,
+  out-of-range conversion, and negative unsigned conversion; `IXC` for inexact
+  single-precision arithmetic, inexact float-to-integer conversions that round
+  without raising `IOC`, inexact integer-to-single conversions, and
+  double-to-single narrowing; `OFC`/`UFC` for overflowing or underflowing
+  single-precision arithmetic and
   double-to-single narrowing
 - VFP status/compare subset: single and double `VCMP`/`VCMPE`, compare with
   zero, `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
@@ -125,9 +126,10 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags remain incomplete
   beyond basic `IOC`/`DZC` divide, square-root, compare-NaN, selected
-  single-precision arithmetic, and conversion invalid cases, plus basic
-  conversion `IXC`/`OFC`/`UFC` cases; double-precision arithmetic flags and
-  less common arithmetic/conversion edge cases still need an
+  single-precision arithmetic, selected double invalid arithmetic, and
+  conversion invalid cases, plus basic conversion `IXC`/`OFC`/`UFC` cases;
+  double-precision arithmetic `IXC`/`OFC`/`UFC` and less common
+  arithmetic/conversion edge cases still need an
   instruction-by-instruction audit. VFPv3 fixed-point conversions are outside
   the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
