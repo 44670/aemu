@@ -6099,6 +6099,42 @@ fn qemu_oracle_vfp_conversion_exception_flags_match_interpreter() {
          vcvt.s32.f64 s1, d0\n",
     );
     fold_conversion(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x01000001\n\
+         vmov s0, r0\n\
+         vcvt.f32.s32 s1, s0\n",
+    );
+    fold_conversion(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x01000001\n\
+         vmov s0, r0\n\
+         vcvt.f32.u32 s1, s0\n",
+    );
+    fold_conversion(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x01000000\n\
+         vmov s0, r0\n\
+         vcvt.f32.s32 s1, s0\n",
+    );
+    fold_conversion(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0xffffffff\n\
+         vmov s0, r0\n\
+         vcvt.f64.u32 d0, s0\n\
+         vmov r4, r5, d0\n\
+         vmrs r3, fpscr\n",
+    );
+    fold_reg(&mut body, "r4");
+    fold_reg(&mut body, "r5");
+    fold_reg(&mut body, "r3");
     body.push_str("mov r0, r12");
 
     let asm = oracle_program(&body);
@@ -6169,6 +6205,30 @@ fn qemu_oracle_vfp_conversion_exception_flags_match_interpreter() {
     cpu.set_dreg(0, 4.0f64.to_bits());
     cpu.execute_arm(0xeefd_0bc0, 0, &mut mem).unwrap(); // vcvt.s32.f64 s1, d0
     folded ^= byte_fold(cpu.sreg(1));
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_sreg(0, 0x0100_0001);
+    cpu.execute_arm(0xeef8_0ac0, 0, &mut mem).unwrap(); // vcvt.f32.s32 s1, s0
+    folded ^= byte_fold(cpu.sreg(1));
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_sreg(0, 0x0100_0001);
+    cpu.execute_arm(0xeef8_0a40, 0, &mut mem).unwrap(); // vcvt.f32.u32 s1, s0
+    folded ^= byte_fold(cpu.sreg(1));
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_sreg(0, 0x0100_0000);
+    cpu.execute_arm(0xeef8_0ac0, 0, &mut mem).unwrap(); // vcvt.f32.s32 s1, s0
+    folded ^= byte_fold(cpu.sreg(1));
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_sreg(0, 0xffff_ffff);
+    cpu.execute_arm(0xeeb8_0b40, 0, &mut mem).unwrap(); // vcvt.f64.u32 d0, s0
+    folded ^= double_byte_fold(cpu.dreg(0));
     folded ^= byte_fold(cpu.fpscr);
     cpu.set_reg(0, folded);
 

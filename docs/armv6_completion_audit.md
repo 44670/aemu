@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 42 unit tests, 87 QEMU oracle tests, and doc tests.
+Result: passing, with 43 unit tests, 87 QEMU oracle tests, and doc tests.
 
 Additional oracle verification:
 
@@ -239,6 +239,9 @@ Result: passing, with 87 QEMU oracle tests and no skip diagnostics.
 - VFPv2 float-to-integer conversions now set cumulative `IXC` for inexact
   rounded conversions that do not raise `IOC`, with direct unit coverage and
   expanded QEMU oracle coverage
+- VFPv2 integer-to-single conversions now set cumulative `IXC` when the
+  `S32`/`U32` source cannot be represented exactly as `F32`; integer-to-double
+  remains exact for 32-bit inputs
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user

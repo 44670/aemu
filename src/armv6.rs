@@ -765,13 +765,19 @@ impl Cpu {
             0x0eb8_0ac0 => {
                 let sd = vfp_single_d(instr);
                 let sm = vfp_single_m(instr);
-                self.sregs[sd] = ((self.sregs[sm] as i32) as f32).to_bits();
+                let value = self.sregs[sm] as i32;
+                let result = value as f32;
+                self.sregs[sd] = result.to_bits();
+                self.fpscr |= vfp_int_to_f32_inexact_flag(f64::from(value), result);
                 return Ok(true);
             }
             0x0eb8_0a40 => {
                 let sd = vfp_single_d(instr);
                 let sm = vfp_single_m(instr);
-                self.sregs[sd] = (self.sregs[sm] as f32).to_bits();
+                let value = self.sregs[sm];
+                let result = value as f32;
+                self.sregs[sd] = result.to_bits();
+                self.fpscr |= vfp_int_to_f32_inexact_flag(f64::from(value), result);
                 return Ok(true);
             }
             0x0eb8_0bc0 => {
@@ -3159,6 +3165,14 @@ fn f64_is_signaling_nan_bits(value: u64) -> bool {
         && (value & 0x0008_0000_0000_0000) == 0
 }
 
+fn vfp_int_to_f32_inexact_flag(value: f64, result: f32) -> u32 {
+    if f64::from(result) != value {
+        FPSCR_IXC
+    } else {
+        0
+    }
+}
+
 fn vfp_round_by_fpscr(value: f64, fpscr: u32) -> f64 {
     if !value.is_finite() {
         return value;
@@ -5512,6 +5526,35 @@ mod tests {
         cpu.execute_arm(0xeeb4_0bc1, 0, &mut mem).unwrap(); // vcmpe.f64 d0, d1
         assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
         assert_eq!(cpu.fpscr & 0xf000_0000, 0x3000_0000);
+    }
+
+    #[test]
+    fn vfpv2_integer_to_single_inexact_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_sreg(0, 0x0100_0001);
+        cpu.execute_arm(0xeef8_0ac0, 0, &mut mem).unwrap(); // vcvt.f32.s32 s1, s0
+        assert_eq!(f32::from_bits(cpu.sreg(1)), 16_777_216.0);
+        assert_eq!(cpu.fpscr & FPSCR_IXC, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 0x0100_0001);
+        cpu.execute_arm(0xeef8_0a40, 0, &mut mem).unwrap(); // vcvt.f32.u32 s1, s0
+        assert_eq!(f32::from_bits(cpu.sreg(1)), 16_777_216.0);
+        assert_eq!(cpu.fpscr & FPSCR_IXC, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 0x0100_0000);
+        cpu.execute_arm(0xeef8_0ac0, 0, &mut mem).unwrap(); // vcvt.f32.s32 s1, s0
+        assert_eq!(f32::from_bits(cpu.sreg(1)), 16_777_216.0);
+        assert_eq!(cpu.fpscr & FPSCR_IXC, 0);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 0xffff_ffff);
+        cpu.execute_arm(0xeeb8_0b40, 0, &mut mem).unwrap(); // vcvt.f64.u32 d0, s0
+        assert_eq!(f64::from_bits(cpu.dreg(0)), f64::from(u32::MAX));
+        assert_eq!(cpu.fpscr & FPSCR_IXC, 0);
     }
 
     #[test]
