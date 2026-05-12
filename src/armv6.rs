@@ -5078,6 +5078,47 @@ mod tests {
     }
 
     #[test]
+    fn vfpv2_compare_and_conversion_remain_scalar_in_vector_mode() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.fpscr = 1 << 16; // LEN=2, stride=1.
+        cpu.set_sreg(8, 1.0f32.to_bits());
+        cpu.set_sreg(9, 2.0f32.to_bits());
+        cpu.execute_arm(0xeeb4_4a64, 0, &mut mem).unwrap(); // vcmp.f32 s8, s9
+        cpu.execute_arm(0xeef1_fa10, 0, &mut mem).unwrap(); // vmrs APSR_nzcv, fpscr
+        assert!(cpu.cpsr.n);
+        assert!(!cpu.cpsr.z);
+        assert!(!cpu.cpsr.c);
+        assert!(!cpu.cpsr.v);
+
+        cpu.set_sreg(10, 0xaaaa_aaaa);
+        cpu.set_sreg(11, 0xbbbb_bbbb);
+        cpu.set_sreg(16, 3.5f32.to_bits());
+        cpu.set_sreg(17, 9.5f32.to_bits());
+        cpu.execute_arm(0xeebd_5ac8, 0, &mut mem).unwrap(); // vcvt.s32.f32 s10, s16
+        assert_eq!(cpu.sreg(10), 3);
+        assert_eq!(cpu.sreg(11), 0xbbbb_bbbb);
+
+        cpu.fpscr = (1 << 16) | (1 << 22); // LEN=2, round toward plus infinity.
+        cpu.set_sreg(12, 0xcccc_cccc);
+        cpu.set_sreg(13, 0xdddd_dddd);
+        cpu.set_sreg(18, 2.25f32.to_bits());
+        cpu.set_sreg(19, 7.25f32.to_bits());
+        cpu.execute_arm(0xeebc_6a49, 0, &mut mem).unwrap(); // vcvtr.u32.f32 s12, s18
+        assert_eq!(cpu.sreg(12), 3);
+        assert_eq!(cpu.sreg(13), 0xdddd_dddd);
+
+        cpu.set_sreg(14, 0xeeee_eeee);
+        cpu.set_sreg(15, 0xffff_ffff);
+        cpu.set_dreg(8, 2.5f64.to_bits());
+        cpu.set_dreg(9, 7.5f64.to_bits());
+        cpu.execute_arm(0xeeb7_7bc8, 0, &mut mem).unwrap(); // vcvt.f32.f64 s14, d8
+        assert_eq!(f32::from_bits(cpu.sreg(14)), 2.5);
+        assert_eq!(cpu.sreg(15), 0xffff_ffff);
+    }
+
+    #[test]
     fn vfpv3_nonbaseline_encodings_trap_undefined() {
         let cases = [
             0xeeb7_0a00, // vmov.f32 s0, #1.0

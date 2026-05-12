@@ -5323,6 +5323,121 @@ fn qemu_oracle_vfp_short_vector_arithmetic_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_vfp_compare_conversion_stay_scalar_in_vector_mode() {
+    let mut body = String::from(
+        ".fpu vfp\n\
+         mov r12, #0\n\
+         ldr r2, =0x00010000\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x3f800000\n\
+         vmov s8, r0\n\
+         ldr r0, =0x40000000\n\
+         vmov s9, r0\n\
+         vcmp.f32 s8, s9\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r3, cpsr\n\
+         eor r12, r12, r3, lsr #28\n\
+         ldr r0, =0xaaaaaaaa\n\
+         vmov s10, r0\n\
+         ldr r0, =0xbbbbbbbb\n\
+         vmov s11, r0\n\
+         ldr r0, =0x40600000\n\
+         vmov s16, r0\n\
+         ldr r0, =0x41180000\n\
+         vmov s17, r0\n\
+         vcvt.s32.f32 s10, s16\n",
+    );
+    let fold_reg = |body: &mut String, reg: &str| {
+        body.push_str(&format!(
+            "eor r12, r12, {reg}\n\
+             eor r12, r12, {reg}, lsr #8\n\
+             eor r12, r12, {reg}, lsr #16\n\
+             eor r12, r12, {reg}, lsr #24\n"
+        ));
+    };
+    let fold_single = |body: &mut String, reg: &str| {
+        body.push_str(&format!("vmov r10, {reg}\n"));
+        fold_reg(body, "r10");
+    };
+    fold_single(&mut body, "s10");
+    fold_single(&mut body, "s11");
+    body.push_str(
+        "ldr r2, =0x00410000\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0xcccccccc\n\
+         vmov s12, r0\n\
+         ldr r0, =0xdddddddd\n\
+         vmov s13, r0\n\
+         ldr r0, =0x40100000\n\
+         vmov s18, r0\n\
+         ldr r0, =0x40e80000\n\
+         vmov s19, r0\n\
+         vcvtr.u32.f32 s12, s18\n",
+    );
+    fold_single(&mut body, "s12");
+    fold_single(&mut body, "s13");
+    body.push_str(
+        "ldr r0, =0xeeeeeeee\n\
+         vmov s14, r0\n\
+         ldr r0, =0xffffffff\n\
+         vmov s15, r0\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x40040000\n\
+         vmov d8, r0, r1\n\
+         ldr r1, =0x401e0000\n\
+         vmov d9, r0, r1\n\
+         vcvt.f32.f64 s14, d8\n",
+    );
+    fold_single(&mut body, "s14");
+    fold_single(&mut body, "s15");
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+
+    cpu.fpscr = 1 << 16;
+    cpu.set_sreg(8, 1.0f32.to_bits());
+    cpu.set_sreg(9, 2.0f32.to_bits());
+    cpu.execute_arm(0xeeb4_4a64, 0, &mut mem).unwrap(); // vcmp.f32 s8, s9
+    cpu.execute_arm(0xeef1_fa10, 0, &mut mem).unwrap(); // vmrs APSR_nzcv, fpscr
+    folded ^= cpu.cpsr.to_u32() >> 28;
+
+    cpu.set_sreg(10, 0xaaaa_aaaa);
+    cpu.set_sreg(11, 0xbbbb_bbbb);
+    cpu.set_sreg(16, 3.5f32.to_bits());
+    cpu.set_sreg(17, 9.5f32.to_bits());
+    cpu.execute_arm(0xeebd_5ac8, 0, &mut mem).unwrap(); // vcvt.s32.f32 s10, s16
+    folded ^= byte_fold(cpu.sreg(10));
+    folded ^= byte_fold(cpu.sreg(11));
+
+    cpu.fpscr = (1 << 16) | (1 << 22);
+    cpu.set_sreg(12, 0xcccc_cccc);
+    cpu.set_sreg(13, 0xdddd_dddd);
+    cpu.set_sreg(18, 2.25f32.to_bits());
+    cpu.set_sreg(19, 7.25f32.to_bits());
+    cpu.execute_arm(0xeebc_6a49, 0, &mut mem).unwrap(); // vcvtr.u32.f32 s12, s18
+    folded ^= byte_fold(cpu.sreg(12));
+    folded ^= byte_fold(cpu.sreg(13));
+
+    cpu.set_sreg(14, 0xeeee_eeee);
+    cpu.set_sreg(15, 0xffff_ffff);
+    cpu.set_dreg(8, 2.5f64.to_bits());
+    cpu.set_dreg(9, 7.5f64.to_bits());
+    cpu.execute_arm(0xeeb7_7bc8, 0, &mut mem).unwrap(); // vcvt.f32.f64 s14, d8
+    folded ^= byte_fold(cpu.sreg(14));
+    folded ^= byte_fold(cpu.sreg(15));
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_vfp_load_store_matrix_matches_interpreter() {
     let mut body = String::from(
         ".fpu vfp\n\

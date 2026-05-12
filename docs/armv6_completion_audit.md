@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 37 unit tests, 81 QEMU oracle tests, and doc tests.
+Result: passing, with 38 unit tests, 82 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -212,6 +212,9 @@ Result: passing, with 37 unit tests, 81 QEMU oracle tests, and doc tests.
   VFPv2 arithmetic and unary operations, with unit coverage for stride-1,
   stride-2, scalar source replication, double precision, and invalid
   length/stride traps, plus QEMU oracle coverage for the stride-1 path
+- VFP compare and conversion paths now have unit and QEMU oracle coverage
+  showing they remain scalar when FPSCR `LEN` is nonzero, matching the
+  documented VFP scalar-only operation class
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user

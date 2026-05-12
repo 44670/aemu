@@ -84,9 +84,11 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   handling and invalid vector length/stride traps
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
-  privileged traps for user-mode `FPEXC`/`FPINST` accesses
+  privileged traps for user-mode `FPEXC`/`FPINST` accesses; compare remains
+  scalar when FPSCR short-vector `LEN` is nonzero
 - VFP conversion subset: `VCVT` between `F32`, `F64`, `S32`, and `U32`,
-  plus `VCVTR` float-to-integer rounding through FPSCR rounding mode
+  plus `VCVTR` float-to-integer rounding through FPSCR rounding mode;
+  conversion remains scalar when FPSCR short-vector `LEN` is nonzero
 - Explicit unpredictable traps for invalid VFP core-register forms that use
   `PC`, including single-register `VMOV` and `VMSR FPSCR, PC`
 - Explicit undefined traps for non-baseline VFPv3 immediate moves and
