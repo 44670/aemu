@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 32 unit tests, 32 QEMU oracle tests, and doc tests.
+Result: passing, with 33 unit tests, 32 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -92,6 +92,8 @@ Result: passing, with 32 unit tests, 32 QEMU oracle tests, and doc tests.
 - VFPv2 arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion,
   move, `VMOV.32` double-lane, and load/store subset listed in
   `docs/armv6_status.md`
+- VFPv2 load/store invalid ranges, empty multiple-transfer lists, and
+  writeback with `PC` as base trap explicitly
 - CP15 user thread ID shim: `TPIDRURW`, `TPIDRURO`, with explicit traps for
   invalid `PC` source/destination forms
 - CP15 barrier HLE no-ops for ARMv6-style DMB, DSB, and ISB/prefetch-flush

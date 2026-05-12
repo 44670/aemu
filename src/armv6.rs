@@ -373,6 +373,16 @@ impl Cpu {
             let rn = ((instr >> 16) & 0xf) as usize;
             let words = instr & 0xff;
             let bytes = words * 4;
+            if rn == 15 && w {
+                return Err(Trap::Unpredictable(
+                    "VFP multiple transfer writeback with PC base",
+                ));
+            }
+            if words == 0 {
+                return Err(Trap::Unpredictable(
+                    "VFP multiple transfer empty register list",
+                ));
+            }
             let base = self.arm_read_reg(rn, pc);
             let start = match (u, p) {
                 (true, false) => base,
@@ -383,7 +393,11 @@ impl Cpu {
             let mut addr = start;
             if double {
                 let first = vfp_double_d(instr);
-                for idx in 0..(words / 2) as usize {
+                let regs = (words / 2) as usize;
+                if regs == 0 || regs > 16 || first + regs > 16 {
+                    return Err(Trap::Unpredictable("VFP multiple transfer register range"));
+                }
+                for idx in 0..regs {
                     if load {
                         let lo = u64::from(mem.load32(addr)?);
                         let hi = u64::from(mem.load32(addr.wrapping_add(4))?);
@@ -397,7 +411,11 @@ impl Cpu {
                 }
             } else {
                 let first = vfp_single_d(instr);
-                for idx in 0..words as usize {
+                let regs = words as usize;
+                if first + regs > 32 {
+                    return Err(Trap::Unpredictable("VFP multiple transfer register range"));
+                }
+                for idx in 0..regs {
                     if load {
                         self.sregs[first + idx] = mem.load32(addr)?;
                     } else {
@@ -432,6 +450,9 @@ impl Cpu {
             if instr & (1 << 20) != 0 {
                 if double {
                     let dd = vfp_double_d(instr);
+                    if dd >= 16 {
+                        return Err(Trap::Unpredictable("VFP double register out of range"));
+                    }
                     let lo = u64::from(mem.load32(addr)?);
                     let hi = u64::from(mem.load32(addr.wrapping_add(4))?);
                     self.set_dreg_bits(dd, lo | (hi << 32));
@@ -440,7 +461,11 @@ impl Cpu {
                     self.sregs[sd] = mem.load32(addr)?;
                 }
             } else if double {
-                let value = self.dreg_bits(vfp_double_d(instr));
+                let dd = vfp_double_d(instr);
+                if dd >= 16 {
+                    return Err(Trap::Unpredictable("VFP double register out of range"));
+                }
+                let value = self.dreg_bits(dd);
                 mem.store32(addr, value as u32)?;
                 mem.store32(addr.wrapping_add(4), (value >> 32) as u32)?;
             } else {
@@ -4839,6 +4864,40 @@ mod tests {
         assert_eq!(cpu.reg(0), 0x110);
         assert_eq!(f64::from_bits(cpu.dreg(0)), 1.25);
         assert_eq!(f64::from_bits(cpu.dreg(1)), 2.5);
+    }
+
+    #[test]
+    fn vfpv2_load_store_invalid_ranges_trap() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+        cpu.set_reg(0, 0x40);
+
+        let err = cpu.execute_arm(0xedd0_0b00, 0, &mut mem).unwrap_err(); // vldr d16, [r0]
+        assert_eq!(err, Trap::Unpredictable("VFP double register out of range"));
+
+        let err = cpu.execute_arm(0xeca0_0a00, 0, &mut mem).unwrap_err(); // vstmia r0!, {}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("VFP multiple transfer empty register list")
+        );
+
+        let err = cpu.execute_arm(0xecaf_0a01, 0, &mut mem).unwrap_err(); // vstmia pc!, {s0}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("VFP multiple transfer writeback with PC base")
+        );
+
+        let err = cpu.execute_arm(0xece0_0b04, 0, &mut mem).unwrap_err(); // vstmia r0!, {d16-d17}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("VFP multiple transfer register range")
+        );
+
+        let err = cpu.execute_arm(0xece0_fa02, 0, &mut mem).unwrap_err(); // vstmia r0!, {s31-s32}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("VFP multiple transfer register range")
+        );
     }
 
     #[test]

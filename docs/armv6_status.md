@@ -67,6 +67,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   double `VADD`, `VSUB`, `VMUL`, `VNMUL`, `VMLA`, `VMLS`, `VNMLA`, `VNMLS`,
   `VDIV`, `VABS`, `VNEG`, `VSQRT`, plus `VLDR`/`VSTR` and
   `VLDM`/`VSTM`/`VPUSH`/`VPOP` forms
+- Explicit unpredictable traps for invalid VFPv2 load/store register ranges,
+  empty VFP multiple-transfer lists, and writeback with `PC` as the base
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`, `VMSR`
 - VFP conversion subset: `VCVT` between `F32`, `F64`, `S32`, and `U32`,
