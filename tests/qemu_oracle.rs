@@ -122,6 +122,34 @@ fn qemu_oracle_usad8_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_usad8_usada8_pair_matches_interpreter() {
+    let asm = oracle_program(
+        "ldr r1, =0x10203040\n\
+         ldr r2, =0x18102850\n\
+         usad8 r0, r1, r2\n\
+         mov r12, r0\n\
+         mov r3, #13\n\
+         usada8 r0, r1, r2, r3\n\
+         eor r0, r0, r12",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_reg(1, 0x1020_3040);
+    cpu.set_reg(2, 0x1810_2850);
+    cpu.execute_arm(0xe780_f211, 0, &mut mem).unwrap(); // usad8 r0, r1, r2
+    let folded = cpu.reg(0);
+    cpu.set_reg(3, 13);
+    cpu.execute_arm(0xe780_3211, 0, &mut mem).unwrap(); // usada8 r0, r1, r2, r3
+    cpu.set_reg(0, cpu.reg(0) ^ folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_smlabb_matches_interpreter() {
     let asm = oracle_program(
         "mov r1, #3\n\
