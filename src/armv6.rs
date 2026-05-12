@@ -4901,6 +4901,23 @@ mod tests {
     }
 
     #[test]
+    fn vfpv3_nonbaseline_encodings_trap_undefined() {
+        let cases = [
+            0xeeb7_0a00, // vmov.f32 s0, #1.0
+            0xeeba_1a44, // vcvt.f32.s16 s2, s2, #8
+            0xeebe_2a44, // vcvt.s16.f32 s4, s4, #8
+        ];
+
+        for (idx, instr) in cases.into_iter().enumerate() {
+            let mut cpu = Cpu::new();
+            let mut mem = VecMemory::new(0, 4);
+            let pc = 0x6000 + (idx as u32 * 4);
+            let err = cpu.execute_arm(instr, pc, &mut mem).unwrap_err();
+            assert_eq!(err, Trap::UndefinedArm { pc, instr });
+        }
+    }
+
+    #[test]
     fn vfpv2_double_arithmetic_and_memory_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 0x200);

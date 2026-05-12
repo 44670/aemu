@@ -87,6 +87,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   plus `VCVTR` float-to-integer rounding through FPSCR rounding mode
 - Explicit unpredictable traps for invalid VFP core-register forms that use
   `PC`, including single-register `VMOV` and `VMSR FPSCR, PC`
+- Explicit undefined traps for non-baseline VFPv3 immediate moves and
+  fixed-point conversion encodings that are outside ARMv6/VFPv2
 - Thumb-1 common instruction set: shifts, ALU ops, high-register ops,
   literal loads, load/store forms, push/pop, multiple load/store,
   including `LDMIA` base-in-list writeback suppression,
@@ -106,8 +108,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   multiply, and absolute-difference cases has not been audited
   instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags, vector-stride
-  emulation, fixed-point conversions, and several less common conversion/move
-  forms still need an instruction-by-instruction audit.
+  emulation, and several less common edge cases still need an
+  instruction-by-instruction audit. VFPv3 fixed-point conversions are outside
+  the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.
 - Thumb-2 is intentionally not implemented for the ARMv6 baseline, but
