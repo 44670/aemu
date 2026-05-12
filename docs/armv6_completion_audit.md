@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 31 unit tests, 32 QEMU oracle tests, and doc tests.
+Result: passing, with 32 unit tests, 32 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -67,6 +67,8 @@ Result: passing, with 31 unit tests, 32 QEMU oracle tests, and doc tests.
   cases
 - Thumb `LDMIA` suppresses writeback when the base register is in the load
   list, matching ARMv6/QEMU behavior
+- Thumb-1 invalid high-register `ADD/CMP`, empty `PUSH/POP`, and `STMIA`
+  base-in-list forms trap explicitly
 - ARMv5TE and ARMv6 multiply/DSP families listed in `docs/armv6_status.md`,
   with QEMU oracle coverage for representative dual 16-bit multiply,
   dual-long multiply, and high-word multiply variants, plus direct traps for

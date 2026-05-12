@@ -2062,8 +2062,20 @@ impl Cpu {
             let lhs = self.thumb_read_reg(rd, pc);
             let rhs = self.thumb_read_reg(rm, pc);
             match op {
-                0 => self.write_reg_thumb(rd, lhs.wrapping_add(rhs)),
+                0 => {
+                    if rd == 15 && rm == 15 {
+                        return Err(Trap::Unpredictable(
+                            "Thumb high-register ADD with PC operands",
+                        ));
+                    }
+                    self.write_reg_thumb(rd, lhs.wrapping_add(rhs));
+                }
                 1 => {
+                    if (rd < 8 && rm < 8) || rd == 15 || rm == 15 {
+                        return Err(Trap::Unpredictable(
+                            "Thumb high-register CMP with invalid registers",
+                        ));
+                    }
                     let (value, carry, overflow) = sub_with_flags(lhs, rhs);
                     self.cpsr.set_nzcv(value, carry, overflow);
                 }
@@ -2234,6 +2246,9 @@ impl Cpu {
             let pop = instr & 0x0800 != 0;
             let r = instr & 0x0100 != 0;
             let list = instr & 0xff;
+            if list == 0 && !r {
+                return Err(Trap::Unpredictable("empty Thumb push/pop register list"));
+            }
             if pop {
                 for reg in 0..8 {
                     if list & (1 << reg) != 0 {
@@ -2279,6 +2294,11 @@ impl Cpu {
             let mut addr = self.regs[rb];
             if list == 0 {
                 return Err(Trap::Unpredictable("empty Thumb load/store multiple list"));
+            }
+            if !load && list & (1 << rb) != 0 && rb as u32 != list.trailing_zeros() {
+                return Err(Trap::Unpredictable(
+                    "Thumb STM writeback base not first in register list",
+                ));
             }
             for reg in 0..8 {
                 if list & (1 << reg) == 0 {
@@ -3917,6 +3937,53 @@ mod tests {
         cpu.execute_thumb(0xc803, 0x300c, &mut mem).unwrap(); // ldmia r0!, {r0, r1}
         assert_eq!(cpu.reg(0), 0x33);
         assert_eq!(cpu.reg(1), 0x44);
+    }
+
+    #[test]
+    fn thumb_unpredictable_register_forms() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0x4000, 0x100);
+        cpu.set_isa(Isa::Thumb);
+
+        let err = cpu.execute_thumb(0xb400, 0, &mut mem).unwrap_err(); // push {}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("empty Thumb push/pop register list")
+        );
+        let err = cpu.execute_thumb(0xbc00, 0, &mut mem).unwrap_err(); // pop {}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("empty Thumb push/pop register list")
+        );
+
+        cpu.set_reg(0, 0x4020);
+        cpu.set_reg(1, 0x1122_3344);
+        cpu.execute_thumb(0xc003, 0, &mut mem).unwrap(); // stmia r0!, {r0, r1}
+        assert_eq!(mem.load32(0x4020).unwrap(), 0x4020);
+        assert_eq!(mem.load32(0x4024).unwrap(), 0x1122_3344);
+        assert_eq!(cpu.reg(0), 0x4028);
+
+        let err = cpu.execute_thumb(0xc103, 0, &mut mem).unwrap_err(); // stmia r1!, {r0, r1}
+        assert_eq!(
+            err,
+            Trap::Unpredictable("Thumb STM writeback base not first in register list")
+        );
+
+        let err = cpu.execute_thumb(0x4508, 0, &mut mem).unwrap_err(); // cmp r0, r1 in high-register encoding
+        assert_eq!(
+            err,
+            Trap::Unpredictable("Thumb high-register CMP with invalid registers")
+        );
+        let err = cpu.execute_thumb(0x4587, 0, &mut mem).unwrap_err(); // cmp pc, r0
+        assert_eq!(
+            err,
+            Trap::Unpredictable("Thumb high-register CMP with invalid registers")
+        );
+        let err = cpu.execute_thumb(0x44ff, 0, &mut mem).unwrap_err(); // add pc, pc
+        assert_eq!(
+            err,
+            Trap::Unpredictable("Thumb high-register ADD with PC operands")
+        );
     }
 
     #[test]
