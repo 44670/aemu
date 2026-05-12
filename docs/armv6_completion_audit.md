@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 41 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 42 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -59,6 +59,9 @@ Result: passing, with 36 unit tests, 41 QEMU oracle tests, and doc tests.
   explicitly
 - ARM halfword/signed/doubleword transfers: `LDRH`, `STRH`, `LDRSB`, `LDRSH`,
   `LDRD`, `STRD`
+- ARM halfword/signed/doubleword transfers now have QEMU oracle matrix coverage
+  for immediate/register offsets, signed byte/halfword loads, doubleword
+  load/store, up/down addressing, and writeback
 - ARM single word/byte transfers now have QEMU oracle matrix coverage for
   immediate up/down offsets, post-index writeback, pre-index writeback, byte
   transfers, and shifted register offsets

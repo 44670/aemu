@@ -229,6 +229,34 @@ fn arm_single_transfer_reg(
         | rm as u32
 }
 
+fn arm_halfword_transfer(
+    pre: bool,
+    up: bool,
+    immediate: bool,
+    writeback: bool,
+    load: bool,
+    rn: usize,
+    rd: usize,
+    op: u32,
+    offset: u32,
+) -> u32 {
+    let offset_bits = if immediate {
+        ((offset & 0xf0) << 4) | (offset & 0xf)
+    } else {
+        offset & 0xf
+    };
+    0xe000_0090
+        | (u32::from(pre) << 24)
+        | (u32::from(up) << 23)
+        | (u32::from(immediate) << 22)
+        | (u32::from(writeback) << 21)
+        | (u32::from(load) << 20)
+        | ((rn as u32) << 16)
+        | ((rd as u32) << 12)
+        | ((op & 0b11) << 5)
+        | offset_bits
+}
+
 fn byte_fold(value: u32) -> u32 {
     value ^ (value >> 8) ^ (value >> 16) ^ (value >> 24)
 }
@@ -1553,6 +1581,144 @@ fn qemu_oracle_signed_and_doubleword_transfers_match_interpreter() {
         0,
         cpu.reg(0) ^ cpu.reg(2) ^ cpu.reg(4) ^ cpu.reg(5) ^ cpu.reg(6) ^ cpu.reg(7),
     );
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_halfword_transfer_addressing_matrix_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r12, #0\n\
+         ldr r9, =data\n\
+         ldr r1, =0x00007788\n\
+         strh r1, [r9]\n\
+         ldrh r0, [r9]\n\
+         eor r12, r12, r0\n\
+         eor r12, r12, r0, lsr #8\n\
+         eor r12, r12, r0, lsr #16\n\
+         eor r12, r12, r0, lsr #24\n\
+         add r10, r9, #4\n\
+         ldrsh r2, [r10, #-2]!\n\
+         sub r8, r10, r9\n\
+         eor r12, r12, r2\n\
+         eor r12, r12, r2, lsr #8\n\
+         eor r12, r12, r2, lsr #16\n\
+         eor r12, r12, r2, lsr #24\n\
+         eor r12, r12, r8\n\
+         mov r10, r9\n\
+         mov r11, #1\n\
+         ldrsb r3, [r10, r11]\n\
+         eor r12, r12, r3\n\
+         eor r12, r12, r3, lsr #8\n\
+         eor r12, r12, r3, lsr #16\n\
+         eor r12, r12, r3, lsr #24\n\
+         mov r10, r9\n\
+         ldr r4, =0x11223344\n\
+         ldr r5, =0x55667788\n\
+         strd r4, r5, [r10, #8]\n\
+         ldrd r6, r7, [r10, #8]\n\
+         eor r12, r12, r6\n\
+         eor r12, r12, r6, lsr #8\n\
+         eor r12, r12, r6, lsr #16\n\
+         eor r12, r12, r6, lsr #24\n\
+         eor r12, r12, r7\n\
+         eor r12, r12, r7, lsr #8\n\
+         eor r12, r12, r7, lsr #16\n\
+         eor r12, r12, r7, lsr #24\n\
+         add r10, r9, #24\n\
+         ldrd r4, r5, [r10, #-8]\n\
+         eor r12, r12, r4\n\
+         eor r12, r12, r4, lsr #8\n\
+         eor r12, r12, r4, lsr #16\n\
+         eor r12, r12, r4, lsr #24\n\
+         eor r12, r12, r5\n\
+         eor r12, r12, r5, lsr #8\n\
+         eor r12, r12, r5, lsr #16\n\
+         eor r0, r12, r5, lsr #24\n\
+         .data\n\
+         .align 2\n\
+         data:\n\
+         .byte 0, 0, 0x80, 0xff\n\
+         .word 0, 0, 0, 0x99aabbcc, 0xddeeff00\n\
+         .text",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 0x200);
+    let base = 0x100;
+    mem.load_bytes(base, &[0, 0, 0x80, 0xff]).unwrap();
+    mem.load_arm_words(base + 4, &[0, 0, 0, 0x99aa_bbcc, 0xddee_ff00])
+        .unwrap();
+    let mut folded = 0;
+
+    cpu.set_reg(9, base);
+    cpu.set_reg(1, 0x7788);
+    cpu.execute_arm(
+        arm_halfword_transfer(true, true, true, false, false, 9, 1, 0b01, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // strh r1, [r9]
+    cpu.execute_arm(
+        arm_halfword_transfer(true, true, true, false, true, 9, 0, 0b01, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrh r0, [r9]
+    folded ^= byte_fold(cpu.reg(0));
+
+    cpu.set_reg(10, base + 4);
+    cpu.execute_arm(
+        arm_halfword_transfer(true, false, true, true, true, 10, 2, 0b11, 2),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrsh r2, [r10, #-2]!
+    folded ^= byte_fold(cpu.reg(2));
+    folded ^= cpu.reg(10).wrapping_sub(base);
+
+    cpu.set_reg(10, base);
+    cpu.set_reg(11, 1);
+    cpu.execute_arm(
+        arm_halfword_transfer(true, true, false, false, true, 10, 3, 0b10, 11),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrsb r3, [r10, r11]
+    folded ^= byte_fold(cpu.reg(3));
+
+    cpu.set_reg(10, base);
+    cpu.set_reg(4, 0x1122_3344);
+    cpu.set_reg(5, 0x5566_7788);
+    cpu.execute_arm(
+        arm_halfword_transfer(true, true, true, false, false, 10, 4, 0b11, 8),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // strd r4, r5, [r10, #8]
+    cpu.execute_arm(
+        arm_halfword_transfer(true, true, true, false, false, 10, 6, 0b10, 8),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrd r6, r7, [r10, #8]
+    folded ^= byte_fold(cpu.reg(6));
+    folded ^= byte_fold(cpu.reg(7));
+
+    cpu.set_reg(10, base + 24);
+    cpu.execute_arm(
+        arm_halfword_transfer(true, false, true, false, false, 10, 4, 0b10, 8),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrd r4, r5, [r10, #-8]
+    folded ^= byte_fold(cpu.reg(4));
+    folded ^= byte_fold(cpu.reg(5));
+
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
