@@ -9,4 +9,5 @@ sdl2 = ["dep:sdl2"]
 webgl = []
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 sdl2 = { version = "0.38", optional = true }

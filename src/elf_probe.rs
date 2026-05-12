@@ -418,7 +418,6 @@ fn le_u32_lossy(bytes: &[u8], off: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn parses_minimal_file_attributes() {
@@ -466,20 +465,11 @@ mod tests {
         if !apk.exists() {
             return;
         }
-        let output = Command::new("unzip")
-            .arg("-p")
-            .arg(apk)
-            .arg("lib/armeabi-v7a/libminecraftpe.so")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "unzip failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let bytes =
+            crate::zip_probe::read_zip_entry(apk, "lib/armeabi-v7a/libminecraftpe.so").unwrap();
         let probe = probe_arm_elf_bytes(
             PathBuf::from("MineCraftPE-a0.15.0.1.apk!/lib/armeabi-v7a/libminecraftpe.so"),
-            &output.stdout,
+            &bytes,
         )
         .unwrap();
         assert!(probe.requires_armv7_or_newer());

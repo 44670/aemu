@@ -85,8 +85,8 @@ useful, but it does not replace the browser WebGL backend.
 ## Milestones
 
 1. Probe APKs and native libraries.
-   Current status: implemented for native library ELF attributes and ZIP
-   compression metadata.
+   Current status: implemented for native library ELF attributes, ZIP
+   compression metadata, and pure-Rust stored/deflated ZIP entry extraction.
 2. Finish the ARMv6 interpreter audit with focused QEMU oracle tests.
    Current status: broad ARMv6/VFPv2 coverage exists, but the audit is not
    complete.

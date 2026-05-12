@@ -1,6 +1,5 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -60,19 +59,10 @@ fn print_probe(probe: &aemu::elf_probe::ElfProbe) {
 fn probe_apk(path: &Path) -> Result<(), String> {
     let zip_entries = aemu::zip_probe::read_zip_entries(path)
         .map_err(|err| format!("failed to inspect ZIP metadata: {err}"))?;
-    let listing = Command::new("unzip")
-        .arg("-Z1")
-        .arg(path)
-        .output()
-        .map_err(|err| format!("failed to run unzip: {err}"))?;
-    if !listing.status.success() {
-        return Err(String::from_utf8_lossy(&listing.stderr).into_owned());
-    }
-
-    let entries = String::from_utf8_lossy(&listing.stdout);
-    let libs: Vec<&str> = entries
-        .lines()
-        .filter(|entry| entry.starts_with("lib/") && entry.ends_with(".so"))
+    let bytes = std::fs::read(path).map_err(|err| format!("failed to read APK: {err}"))?;
+    let libs: Vec<_> = zip_entries
+        .iter()
+        .filter(|entry| entry.name.starts_with("lib/") && entry.name.ends_with(".so"))
         .collect();
     if libs.is_empty() {
         println!("no native libraries found in {}", path.display());
@@ -83,36 +73,20 @@ fn probe_apk(path: &Path) -> Result<(), String> {
     println!("native libraries: {}", libs.len());
     for entry in libs {
         println!();
-        println!("entry: {entry}");
-        if let Some(zip_entry) = zip_entries.iter().find(|candidate| candidate.name == entry) {
-            let saved = zip_entry
-                .saved_percent()
-                .map(|value| format!("{value}%"))
-                .unwrap_or_else(|| "n/a".to_string());
-            println!(
-                "zip: method {}, compressed {} bytes, uncompressed {} bytes, saved {}",
-                zip_entry.compression,
-                zip_entry.compressed_size,
-                zip_entry.uncompressed_size,
-                saved
-            );
-        }
-        let bytes = Command::new("unzip")
-            .arg("-p")
-            .arg(path)
-            .arg(entry)
-            .output()
-            .map_err(|err| format!("failed to extract {entry}: {err}"))?;
-        if !bytes.status.success() {
-            println!(
-                "  extract failed: {}",
-                String::from_utf8_lossy(&bytes.stderr)
-            );
-            continue;
-        }
+        println!("entry: {}", entry.name);
+        let saved = entry
+            .saved_percent()
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "n/a".to_string());
+        println!(
+            "zip: method {}, compressed {} bytes, uncompressed {} bytes, saved {}",
+            entry.compression, entry.compressed_size, entry.uncompressed_size, saved
+        );
+        let extracted = aemu::zip_probe::extract_parsed_zip_entry(&bytes, entry)
+            .map_err(|err| format!("failed to extract {}: {err}", entry.name))?;
         match aemu::elf_probe::probe_arm_elf_bytes(
-            PathBuf::from(format!("{}!{entry}", path.display())),
-            &bytes.stdout,
+            PathBuf::from(format!("{}!{}", path.display(), entry.name)),
+            &extracted,
         ) {
             Ok(probe) => print_probe(&probe),
             Err(err) => println!("  probe failed: {err}"),
