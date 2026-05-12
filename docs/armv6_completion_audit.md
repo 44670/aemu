@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 35 unit tests, 32 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 32 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -100,6 +100,9 @@ Result: passing, with 35 unit tests, 32 QEMU oracle tests, and doc tests.
 - VFPv2 double-register encodings that select D16-D31 now trap explicitly
   across core-register moves, `VMOV.32`, arithmetic, compare, and conversion
   paths instead of indexing beyond the modeled VFPv2 D0-D15 register file
+- FPSCR VFP short-vector `LEN`/`STRIDE` modes now trap explicitly on
+  vectorizable VFP arithmetic and unary operations instead of silently running
+  scalar semantics
 - CP15 user thread ID shim: `TPIDRURW`, `TPIDRURO`, with explicit traps for
   invalid `PC` source/destination forms
 - CP15 barrier HLE no-ops for ARMv6-style DMB, DSB, and ISB/prefetch-flush
@@ -113,7 +116,7 @@ Result: passing, with 35 unit tests, 32 QEMU oracle tests, and doc tests.
   barrier idioms.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
-- VFP FPSCR exception flags, vector stride/length behavior, and fixed-point
+- VFP FPSCR exception flags, vector stride/length emulation, and fixed-point
   conversion details are simplified or missing.
 - Unpredictable cases are only partially checked; many are simplified to keep
   the HLE interpreter practical.

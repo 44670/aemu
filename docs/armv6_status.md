@@ -75,6 +75,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - Explicit unpredictable traps for VFPv2 double-register encodings that select
   D16-D31 across core-register moves, `VMOV.32`, arithmetic, compare, and
   conversion paths
+- Explicit unpredictable traps for unsupported FPSCR VFP short-vector
+  `LEN`/`STRIDE` modes on vectorizable VFP arithmetic and unary operations
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`, `VMSR`
 - VFP conversion subset: `VCVT` between `F32`, `F64`, `S32`, and `U32`,
@@ -97,7 +99,7 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - Full ARMv6 media/DSP coverage has not been audited instruction-by-instruction
   against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags, vector-stride
-  modes, fixed-point conversions, and several less common conversion/move
+  emulation, fixed-point conversions, and several less common conversion/move
   forms still need an instruction-by-instruction audit.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.

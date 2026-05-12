@@ -715,6 +715,7 @@ impl Cpu {
 
         let unary = instr & 0x0fbf_0fc0;
         if matches!(unary, 0x0eb0_0a40 | 0x0eb1_0a40 | 0x0eb0_0ac0 | 0x0eb1_0ac0) {
+            self.require_vfp_scalar_mode()?;
             let sd = vfp_single_d(instr);
             let sm = vfp_single_m(instr);
             let value = self.sregs[sm];
@@ -728,6 +729,7 @@ impl Cpu {
             return Ok(true);
         }
         if matches!(unary, 0x0eb0_0b40 | 0x0eb1_0b40 | 0x0eb0_0bc0 | 0x0eb1_0bc0) {
+            self.require_vfp_scalar_mode()?;
             let dd = vfp_double_d(instr);
             let dm = vfp_double_m(instr);
             let value = self.checked_dreg_bits(dm)?;
@@ -758,6 +760,7 @@ impl Cpu {
             _ => None,
         };
         if let Some(op_kind) = op_kind {
+            self.require_vfp_scalar_mode()?;
             if op & 0x100 == 0 {
                 let sd = vfp_single_d(instr);
                 let sn = vfp_single_n(instr);
@@ -2497,6 +2500,16 @@ impl Cpu {
     fn check_dreg(&self, idx: usize) -> Result<()> {
         if idx >= 16 {
             Err(Trap::Unpredictable("VFP double register out of range"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_vfp_scalar_mode(&self) -> Result<()> {
+        const FPSCR_LEN_MASK: u32 = 0b111 << 16;
+        const FPSCR_STRIDE_MASK: u32 = 0b11 << 20;
+        if self.fpscr & (FPSCR_LEN_MASK | FPSCR_STRIDE_MASK) != 0 {
+            Err(Trap::Unpredictable("VFP vector mode unsupported"))
         } else {
             Ok(())
         }
@@ -4770,6 +4783,33 @@ mod tests {
 
         cpu.execute_arm(0xee10_1a10, 0, &mut mem).unwrap(); // vmov r1, s0
         assert_eq!(cpu.reg(1), 6.5f32.to_bits());
+    }
+
+    #[test]
+    fn vfpv2_vector_mode_arithmetic_traps() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_sreg(0, 1.0f32.to_bits());
+        cpu.set_sreg(1, 2.0f32.to_bits());
+        cpu.set_dreg(2, 4.0f64.to_bits());
+
+        cpu.set_reg(2, 1 << 16);
+        cpu.execute_arm(0xeee1_2a10, 0, &mut mem).unwrap(); // vmsr fpscr, r2
+
+        let err = cpu.execute_arm(0xee30_1a20, 0, &mut mem).unwrap_err(); // vadd.f32 s2, s0, s1
+        assert_eq!(err, Trap::Unpredictable("VFP vector mode unsupported"));
+
+        let err = cpu.execute_arm(0xeeb0_3bc2, 0, &mut mem).unwrap_err(); // vabs.f64 d3, d2
+        assert_eq!(err, Trap::Unpredictable("VFP vector mode unsupported"));
+
+        cpu.execute_arm(0xee10_0a10, 0, &mut mem).unwrap(); // vmov r0, s0
+        assert_eq!(cpu.reg(0), 1.0f32.to_bits());
+
+        cpu.set_reg(2, 1 << 22);
+        cpu.execute_arm(0xeee1_2a10, 0, &mut mem).unwrap(); // vmsr fpscr, r2
+        cpu.execute_arm(0xee30_1a20, 0, &mut mem).unwrap(); // vadd.f32 s2, s0, s1
+        assert_eq!(f32::from_bits(cpu.sreg(2)), 3.0);
     }
 
     #[test]
