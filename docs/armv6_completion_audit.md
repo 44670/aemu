@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 71 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 72 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -94,6 +94,8 @@ Result: passing, with 36 unit tests, 71 QEMU oracle tests, and doc tests.
 - ARM single word/byte transfers now have QEMU oracle matrix coverage for
   immediate up/down offsets, post-index writeback, pre-index writeback, byte
   transfers, and shifted register offsets
+- ARM `LDR pc, [Rn]` interworking now has QEMU oracle coverage for loading an
+  odd Thumb target address
 - ARM/Thumb block transfer basics, including explicit traps for empty
   register lists, ARM user-mode/S-bit block-transfer forms, `PC` base forms,
   and `LDM` writeback with base in the register list

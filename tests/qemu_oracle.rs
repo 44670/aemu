@@ -3061,6 +3061,40 @@ fn qemu_oracle_ldm_pc_interworking_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_ldr_pc_interworking_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r1, =target_ptr\n\
+         ldr pc, [r1]\n\
+         .align 2\n\
+         target_ptr: .word 1f + 1\n\
+         .thumb\n\
+         1:\n\
+         movs r0, #0x73\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 0x200);
+    mem.load_arm_words(0x100, &[0x2001]).unwrap();
+    cpu.set_reg(1, 0x100);
+    cpu.execute_arm(0xe591_f000, 0, &mut mem).unwrap(); // ldr pc, [r1]
+    assert!(cpu.cpsr.t);
+    assert_eq!(cpu.pc(), 0x2000);
+    cpu.execute_thumb(0x2073, 0x2000, &mut mem).unwrap(); // movs r0, #0x73
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_block_transfer_matches_interpreter() {
     let asm = oracle_program(
         "ldr r0, =data\n\
