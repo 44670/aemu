@@ -97,8 +97,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 
 ## Known Gaps
 
-- Full ARMv6 media/DSP coverage has not been audited instruction-by-instruction
-  against the ARM ARM.
+- Full ARMv6 media/DSP coverage outside the fully-oracled parallel add/sub
+  matrix has not been audited instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags, vector-stride
   emulation, fixed-point conversions, and several less common conversion/move
   forms still need an instruction-by-instruction audit.
