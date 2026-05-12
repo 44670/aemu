@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 52 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 53 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -141,6 +141,9 @@ Result: passing, with 36 unit tests, 52 QEMU oracle tests, and doc tests.
   add, subtract, multiply, divide, negate, absolute value, multiply-add,
   multiply-subtract, negative multiply accumulate/subtract, negative multiply,
   and square root
+- VFPv2 single/double load/store and multiple-transfer forms now have QEMU
+  oracle coverage for scalar `VLDR`/`VSTR`, `VLDMIA`/`VSTMIA`, and double
+  writeback transfers
 - VFP compare now has QEMU oracle matrix coverage for single and double
   precision less/equal/greater/unordered cases plus compare-with-zero forms
 - VFPv2 FPSCR system-register moves remain supported, `VMRS FPSID` now returns
