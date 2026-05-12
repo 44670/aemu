@@ -1087,8 +1087,15 @@ impl Cpu {
             let value = if instr & (1 << 6) == 0 {
                 (rn_value & 0x0000_ffff) | (rm_value.wrapping_shl(shift) & 0xffff_0000)
             } else {
-                let amount = if shift == 0 { 32 } else { shift };
-                let shifted = ((rm_value as i32) >> amount) as u32;
+                let shifted = if shift == 0 {
+                    if rm_value & 0x8000_0000 != 0 {
+                        u32::MAX
+                    } else {
+                        0
+                    }
+                } else {
+                    ((rm_value as i32) >> shift) as u32
+                };
                 (rn_value & 0xffff_0000) | (shifted & 0x0000_ffff)
             };
             self.write_reg_arm(rd, value);

@@ -212,6 +212,15 @@ fn arm_expand_imm_value(imm12: u32) -> u32 {
     (imm12 & 0xff).rotate_right(((imm12 >> 8) & 0xf) * 2)
 }
 
+fn arm_pack_halfword_instr(top: bool, rd: usize, rn: usize, rm: usize, shift: u32) -> u32 {
+    0xe680_0010
+        | ((rn as u32) << 16)
+        | ((rd as u32) << 12)
+        | ((shift & 0x1f) << 7)
+        | (u32::from(top) << 6)
+        | rm as u32
+}
+
 fn arm_vcmp_single_instr(sd: usize, sm: usize) -> u32 {
     0xeeb4_0a40
         | (((sd as u32) >> 1) << 12)
@@ -1548,6 +1557,60 @@ fn qemu_oracle_pack_halfword_matches_interpreter() {
     cpu.set_reg(5, 0x8123_4567);
     cpu.execute_arm(0xe684_3455, 0, &mut mem).unwrap(); // pkhtb r3, r4, r5, asr #8
     cpu.set_reg(0, cpu.reg(0) ^ cpu.reg(3));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_pack_halfword_shift_matrix_matches_interpreter() {
+    const CASES: &[(bool, u32, u32, u32)] = &[
+        (false, 0, 0xaaa0_bbbb, 0x1122_3344),
+        (false, 8, 0xcccc_dddd, 0x5566_7788),
+        (false, 16, 0x1357_2468, 0x89ab_cdef),
+        (true, 0, 0x7fff_1111, 0x8123_4567),
+        (true, 8, 0x2222_8000, 0xf123_4567),
+        (true, 16, 0xabcd_0001, 0x9234_5678),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (top, shift, rn, rm) in CASES {
+        body.push_str(&format!(
+            "ldr r1, ={rn:#010x}\n\
+             ldr r2, ={rm:#010x}\n"
+        ));
+        if *top {
+            let amount = if *shift == 0 { 32 } else { *shift };
+            body.push_str(&format!("pkhtb r0, r1, r2, asr #{amount}\n"));
+        } else if *shift == 0 {
+            body.push_str("pkhbt r0, r1, r2\n");
+        } else {
+            body.push_str(&format!("pkhbt r0, r1, r2, lsl #{shift}\n"));
+        }
+        body.push_str(
+            "eor r12, r12, r0\n\
+             eor r12, r12, r0, lsr #8\n\
+             eor r12, r12, r0, lsr #16\n\
+             eor r12, r12, r0, lsr #24\n",
+        );
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (top, shift, rn, rm) in CASES {
+        cpu.set_reg(1, *rn);
+        cpu.set_reg(2, *rm);
+        cpu.execute_arm(arm_pack_halfword_instr(*top, 0, 1, 2, *shift), 0, &mut mem)
+            .unwrap();
+        folded ^= byte_fold(cpu.reg(0));
+    }
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
