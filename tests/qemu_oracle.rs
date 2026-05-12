@@ -295,6 +295,10 @@ fn thumb_sp_relative_transfer(load: bool, rd: usize, imm8: u16) -> u16 {
     0x9000 | (u16::from(load) << 11) | ((rd as u16) << 8) | (imm8 & 0xff)
 }
 
+fn thumb_alu_instr(op: u16, rm: usize, rd: usize) -> u16 {
+    0x4000 | ((op & 0xf) << 6) | ((rm as u16) << 3) | rd as u16
+}
+
 fn byte_fold(value: u32) -> u32 {
     value ^ (value >> 8) ^ (value >> 16) ^ (value >> 24)
 }
@@ -2173,6 +2177,212 @@ fn qemu_oracle_thumb_alu_memory_matches_interpreter() {
     cpu.execute_thumb(0x6008, 4, &mut mem).unwrap(); // str r0, [r1]
     cpu.execute_thumb(0x680a, 6, &mut mem).unwrap(); // ldr r2, [r1]
     cpu.set_reg(0, cpu.reg(2));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_thumb_alu_matrix_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         movs r6, #0\n\
+         movs r0, #0xf0\n\
+         movs r1, #0x33\n\
+         ands r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #0xf0\n\
+         movs r1, #0x33\n\
+         eors r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #1\n\
+         movs r1, #3\n\
+         lsls r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #0x80\n\
+         movs r1, #2\n\
+         lsrs r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #0x80\n\
+         movs r1, #2\n\
+         asrs r0, r1\n\
+         eors r6, r0\n\
+         movs r7, #0\n\
+         cmp r7, #0\n\
+         movs r0, #1\n\
+         movs r1, #2\n\
+         adcs r0, r1\n\
+         eors r6, r0\n\
+         movs r7, #0\n\
+         cmp r7, #0\n\
+         movs r0, #5\n\
+         movs r1, #2\n\
+         sbcs r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #0x81\n\
+         movs r1, #1\n\
+         rors r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #5\n\
+         negs r0, r0\n\
+         eors r6, r0\n\
+         movs r0, #0x30\n\
+         movs r1, #0x0f\n\
+         orrs r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #7\n\
+         movs r1, #9\n\
+         muls r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #0xf0\n\
+         movs r1, #0x33\n\
+         bics r0, r1\n\
+         eors r6, r0\n\
+         movs r0, #0\n\
+         mvns r0, r0\n\
+         eors r6, r0\n\
+         movs r4, #0\n\
+         movs r0, #0xf0\n\
+         movs r1, #0x0f\n\
+         tst r0, r1\n\
+         bne 1f\n\
+         movs r4, #1\n\
+         1:\n\
+         eors r6, r4\n\
+         movs r4, #0\n\
+         movs r0, #0x22\n\
+         movs r1, #0x22\n\
+         cmp r0, r1\n\
+         bne 1f\n\
+         movs r4, #2\n\
+         1:\n\
+         eors r6, r4\n\
+         movs r4, #0\n\
+         movs r0, #1\n\
+         movs r1, #0\n\
+         mvns r1, r1\n\
+         cmn r0, r1\n\
+         bne 1f\n\
+         movs r4, #3\n\
+         1:\n\
+         eors r6, r4\n\
+         mov r0, r6\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    let mut folded = 0;
+
+    cpu.set_reg(0, 0xf0);
+    cpu.set_reg(1, 0x33);
+    cpu.execute_thumb(thumb_alu_instr(0, 1, 0), 0, &mut mem)
+        .unwrap(); // ands r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0xf0);
+    cpu.set_reg(1, 0x33);
+    cpu.execute_thumb(thumb_alu_instr(1, 1, 0), 0, &mut mem)
+        .unwrap(); // eors r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 1);
+    cpu.set_reg(1, 3);
+    cpu.execute_thumb(thumb_alu_instr(2, 1, 0), 0, &mut mem)
+        .unwrap(); // lsls r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0x80);
+    cpu.set_reg(1, 2);
+    cpu.execute_thumb(thumb_alu_instr(3, 1, 0), 0, &mut mem)
+        .unwrap(); // lsrs r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0x80);
+    cpu.set_reg(1, 2);
+    cpu.execute_thumb(thumb_alu_instr(4, 1, 0), 0, &mut mem)
+        .unwrap(); // asrs r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.cpsr.c = true;
+    cpu.set_reg(0, 1);
+    cpu.set_reg(1, 2);
+    cpu.execute_thumb(thumb_alu_instr(5, 1, 0), 0, &mut mem)
+        .unwrap(); // adcs r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.cpsr.c = true;
+    cpu.set_reg(0, 5);
+    cpu.set_reg(1, 2);
+    cpu.execute_thumb(thumb_alu_instr(6, 1, 0), 0, &mut mem)
+        .unwrap(); // sbcs r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0x81);
+    cpu.set_reg(1, 1);
+    cpu.execute_thumb(thumb_alu_instr(7, 1, 0), 0, &mut mem)
+        .unwrap(); // rors r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 5);
+    cpu.execute_thumb(thumb_alu_instr(9, 0, 0), 0, &mut mem)
+        .unwrap(); // negs r0, r0
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0x30);
+    cpu.set_reg(1, 0x0f);
+    cpu.execute_thumb(thumb_alu_instr(12, 1, 0), 0, &mut mem)
+        .unwrap(); // orrs r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 7);
+    cpu.set_reg(1, 9);
+    cpu.execute_thumb(thumb_alu_instr(13, 1, 0), 0, &mut mem)
+        .unwrap(); // muls r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0xf0);
+    cpu.set_reg(1, 0x33);
+    cpu.execute_thumb(thumb_alu_instr(14, 1, 0), 0, &mut mem)
+        .unwrap(); // bics r0, r1
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0);
+    cpu.execute_thumb(thumb_alu_instr(15, 0, 0), 0, &mut mem)
+        .unwrap(); // mvns r0, r0
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, 0xf0);
+    cpu.set_reg(1, 0x0f);
+    cpu.execute_thumb(thumb_alu_instr(8, 1, 0), 0, &mut mem)
+        .unwrap(); // tst r0, r1
+    folded ^= u32::from(cpu.cpsr.z);
+
+    cpu.set_reg(0, 0x22);
+    cpu.set_reg(1, 0x22);
+    cpu.execute_thumb(thumb_alu_instr(10, 1, 0), 0, &mut mem)
+        .unwrap(); // cmp r0, r1
+    folded ^= u32::from(cpu.cpsr.z) << 1;
+
+    cpu.set_reg(0, 1);
+    cpu.set_reg(1, u32::MAX);
+    cpu.execute_thumb(thumb_alu_instr(11, 1, 0), 0, &mut mem)
+        .unwrap(); // cmn r0, r1
+    folded ^= if cpu.cpsr.z { 3 } else { 0 };
+
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
