@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::armv6::VecMemory;
+use crate::armv6::{Memory, VecMemory};
 
 const PT_LOAD: u32 = 1;
 const PAGE_SIZE: u32 = 0x1000;
@@ -148,6 +148,15 @@ pub fn load_elf_into_vec_memory(
     plan: &ElfLoadPlan,
 ) -> Result<VecMemory, ElfLoadError> {
     let mut memory = VecMemory::new(plan.memory_base, plan.memory_size as usize);
+    load_elf_into_memory(bytes, plan, &mut memory)?;
+    Ok(memory)
+}
+
+pub fn load_elf_into_memory<M: Memory>(
+    bytes: &[u8],
+    plan: &ElfLoadPlan,
+    memory: &mut M,
+) -> Result<(), ElfLoadError> {
     for segment in &plan.segments {
         let start = segment.file_offset as usize;
         let end = start
@@ -156,11 +165,13 @@ pub fn load_elf_into_vec_memory(
         let data = bytes
             .get(start..end)
             .ok_or(ElfLoadError::Truncated("load segment data"))?;
-        memory
-            .load_bytes(segment.memory_addr, data)
-            .map_err(|err| ElfLoadError::Memory(err.to_string()))?;
+        for (idx, byte) in data.iter().copied().enumerate() {
+            memory
+                .store8(segment.memory_addr.wrapping_add(idx as u32), byte)
+                .map_err(|err| ElfLoadError::Memory(err.to_string()))?;
+        }
     }
-    Ok(memory)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -258,6 +269,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::armv6::Memory;
+    use crate::guest_memory::MappedMemory;
 
     use super::*;
 
@@ -302,6 +314,22 @@ mod tests {
         write_u32(&mut elf, 52, 2);
         let err = plan_elf_load(PathBuf::from("no-load.so"), &elf, 0).unwrap_err();
         assert_eq!(err, ElfLoadError::NoLoadSegments);
+    }
+
+    #[test]
+    fn loads_segments_into_mapped_memory() {
+        let elf = minimal_elf_with_one_load_segment(0x2000, 0x2000, &[0xaa, 0xbb], 4);
+        let plan = plan_elf_load(PathBuf::from("mapped.so"), &elf, 0x7100_0000).unwrap();
+        let mut memory = MappedMemory::new();
+        memory
+            .map_zeroed(plan.memory_base, plan.memory_size as usize)
+            .unwrap();
+
+        load_elf_into_memory(&elf, &plan, &mut memory).unwrap();
+
+        assert_eq!(memory.load8(0x7100_2000).unwrap(), 0xaa);
+        assert_eq!(memory.load8(0x7100_2001).unwrap(), 0xbb);
+        assert_eq!(memory.load8(0x7100_2002).unwrap(), 0);
     }
 
     fn minimal_elf_with_one_load_segment(

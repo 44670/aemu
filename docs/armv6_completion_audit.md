@@ -298,6 +298,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
 - Initial ARM `REL` relocation application patches checked guest memory for
   `RELATIVE`, `ABS32`, `REL32`, `GLOB_DAT`, `JUMP_SLOT`, and `TARGET1` using a
   resolver hook intended for HLE symbols.
+- A checked multi-region guest memory map now supports disjoint mappings for
+  shared libraries, stack/TLS, and future HLE pages; the ELF loader can load
+  segments into any `Memory` implementation.
 
 ## Known Incomplete Or Weakly Verified Areas
 

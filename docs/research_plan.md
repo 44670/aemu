@@ -100,7 +100,8 @@ useful, but it does not replace the browser WebGL backend.
    arrays. ARM `REL` relocation entries are decoded and associated with dynamic
    symbol names. Initial ARM `REL` relocation application exists for
    `RELATIVE`, `ABS32`, `REL32`, `GLOB_DAT`, `JUMP_SLOT`, and `TARGET1`;
-   dependency ordering and real HLE symbol binding are still pending.
+   checked multi-region guest memory exists for mapping multiple libraries.
+   Dependency ordering and real HLE symbol binding are still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.

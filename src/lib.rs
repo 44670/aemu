@@ -4,6 +4,7 @@ pub mod elf_dynamic;
 pub mod elf_linker;
 pub mod elf_loader;
 pub mod elf_probe;
+pub mod guest_memory;
 pub mod host;
 #[cfg(feature = "sdl2")]
 pub mod sdl_shell;
