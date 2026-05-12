@@ -218,6 +218,12 @@ reports, not from speculative Android surface area.
 stubs in the HLE page are resolved back to imported symbol names and dispatched
 through the HLE runtime, returning through guest LR.
 
+The constructor execution probe is:
+
+```sh
+cargo run -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk
+```
+
 ## Test APKs
 
 Local test APKs live under:

@@ -316,6 +316,10 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
 - Runtime constructor support now enumerates relocated `DT_INIT` and
   `DT_INIT_ARRAY` entries and can run each target until it returns through a
   sentinel LR.
+- The `run-apk-native` CLI reaches guest constructor execution. Against the
+  local `armeabi-v7a` Minecraft PE research APK, it finds 1,604 constructors
+  and then fails in `libfmod.so` at ARM instruction `0xe30260ab`, matching the
+  known ARMv7/Thumb-2 blocker for this ARMv6 runtime target.
 
 ## Known Incomplete Or Weakly Verified Areas
 
@@ -342,7 +346,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   the HLE interpreter practical.
 - QEMU oracle coverage is representative, not exhaustive or randomized.
 - Minecraft PE target verification is blocked: the only local Minecraft APK
-  contains ARMv7/Thumb-2/VFPv3/NEON libraries, not ARMv6 `armeabi`.
+  contains ARMv7/Thumb-2/VFPv3/NEON libraries, not ARMv6 `armeabi`. It now
+  confirms the native execution path reaches ARMv7 code, but cannot validate
+  the ARMv6 interpreter target.
 
 ## Minecraft PE Blocker
 

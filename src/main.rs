@@ -93,6 +93,20 @@ fn main() {
                 }
             }
         }
+        Some("run-apk-native") => {
+            let (path, config, max_steps) = match parse_run_apk_native_args(args.collect()) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("{err}");
+                    eprintln!("usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N]");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(err) = run_apk_native(&path, &config, max_steps) {
+                eprintln!("native run failed: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("sdl2-shell") => run_sdl2_shell(args.collect()),
         _ => {
             eprintln!("usage:");
@@ -102,6 +116,7 @@ fn main() {
             eprintln!("  aemu imports-so <lib.so> [--limit N|--all]");
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
+            eprintln!("  aemu run-apk-native <app.apk> [--abi ABI] [--steps N]");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -481,6 +496,81 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
             report.unresolved_imports.len() - shown
         );
     }
+}
+
+fn parse_run_apk_native_args(
+    args: Vec<String>,
+) -> Result<(PathBuf, aemu::native_loader::NativeLoadConfig, usize), String> {
+    let mut iter = args.into_iter();
+    let Some(path) = iter.next() else {
+        return Err("missing APK path".to_string());
+    };
+
+    let mut config = aemu::native_loader::NativeLoadConfig::default();
+    let mut max_steps = 100_000usize;
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--abi" => {
+                config.abi = iter
+                    .next()
+                    .ok_or_else(|| "--abi needs an ABI value".to_string())?;
+            }
+            "--steps" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--steps needs a numeric value".to_string())?;
+                max_steps = value
+                    .parse()
+                    .map_err(|_| format!("invalid --steps value: {value}"))?;
+            }
+            _ => return Err(format!("unknown run-apk-native argument: {arg}")),
+        }
+    }
+
+    Ok((PathBuf::from(path), config, max_steps))
+}
+
+fn run_apk_native(
+    path: &Path,
+    config: &aemu::native_loader::NativeLoadConfig,
+    max_steps: usize,
+) -> Result<(), String> {
+    let report = aemu::native_loader::load_apk_native_libraries_with_config(path, config)
+        .map_err(|err| format!("link failed: {err}"))?;
+    if !report.is_linked() {
+        return Err(format!(
+            "link incomplete: {} unresolved imports, {} relocation errors",
+            report.unresolved_imports.len(),
+            report.relocation_errors.len()
+        ));
+    }
+    let mut runtime = aemu::native_runtime::NativeRuntime::new(
+        report,
+        aemu::native_runtime::NativeRuntimeConfig::default(),
+    )
+    .map_err(|err| format!("runtime setup failed: {err}"))?;
+    let constructors = runtime
+        .constructors()
+        .map_err(|err| format!("constructor scan failed: {err}"))?;
+    println!("apk: {}", path.display());
+    println!("abi: {}", config.abi);
+    println!("constructors: {}", constructors.len());
+    for constructor in constructors {
+        println!(
+            "  {} {:?} {:#010x}",
+            constructor.library_name, constructor.source, constructor.address
+        );
+        runtime
+            .run_function(constructor.address, max_steps)
+            .map_err(|err| {
+                format!(
+                    "{} constructor {:#010x} failed: {err}",
+                    constructor.library_name, constructor.address
+                )
+            })?;
+    }
+    println!("native constructors completed");
+    Ok(())
 }
 
 #[cfg(feature = "sdl2")]

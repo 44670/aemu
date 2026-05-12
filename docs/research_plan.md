@@ -110,8 +110,10 @@ useful, but it does not replace the browser WebGL backend.
    unresolved imports. A native runtime shell now maps stack/TLS/heap and wires
    ARM HLE trap stubs back to symbol-name dispatch. It can enumerate relocated
    `DT_INIT`/`DT_INIT_ARRAY` constructor targets and run each target until it
-   returns through a sentinel LR. Real EGL/GLES/audio/Android lifecycle behavior
-   is still pending.
+   returns through a sentinel LR. A `run-apk-native` CLI now reaches actual
+   constructor execution; on the local ARMv7 Minecraft PE APK it fails at an
+   ARMv7 instruction in `libfmod.so`, as expected for the ARMv6 runtime target.
+   Real EGL/GLES/audio/Android lifecycle behavior is still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.

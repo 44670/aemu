@@ -108,6 +108,25 @@ The default ARMv6 command still fails correctly with:
 no native libraries found for ABI armeabi; available ABIs: armeabi-v7a
 ```
 
+Native constructor execution probe:
+
+```sh
+cargo run -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 1000
+```
+
+This reaches actual guest execution in the local ARMv7 research APK and then
+fails in `libfmod.so` constructor code:
+
+```text
+constructors: 1604
+libfmod.so constructor 0x70015e30 failed: undefined ARM instruction 0xe30260ab at 0x70015e50
+```
+
+That failure is expected for this project target: the instruction is from the
+APK's ARMv7-era code path, while the runtime interpreter is intentionally
+ARMv6/Thumb-1 focused. An older APK with `lib/armeabi/libminecraftpe.so` is
+still required to validate the ARMv6 Minecraft PE path.
+
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:
 
