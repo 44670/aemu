@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 37 unit tests, 79 QEMU oracle tests, and doc tests.
+Result: passing, with 37 unit tests, 80 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -110,6 +110,8 @@ Result: passing, with 37 unit tests, 79 QEMU oracle tests, and doc tests.
   and `LDM` writeback with base in the register list
 - ARM block transfers now have QEMU oracle matrix coverage for IA, IB, DA, and
   DB store addressing with writeback and paired loads from the resulting memory
+- ARM `STM` writeback with the base register in the store list now has QEMU
+  oracle coverage for storing the old base value before writeback
 - ARM load/store invalid-form traps for writeback overlap, invalid `PC`
   byte/halfword/register-offset forms, and doubleword pair/writeback overlap
   cases

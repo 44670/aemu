@@ -30,7 +30,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - ARM halfword/signed/doubleword load/store forms: `LDRH`, `STRH`,
   `LDRSB`, `LDRSH`, `LDRD`, `STRD`
 - ARM block transfer: `LDM`, `STM`, including ARM-state `PC + 8` source values
-  for `STM {..., pc}`
+  for `STM {..., pc}` and old-base stores for `STM` writeback when the base
+  register is in the store list
 - Explicit unpredictable traps for invalid ARM load/store register forms:
   writeback overlap, invalid `PC` byte/halfword/register-offset forms,
   doubleword pair/writeback overlap cases, `LDM` writeback with base in the

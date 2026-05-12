@@ -3235,6 +3235,57 @@ fn qemu_oracle_block_transfer_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_stm_writeback_base_in_list_stores_old_base_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r1, =buf\n\
+         mov r0, #0xaa\n\
+         stmia r1!, {r0, r1}\n\
+         ldr r2, =buf\n\
+         ldr r0, [r2]\n\
+         eor r0, r0, #0xaa\n\
+         ldr r3, [r2, #4]\n\
+         eor r0, r0, r3\n\
+         eor r0, r0, r2\n\
+         eor r0, r0, r1\n\
+         add r2, r2, #8\n\
+         eor r0, r0, r2\n\
+         and r0, r0, #255\n\
+         mov r7, #1\n\
+         svc #0\n\
+         .data\n\
+         .balign 4\n\
+         buf: .word 0, 0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x3000, 8);
+    cpu.set_reg(0, 0xaa);
+    cpu.set_reg(1, 0x3000);
+    cpu.execute_arm(0xe8a1_0003, 0, &mut mem).unwrap(); // stmia r1!, {r0, r1}
+
+    assert_eq!(mem.load32(0x3000).unwrap(), 0xaa);
+    assert_eq!(mem.load32(0x3004).unwrap(), 0x3000);
+    assert_eq!(cpu.reg(1), 0x3008);
+
+    let folded = mem.load32(0x3000).unwrap()
+        ^ 0xaa
+        ^ mem.load32(0x3004).unwrap()
+        ^ 0x3000
+        ^ cpu.reg(1)
+        ^ 0x3008;
+
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_block_transfer_addressing_matrix_matches_interpreter() {
     let asm = oracle_program(
         "mov r12, #0\n\
