@@ -65,6 +65,23 @@ fn arm_parallel_media_instr(family: u32, op: u32, rd: usize, rn: usize, rm: usiz
     0xe600_0f10 | (family << 20) | ((rn as u32) << 16) | ((rd as u32) << 12) | (op << 5) | rm as u32
 }
 
+fn arm_signed_halfword_instr(
+    base: u32,
+    rd_or_hi: usize,
+    rn_or_lo: usize,
+    rs: usize,
+    rm: usize,
+    x: u32,
+    y: u32,
+) -> u32 {
+    base | ((rd_or_hi as u32) << 16)
+        | ((rn_or_lo as u32) << 12)
+        | ((rs as u32) << 8)
+        | (y << 6)
+        | (x << 5)
+        | rm as u32
+}
+
 #[test]
 fn qemu_oracle_usad8_matches_interpreter() {
     let asm = oracle_program(
@@ -103,6 +120,145 @@ fn qemu_oracle_smlabb_matches_interpreter() {
     cpu.set_reg(2, 4);
     cpu.set_reg(3, 5);
     cpu.execute_arm(0xe100_3281, 0, &mut mem).unwrap();
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_signed_halfword_multiply_matrix_matches_interpreter() {
+    const XY: &[(&str, u32, u32)] = &[("bb", 0, 0), ("bt", 0, 1), ("tb", 1, 0), ("tt", 1, 1)];
+    const WY: &[(&str, u32)] = &[("b", 0), ("t", 1)];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (idx, (suffix, _, _)) in XY.iter().enumerate() {
+        let rm = 0x8001_7fffu32.rotate_left(idx as u32 * 3);
+        let rs = 0x0002_fffeu32.rotate_right(idx as u32 * 5);
+        let rn = 0x1000_0000u32.wrapping_add(idx as u32 * 17);
+        body.push_str(&format!(
+            "ldr r1, ={rm:#010x}\n\
+             ldr r2, ={rs:#010x}\n\
+             ldr r3, ={rn:#010x}\n\
+             smla{suffix} r0, r1, r2, r3\n\
+             eor r12, r12, r0\n"
+        ));
+    }
+    for (idx, (suffix, _, _)) in XY.iter().enumerate() {
+        let rm = 0x7fff_8001u32.rotate_right(idx as u32 * 4);
+        let rs = 0xfffd_0003u32.rotate_left(idx as u32 * 7);
+        let lo = 0x0000_0100u32.wrapping_add(idx as u32);
+        let hi = 0xffff_ffffu32.wrapping_sub(idx as u32);
+        body.push_str(&format!(
+            "ldr r4, ={lo:#010x}\n\
+             ldr r5, ={hi:#010x}\n\
+             ldr r1, ={rm:#010x}\n\
+             ldr r2, ={rs:#010x}\n\
+             smlal{suffix} r4, r5, r1, r2\n\
+             eor r12, r12, r4\n\
+             eor r12, r12, r5\n"
+        ));
+    }
+    for (idx, (suffix, _, _)) in XY.iter().enumerate() {
+        let rm = 0x0003_fffc_u32.rotate_left(idx as u32 * 6);
+        let rs = 0x7ffe_8002_u32.rotate_right(idx as u32 * 2);
+        body.push_str(&format!(
+            "ldr r1, ={rm:#010x}\n\
+             ldr r2, ={rs:#010x}\n\
+             smul{suffix} r0, r1, r2\n\
+             eor r12, r12, r0\n"
+        ));
+    }
+    for (idx, (suffix, _)) in WY.iter().enumerate() {
+        let rm = 0x4000_8000u32.rotate_left(idx as u32 * 5);
+        let rs = 0x0003_fffeu32.rotate_right(idx as u32 * 8);
+        let rn = 0x2000_0000u32.wrapping_add(idx as u32 * 13);
+        body.push_str(&format!(
+            "ldr r1, ={rm:#010x}\n\
+             ldr r2, ={rs:#010x}\n\
+             ldr r3, ={rn:#010x}\n\
+             smlaw{suffix} r0, r1, r2, r3\n\
+             eor r12, r12, r0\n"
+        ));
+
+        let rm = rm ^ 0x1357_2468;
+        let rs = rs ^ 0x89ab_cdef;
+        body.push_str(&format!(
+            "ldr r1, ={rm:#010x}\n\
+             ldr r2, ={rs:#010x}\n\
+             smulw{suffix} r0, r1, r2\n\
+             eor r12, r12, r0\n"
+        ));
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (idx, (_, x, y)) in XY.iter().enumerate() {
+        cpu.set_reg(1, 0x8001_7fffu32.rotate_left(idx as u32 * 3));
+        cpu.set_reg(2, 0x0002_fffeu32.rotate_right(idx as u32 * 5));
+        cpu.set_reg(3, 0x1000_0000u32.wrapping_add(idx as u32 * 17));
+        cpu.execute_arm(
+            arm_signed_halfword_instr(0xe100_0080, 0, 3, 2, 1, *x, *y),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(0);
+    }
+    for (idx, (_, x, y)) in XY.iter().enumerate() {
+        cpu.set_reg(4, 0x0000_0100u32.wrapping_add(idx as u32));
+        cpu.set_reg(5, 0xffff_ffffu32.wrapping_sub(idx as u32));
+        cpu.set_reg(1, 0x7fff_8001u32.rotate_right(idx as u32 * 4));
+        cpu.set_reg(2, 0xfffd_0003u32.rotate_left(idx as u32 * 7));
+        cpu.execute_arm(
+            arm_signed_halfword_instr(0xe140_0080, 5, 4, 2, 1, *x, *y),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(4) ^ cpu.reg(5);
+    }
+    for (idx, (_, x, y)) in XY.iter().enumerate() {
+        cpu.set_reg(1, 0x0003_fffc_u32.rotate_left(idx as u32 * 6));
+        cpu.set_reg(2, 0x7ffe_8002_u32.rotate_right(idx as u32 * 2));
+        cpu.execute_arm(
+            arm_signed_halfword_instr(0xe160_0080, 0, 0, 2, 1, *x, *y),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(0);
+    }
+    for (idx, (_, y)) in WY.iter().enumerate() {
+        let rm = 0x4000_8000u32.rotate_left(idx as u32 * 5);
+        let rs = 0x0003_fffeu32.rotate_right(idx as u32 * 8);
+        cpu.set_reg(1, rm);
+        cpu.set_reg(2, rs);
+        cpu.set_reg(3, 0x2000_0000u32.wrapping_add(idx as u32 * 13));
+        cpu.execute_arm(
+            arm_signed_halfword_instr(0xe120_0080, 0, 3, 2, 1, 0, *y),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(0);
+
+        cpu.set_reg(1, rm ^ 0x1357_2468);
+        cpu.set_reg(2, rs ^ 0x89ab_cdef);
+        cpu.execute_arm(
+            arm_signed_halfword_instr(0xe120_00a0, 0, 0, 2, 1, 0, *y),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= cpu.reg(0);
+    }
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
