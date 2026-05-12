@@ -274,6 +274,27 @@ fn arm_block_transfer(
         | regs
 }
 
+fn thumb_reg_offset_transfer(op: u16, ro: usize, rb: usize, rd: usize) -> u16 {
+    0x5000 | ((op & 0x7) << 9) | ((ro as u16) << 6) | ((rb as u16) << 3) | rd as u16
+}
+
+fn thumb_imm_word_byte_transfer(load: bool, byte: bool, imm5: u16, rb: usize, rd: usize) -> u16 {
+    0x6000
+        | (u16::from(byte) << 12)
+        | (u16::from(load) << 11)
+        | ((imm5 & 0x1f) << 6)
+        | ((rb as u16) << 3)
+        | rd as u16
+}
+
+fn thumb_imm_halfword_transfer(load: bool, imm5: u16, rb: usize, rd: usize) -> u16 {
+    0x8000 | (u16::from(load) << 11) | ((imm5 & 0x1f) << 6) | ((rb as u16) << 3) | rd as u16
+}
+
+fn thumb_sp_relative_transfer(load: bool, rd: usize, imm8: u16) -> u16 {
+    0x9000 | (u16::from(load) << 11) | ((rd as u16) << 8) | (imm8 & 0xff)
+}
+
 fn byte_fold(value: u32) -> u32 {
     value ^ (value >> 8) ^ (value >> 16) ^ (value >> 24)
 }
@@ -2152,6 +2173,137 @@ fn qemu_oracle_thumb_alu_memory_matches_interpreter() {
     cpu.execute_thumb(0x6008, 4, &mut mem).unwrap(); // str r0, [r1]
     cpu.execute_thumb(0x680a, 6, &mut mem).unwrap(); // ldr r2, [r1]
     cpu.set_reg(0, cpu.reg(2));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_thumb_load_store_matrix_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         movs r6, #0\n\
+         ldr r0, =data\n\
+         ldr r1, =0x11223344\n\
+         str r1, [r0, #0]\n\
+         ldr r2, [r0, #0]\n\
+         eors r6, r2\n\
+         movs r3, #0x55\n\
+         strb r3, [r0, #5]\n\
+         ldrb r4, [r0, #5]\n\
+         eors r6, r4\n\
+         ldr r5, =0xffff8001\n\
+         strh r5, [r0, #6]\n\
+         ldrh r2, [r0, #6]\n\
+         eors r6, r2\n\
+         movs r7, #1\n\
+         ldrsb r1, [r0, r7]\n\
+         eors r6, r1\n\
+         movs r7, #6\n\
+         ldrsh r2, [r0, r7]\n\
+         eors r6, r2\n\
+         movs r7, #12\n\
+         ldr r3, =0xaabbccdd\n\
+         str r3, [r0, r7]\n\
+         ldr r4, [r0, r7]\n\
+         eors r6, r4\n\
+         ldr r5, =stack\n\
+         mov sp, r5\n\
+         movs r5, #0x66\n\
+         str r5, [sp, #0]\n\
+         ldr r0, [sp, #0]\n\
+         eors r6, r0\n\
+         mov r0, r6\n\
+         movs r7, #1\n\
+         svc #0\n\
+         .data\n\
+         .align 2\n\
+         data: .space 32\n\
+         stack: .space 16\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 0x200);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    let base = 0x100;
+    let stack = 0x180;
+    let mut folded = 0;
+
+    cpu.set_reg(0, base);
+    cpu.set_reg(1, 0x1122_3344);
+    cpu.execute_thumb(
+        thumb_imm_word_byte_transfer(false, false, 0, 0, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // str r1, [r0, #0]
+    cpu.execute_thumb(
+        thumb_imm_word_byte_transfer(true, false, 0, 0, 2),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r2, [r0, #0]
+    folded ^= cpu.reg(2);
+
+    cpu.set_reg(3, 0x55);
+    cpu.execute_thumb(
+        thumb_imm_word_byte_transfer(false, true, 5, 0, 3),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // strb r3, [r0, #5]
+    cpu.execute_thumb(
+        thumb_imm_word_byte_transfer(true, true, 5, 0, 4),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrb r4, [r0, #5]
+    folded ^= cpu.reg(4);
+
+    cpu.set_reg(5, 0xffff_8001);
+    cpu.execute_thumb(thumb_imm_halfword_transfer(false, 3, 0, 5), 0, &mut mem)
+        .unwrap(); // strh r5, [r0, #6]
+    cpu.execute_thumb(thumb_imm_halfword_transfer(true, 3, 0, 2), 0, &mut mem)
+        .unwrap(); // ldrh r2, [r0, #6]
+    folded ^= cpu.reg(2);
+
+    cpu.set_reg(7, 1);
+    cpu.execute_thumb(thumb_reg_offset_transfer(3, 7, 0, 1), 0, &mut mem)
+        .unwrap(); // ldrsb r1, [r0, r7]
+    folded ^= cpu.reg(1);
+
+    cpu.set_reg(7, 6);
+    cpu.execute_thumb(thumb_reg_offset_transfer(7, 7, 0, 2), 0, &mut mem)
+        .unwrap(); // ldrsh r2, [r0, r7]
+    folded ^= cpu.reg(2);
+
+    cpu.set_reg(7, 12);
+    cpu.set_reg(3, 0xaabb_ccdd);
+    cpu.execute_thumb(thumb_reg_offset_transfer(0, 7, 0, 3), 0, &mut mem)
+        .unwrap(); // str r3, [r0, r7]
+    cpu.execute_thumb(thumb_reg_offset_transfer(4, 7, 0, 4), 0, &mut mem)
+        .unwrap(); // ldr r4, [r0, r7]
+    folded ^= cpu.reg(4);
+
+    cpu.set_reg(13, stack);
+    cpu.set_reg(5, 0x66);
+    cpu.execute_thumb(thumb_sp_relative_transfer(false, 5, 0), 0, &mut mem)
+        .unwrap(); // str r5, [sp, #0]
+    cpu.execute_thumb(thumb_sp_relative_transfer(true, 0, 0), 0, &mut mem)
+        .unwrap(); // ldr r0, [sp, #0]
+    folded ^= cpu.reg(0);
+
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }

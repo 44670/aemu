@@ -2168,11 +2168,15 @@ impl Cpu {
             return Ok(());
         }
 
+        if instr & 0xf000 == 0x5000 {
+            return self.exec_thumb_load_store(instr, pc, mem);
+        }
+
         Err(Trap::UndefinedThumb { pc, instr })
     }
 
     fn exec_thumb_load_store<M: Memory>(&mut self, instr: u16, pc: u32, mem: &mut M) -> Result<()> {
-        if instr & 0xf200 == 0x5000 {
+        if instr & 0xf000 == 0x5000 {
             let op = (instr >> 9) & 0x7;
             let ro = ((instr >> 6) & 0x7) as usize;
             let rb = ((instr >> 3) & 0x7) as usize;
