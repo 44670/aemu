@@ -2613,7 +2613,7 @@ impl Cpu {
 
     fn write_reg_thumb(&mut self, idx: usize, value: u32) {
         if idx == 15 {
-            self.branch_exchange(value);
+            self.regs[15] = value & !1;
         } else {
             self.regs[idx] = value;
         }
@@ -3782,7 +3782,7 @@ mod tests {
         cpu.set_reg(0, 0x6000);
         cpu.execute_thumb(0x4687, 0x2400, &mut mem).unwrap(); // mov pc, r0
         assert_eq!(cpu.pc(), 0x6000);
-        assert!(!cpu.cpsr.t);
+        assert!(cpu.cpsr.t);
 
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(0, 0x7001);

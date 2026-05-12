@@ -3026,6 +3026,41 @@ fn qemu_oracle_thumb_add_pc_interworking_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb_mov_pc_stays_thumb_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         ldr r0, =thumb_target + 1\n\
+         mov pc, r0\n\
+         thumb_target:\n\
+         movs r0, #0x44\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    cpu.set_reg(0, 0x2001);
+    cpu.execute_thumb(0x4687, 0x1000, &mut mem).unwrap(); // mov pc, r0
+    assert!(cpu.cpsr.t);
+    assert_eq!(cpu.pc(), 0x2000);
+    cpu.execute_thumb(0x2044, 0x2000, &mut mem).unwrap(); // movs r0, #0x44
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_ldm_pc_interworking_matches_interpreter() {
     let asm = ".syntax unified\n\
          .arch armv6\n\

@@ -89,7 +89,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   including `LDMIA` base-in-list writeback suppression,
   conditional/unconditional branches, `BL`, `BLX`, `BX`, `SWI`/`SVC`
 - Thumb high-register writes to `PC`, including `MOV PC, Rm` and
-  `ADD PC, Rm`, use branch-exchange interworking semantics
+  `ADD PC, Rm`, keep Thumb state and mask bit 0; Thumb `BX`/`BLX` perform
+  branch-exchange interworking
 - Explicit unpredictable traps for invalid Thumb-1 high-register `ADD/CMP`,
   empty `PUSH/POP`, and `STMIA` base-in-list forms
 - Thumb ARMv6 extensions: `SXTH`, `SXTB`, `UXTH`, `UXTB`, `REV`, `REV16`,

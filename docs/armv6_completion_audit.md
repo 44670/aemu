@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 75 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 76 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -68,8 +68,9 @@ Result: passing, with 36 unit tests, 75 QEMU oracle tests, and doc tests.
   targets that enter ARM state
 - Thumb long `BL` immediate now has QEMU oracle coverage for Thumb-to-Thumb
   call/return link semantics
-- Thumb high-register `MOV PC, Rm` and `ADD PC, Rm` branch-exchange
-  interworking
+- Thumb high-register `MOV PC, Rm` and `ADD PC, Rm` PC-write behavior
+- Thumb high-register `MOV PC, Rm` now has QEMU oracle coverage showing the
+  Thumb ALU PC write stays in Thumb state and masks bit 0
 - Thumb high-register non-PC `ADD`/`CMP`/`MOV` operations now have QEMU oracle
   matrix coverage for low/high and high/high register combinations
 - Thumb ALU operations now have QEMU oracle matrix coverage for the 0x4000
