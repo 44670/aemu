@@ -3274,7 +3274,7 @@ fn vfp_div_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
         if lhs.is_finite() { FPSCR_DZC } else { 0 }
     } else if lhs.is_finite() && rhs.is_finite() {
         vfp_overflow_exception_flags_f64(result)
-            | vfp_zero_underflow_exception_flags_f64(lhs, rhs, result)
+            | vfp_div_rounding_exception_flags_f64(lhs, rhs, result)
     } else {
         0
     }
@@ -3362,6 +3362,18 @@ fn vfp_mul_rounding_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 
     flags
 }
 
+fn vfp_div_rounding_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
+    if result.is_infinite() || f64_div_result_exact(lhs, rhs, result) {
+        return 0;
+    }
+
+    let mut flags = FPSCR_IXC;
+    if result == 0.0 || result.is_subnormal() {
+        flags |= FPSCR_UFC;
+    }
+    flags
+}
+
 fn f64_mul_result_exact(lhs: f64, rhs: f64, result: f64) -> bool {
     let lhs = f64_finite_magnitude(lhs);
     let rhs = f64_finite_magnitude(rhs);
@@ -3369,6 +3381,30 @@ fn f64_mul_result_exact(lhs: f64, rhs: f64, result: f64) -> bool {
     scaled_magnitudes_equal(
         lhs.significand * rhs.significand,
         lhs.exponent + rhs.exponent,
+        result.significand,
+        result.exponent,
+    )
+}
+
+fn f64_div_result_exact(lhs: f64, rhs: f64, result: f64) -> bool {
+    let lhs = f64_finite_magnitude(lhs);
+    let rhs = f64_finite_magnitude(rhs);
+    let result = f64_finite_magnitude(result);
+    if lhs.significand == 0 || rhs.significand == 0 {
+        return lhs.significand == 0 && result.significand == 0;
+    }
+
+    let divisor = gcd_u128(lhs.significand, rhs.significand);
+    let numerator = lhs.significand / divisor;
+    let denominator = rhs.significand / divisor;
+    let twos = denominator.trailing_zeros();
+    if denominator >> twos != 1 {
+        return false;
+    }
+
+    scaled_magnitudes_equal(
+        numerator,
+        lhs.exponent - rhs.exponent - twos as i32,
         result.significand,
         result.exponent,
     )
@@ -3411,12 +3447,13 @@ fn scaled_magnitudes_equal(lhs: u128, lhs_exp: i32, rhs: u128, rhs_exp: i32) -> 
     }
 }
 
-fn vfp_zero_underflow_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
-    if lhs != 0.0 && rhs != 0.0 && result == 0.0 {
-        FPSCR_UFC | FPSCR_IXC
-    } else {
-        0
+fn gcd_u128(mut lhs: u128, mut rhs: u128) -> u128 {
+    while rhs != 0 {
+        let remainder = lhs % rhs;
+        lhs = rhs;
+        rhs = remainder;
     }
+    lhs
 }
 
 fn vfp_sqrt_exception_flags_f64(value: f64) -> u32 {
@@ -5938,6 +5975,32 @@ mod tests {
         cpu.set_dreg(0, f64::MIN_POSITIVE.to_bits());
         cpu.set_dreg(1, 0.5f64.to_bits());
         cpu.execute_arm(0xee20_2b01, 0, &mut mem).unwrap(); // vmul.f64 d2, d0, d1
+        assert_eq!(cpu.dreg(2), 0x0008_0000_0000_0000);
+        assert_eq!(cpu.fpscr & mask, 0);
+    }
+
+    #[test]
+    fn vfpv2_double_divide_inexact_exception_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+        let mask = FPSCR_IOC | FPSCR_DZC | FPSCR_OFC | FPSCR_UFC | FPSCR_IXC;
+
+        cpu.set_dreg(0, 1.0f64.to_bits());
+        cpu.set_dreg(1, 10.0f64.to_bits());
+        cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
+        assert_eq!(cpu.fpscr & mask, FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::MIN_POSITIVE.to_bits());
+        cpu.set_dreg(1, 10.0f64.to_bits());
+        cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
+        assert!(f64::from_bits(cpu.dreg(2)).is_subnormal());
+        assert_eq!(cpu.fpscr & mask, FPSCR_UFC | FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::MIN_POSITIVE.to_bits());
+        cpu.set_dreg(1, 2.0f64.to_bits());
+        cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
         assert_eq!(cpu.dreg(2), 0x0008_0000_0000_0000);
         assert_eq!(cpu.fpscr & mask, 0);
     }
