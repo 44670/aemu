@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::armv6::{Cpu, Trap};
+use crate::armv6::{Cpu, Memory, Trap};
 use crate::guest_memory::MappedMemoryError;
 use crate::hle_imports::{HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
 use crate::native_loader::NativeLinkReport;
@@ -12,6 +12,7 @@ pub const DEFAULT_TLS_SIZE: usize = 0x0001_0000;
 pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
 pub const DEFAULT_HEAP_SIZE: usize = 0x0400_0000;
 const ERRNO_OFFSET: u32 = 0x100;
+const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeConfig {
@@ -43,6 +44,19 @@ pub struct NativeRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConstructor {
+    pub library_name: String,
+    pub address: u32,
+    pub source: NativeConstructorSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeConstructorSource {
+    Init,
+    InitArray,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRuntimeStep {
     GuestInstruction,
     HleCall { name: String, address: u32 },
@@ -51,6 +65,7 @@ pub enum NativeRuntimeStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRuntimeError {
     MemoryMap(MappedMemoryError),
+    Memory(String),
     AddressOverflow,
     Cpu(Trap),
     UnknownHleTrap { pc: u32 },
@@ -61,6 +76,7 @@ impl fmt::Display for NativeRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MemoryMap(err) => write!(f, "{err}"),
+            Self::Memory(err) => write!(f, "{err}"),
             Self::AddressOverflow => write!(f, "runtime address range overflow"),
             Self::Cpu(err) => write!(f, "{err}"),
             Self::UnknownHleTrap { pc } => write!(f, "unknown HLE trap at {pc:#010x}"),
@@ -131,6 +147,66 @@ impl NativeRuntime {
         }
         Err(NativeRuntimeError::Cpu(Trap::StepLimit))
     }
+
+    pub fn constructors(&mut self) -> Result<Vec<NativeConstructor>, NativeRuntimeError> {
+        let mut out = Vec::new();
+        for object in &self.link.objects {
+            if let Some(init) = object.init {
+                if init != 0 {
+                    out.push(NativeConstructor {
+                        library_name: object.library_name.clone(),
+                        address: init,
+                        source: NativeConstructorSource::Init,
+                    });
+                }
+            }
+            if let Some(init_array) = object.init_array {
+                for idx in 0..init_array.size / 4 {
+                    let addr = init_array.addr.wrapping_add(idx * 4);
+                    let value = self
+                        .link
+                        .memory
+                        .load32(addr)
+                        .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+                    if value == 0 {
+                        continue;
+                    }
+                    out.push(NativeConstructor {
+                        library_name: object.library_name.clone(),
+                        address: value,
+                        source: NativeConstructorSource::InitArray,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn run_function(
+        &mut self,
+        address: u32,
+        max_steps: usize,
+    ) -> Result<(), NativeRuntimeError> {
+        self.cpu.branch_exchange(address);
+        self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
+        for _ in 0..max_steps {
+            if self.cpu.pc() == CALL_RETURN_SENTINEL {
+                return Ok(());
+            }
+            self.step()?;
+        }
+        Err(NativeRuntimeError::Cpu(Trap::StepLimit))
+    }
+
+    pub fn run_constructors(
+        &mut self,
+        max_steps_per_constructor: usize,
+    ) -> Result<(), NativeRuntimeError> {
+        for constructor in self.constructors()? {
+            self.run_function(constructor.address, max_steps_per_constructor)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -140,7 +216,7 @@ mod tests {
     use crate::armv6::Memory;
     use crate::guest_memory::MappedMemory;
     use crate::hle_imports::{HleCallBehavior, HleSymbolKind, HleSymbolShape};
-    use crate::native_loader::{HleSymbol, NativeLinkReport};
+    use crate::native_loader::{HleSymbol, LoadedNativeObject, NativeLinkReport};
 
     use super::*;
 
@@ -195,5 +271,68 @@ mod tests {
         );
         assert_eq!(runtime.cpu.reg(0), 5);
         assert_eq!(runtime.cpu.pc(), 0x1234);
+    }
+
+    #[test]
+    fn enumerates_and_runs_constructor_targets() {
+        let hle_address = 0x6f00_0100;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x6f00_0000, 0x1000).unwrap();
+        memory.store32(hle_address, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi".to_string(),
+            memory,
+            objects: vec![LoadedNativeObject {
+                entry_name: "lib/armeabi/libgame.so".to_string(),
+                library_name: "libgame.so".to_string(),
+                load_bias: 0x7000_0000,
+                memory_base: 0x7000_0000,
+                memory_size: 0x1000,
+                entry: 0x7000_0000,
+                needed: Vec::new(),
+                imports: Vec::new(),
+                defined_symbols: Vec::new(),
+                relocations: Vec::new(),
+                relocation_count: 0,
+                init: Some(hle_address),
+                init_array: None,
+            }],
+            global_symbols: Vec::new(),
+            hle_symbols: vec![HleSymbol {
+                name: "pthread_self".to_string(),
+                address: hle_address,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::Implemented,
+            }],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+
+        assert_eq!(
+            runtime.constructors().unwrap(),
+            vec![NativeConstructor {
+                library_name: "libgame.so".to_string(),
+                address: hle_address,
+                source: NativeConstructorSource::Init,
+            }]
+        );
+
+        runtime.run_constructors(8).unwrap();
+        assert_eq!(runtime.cpu.reg(0), 1);
+        assert_eq!(runtime.cpu.pc(), CALL_RETURN_SENTINEL);
     }
 }

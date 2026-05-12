@@ -108,8 +108,10 @@ useful, but it does not replace the browser WebGL backend.
    metadata and dispatch now covers the local Minecraft PE import set well
    enough for the `armeabi-v7a` research probe to load and relocate with zero
    unresolved imports. A native runtime shell now maps stack/TLS/heap and wires
-   ARM HLE trap stubs back to symbol-name dispatch. Constructor invocation and
-   real EGL/GLES/audio/Android lifecycle behavior are still pending.
+   ARM HLE trap stubs back to symbol-name dispatch. It can enumerate relocated
+   `DT_INIT`/`DT_INIT_ARRAY` constructor targets and run each target until it
+   returns through a sentinel LR. Real EGL/GLES/audio/Android lifecycle behavior
+   is still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.

@@ -313,6 +313,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   unresolved imports.
 - A native runtime shell now maps stack/TLS/heap regions and connects ARM HLE
   trap stubs to imported symbol dispatch, returning through guest LR.
+- Runtime constructor support now enumerates relocated `DT_INIT` and
+  `DT_INIT_ARRAY` entries and can run each target until it returns through a
+  sentinel LR.
 
 ## Known Incomplete Or Weakly Verified Areas
 
@@ -322,10 +325,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   barrier idioms.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
-- ELF/native execution is not complete yet: constructor sequencing, Java/native
-  activity entrypoint handoff, real EGL/GLES rendering, Android
-  lifecycle/input/assets behavior, audio, filesystem persistence, and broad
-  Bionic semantics remain open.
+- ELF/native execution is not complete yet: Java/native activity entrypoint
+  handoff, real EGL/GLES rendering, Android lifecycle/input/assets behavior,
+  audio, filesystem persistence, and broad Bionic semantics remain open.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
   divide/square-root/compare-NaN/conversion-invalid cases, selected
   single-precision arithmetic flags, selected double invalid/overflow
