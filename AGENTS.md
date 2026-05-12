@@ -92,7 +92,8 @@ Interpreter baseline:
 References:
 
 - Use the official ARM architecture manuals as the semantic source of truth.
-- Use QEMU `qemu-arm`/TCG behavior as an oracle for instruction tests.
+- Use QEMU `qemu-arm`/TCG behavior as an oracle for instruction tests:
+  `https://github.com/qemu/qemu`.
 - Read Dynarmic for decoder organization, A32/Thumb instruction semantics,
   callback boundaries, block caching ideas, and test-case inspiration.
 - Use target APK `.so` export reports and traces to decide which instructions
@@ -107,7 +108,7 @@ Local shallow reference clones live outside the repo at:
 Current reference checkouts:
 
 - `../aemu-refs/dynarmic`
-- `../aemu-refs/qemu`
+- `../aemu-refs/qemu` (`https://github.com/qemu/qemu`)
 - `../aemu-refs/unicorn`
 - `../aemu-refs/aosp-dalvik-4.4.4_r2`
 
