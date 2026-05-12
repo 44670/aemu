@@ -159,6 +159,30 @@ fn arm_umaal_instr(rd_lo: usize, rd_hi: usize, rn: usize, rm: usize) -> u32 {
     0xe040_0090 | ((rd_hi as u32) << 16) | ((rd_lo as u32) << 12) | ((rm as u32) << 8) | rn as u32
 }
 
+fn arm_vcmp_single_instr(sd: usize, sm: usize) -> u32 {
+    0xeeb4_0a40
+        | (((sd as u32) >> 1) << 12)
+        | (((sd as u32) & 1) << 22)
+        | ((sm as u32) >> 1)
+        | (((sm as u32) & 1) << 5)
+}
+
+fn arm_vcmp_single_zero_instr(sd: usize) -> u32 {
+    0xeeb5_0a40 | (((sd as u32) >> 1) << 12) | (((sd as u32) & 1) << 22)
+}
+
+fn arm_vcmp_double_instr(dd: usize, dm: usize) -> u32 {
+    0xeeb4_0b40
+        | (((dd as u32) & 0xf) << 12)
+        | (((dd as u32) >> 4) << 22)
+        | ((dm as u32) & 0xf)
+        | (((dm as u32) >> 4) << 5)
+}
+
+fn arm_vcmp_double_zero_instr(dd: usize) -> u32 {
+    0xeeb5_0b40 | (((dd as u32) & 0xf) << 12) | (((dd as u32) >> 4) << 22)
+}
+
 fn byte_fold(value: u32) -> u32 {
     value ^ (value >> 8) ^ (value >> 16) ^ (value >> 24)
 }
@@ -2049,6 +2073,172 @@ fn qemu_oracle_vcvtr_uses_fpscr_rounding_mode() {
     cpu.set_sreg(0, 2.25f32.to_bits());
     cpu.execute_arm(0xeefc_0a40, 0, &mut mem).unwrap(); // vcvtr.u32.f32 s1, s0
     folded ^= cpu.sreg(1);
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_vfp_compare_matrix_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r12, #0\n\
+         ldr r0, =0x3f800000\n\
+         vmov s0, r0\n\
+         ldr r0, =0x40000000\n\
+         vmov s1, r0\n\
+         vcmp.f32 s0, s1\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x40400000\n\
+         vmov s2, r0\n\
+         ldr r0, =0x40400000\n\
+         vmov s3, r0\n\
+         vcmp.f32 s2, s3\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x40800000\n\
+         vmov s4, r0\n\
+         ldr r0, =0xbf800000\n\
+         vmov s5, r0\n\
+         vcmp.f32 s4, s5\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x7fc00000\n\
+         vmov s6, r0\n\
+         ldr r0, =0x3f800000\n\
+         vmov s7, r0\n\
+         vcmp.f32 s6, s7\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x80000000\n\
+         vmov s8, r0\n\
+         vcmp.f32 s8, #0.0\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x3ff00000\n\
+         vmov d0, r0, r1\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x40000000\n\
+         vmov d1, r0, r1\n\
+         vcmp.f64 d0, d1\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x400c0000\n\
+         vmov d2, r0, r1\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x400c0000\n\
+         vmov d3, r0, r1\n\
+         vcmp.f64 d2, d3\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x40100000\n\
+         vmov d4, r0, r1\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0xbff00000\n\
+         vmov d5, r0, r1\n\
+         vcmp.f64 d4, d5\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x7ff80000\n\
+         vmov d6, r0, r1\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x3ff00000\n\
+         vmov d7, r0, r1\n\
+         vcmp.f64 d6, d7\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r12, r12, r4, lsr #28\n\
+         ldr r0, =0x00000000\n\
+         ldr r1, =0x80000000\n\
+         vmov d8, r0, r1\n\
+         vcmp.f64 d8, #0.0\n\
+         vmrs APSR_nzcv, fpscr\n\
+         mrs r4, cpsr\n\
+         eor r0, r12, r4, lsr #28",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+
+    let fold_flags = |cpu: &mut Cpu, folded: &mut u32, mem: &mut VecMemory| {
+        cpu.execute_arm(0xeef1_fa10, 0, mem).unwrap(); // vmrs APSR_nzcv, fpscr
+        *folded ^= cpu.cpsr.to_u32() >> 28;
+    };
+
+    cpu.set_sreg(0, 1.0f32.to_bits());
+    cpu.set_sreg(1, 2.0f32.to_bits());
+    cpu.execute_arm(arm_vcmp_single_instr(0, 1), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_sreg(2, 3.0f32.to_bits());
+    cpu.set_sreg(3, 3.0f32.to_bits());
+    cpu.execute_arm(arm_vcmp_single_instr(2, 3), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_sreg(4, 4.0f32.to_bits());
+    cpu.set_sreg(5, (-1.0f32).to_bits());
+    cpu.execute_arm(arm_vcmp_single_instr(4, 5), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_sreg(6, f32::NAN.to_bits());
+    cpu.set_sreg(7, 1.0f32.to_bits());
+    cpu.execute_arm(arm_vcmp_single_instr(6, 7), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_sreg(8, (-0.0f32).to_bits());
+    cpu.execute_arm(arm_vcmp_single_zero_instr(8), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_dreg(0, 1.0f64.to_bits());
+    cpu.set_dreg(1, 2.0f64.to_bits());
+    cpu.execute_arm(arm_vcmp_double_instr(0, 1), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_dreg(2, 3.5f64.to_bits());
+    cpu.set_dreg(3, 3.5f64.to_bits());
+    cpu.execute_arm(arm_vcmp_double_instr(2, 3), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_dreg(4, 4.0f64.to_bits());
+    cpu.set_dreg(5, (-1.0f64).to_bits());
+    cpu.execute_arm(arm_vcmp_double_instr(4, 5), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_dreg(6, f64::NAN.to_bits());
+    cpu.set_dreg(7, 1.0f64.to_bits());
+    cpu.execute_arm(arm_vcmp_double_instr(6, 7), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
+    cpu.set_dreg(8, (-0.0f64).to_bits());
+    cpu.execute_arm(arm_vcmp_double_zero_instr(8), 0, &mut mem)
+        .unwrap();
+    fold_flags(&mut cpu, &mut folded, &mut mem);
+
     cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
