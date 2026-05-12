@@ -183,6 +183,52 @@ fn arm_vcmp_double_zero_instr(dd: usize) -> u32 {
     0xeeb5_0b40 | (((dd as u32) & 0xf) << 12) | (((dd as u32) >> 4) << 22)
 }
 
+fn arm_single_transfer_imm(
+    load: bool,
+    byte: bool,
+    pre: bool,
+    up: bool,
+    writeback: bool,
+    rn: usize,
+    rd: usize,
+    offset: u32,
+) -> u32 {
+    0xe400_0000
+        | (u32::from(pre) << 24)
+        | (u32::from(up) << 23)
+        | (u32::from(byte) << 22)
+        | (u32::from(writeback) << 21)
+        | (u32::from(load) << 20)
+        | ((rn as u32) << 16)
+        | ((rd as u32) << 12)
+        | (offset & 0xfff)
+}
+
+fn arm_single_transfer_reg(
+    load: bool,
+    byte: bool,
+    pre: bool,
+    up: bool,
+    writeback: bool,
+    rn: usize,
+    rd: usize,
+    rm: usize,
+    shift: u32,
+    amount: u32,
+) -> u32 {
+    0xe600_0000
+        | (u32::from(pre) << 24)
+        | (u32::from(up) << 23)
+        | (u32::from(byte) << 22)
+        | (u32::from(writeback) << 21)
+        | (u32::from(load) << 20)
+        | ((rn as u32) << 16)
+        | ((rd as u32) << 12)
+        | ((amount & 0x1f) << 7)
+        | ((shift & 0x3) << 5)
+        | rm as u32
+}
+
 fn byte_fold(value: u32) -> u32 {
     value ^ (value >> 8) ^ (value >> 16) ^ (value >> 24)
 }
@@ -1259,6 +1305,179 @@ fn qemu_oracle_pack_halfword_matches_interpreter() {
     cpu.set_reg(5, 0x8123_4567);
     cpu.execute_arm(0xe684_3455, 0, &mut mem).unwrap(); // pkhtb r3, r4, r5, asr #8
     cpu.set_reg(0, cpu.reg(0) ^ cpu.reg(3));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_single_transfer_addressing_matrix_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r12, #0\n\
+         ldr r9, =data\n\
+         ldr r1, =0x11223344\n\
+         str r1, [r9]\n\
+         ldr r0, [r9]\n\
+         eor r12, r12, r0\n\
+         eor r12, r12, r0, lsr #8\n\
+         eor r12, r12, r0, lsr #16\n\
+         eor r12, r12, r0, lsr #24\n\
+         add r10, r9, #16\n\
+         ldr r0, [r10, #-8]\n\
+         eor r12, r12, r0\n\
+         eor r12, r12, r0, lsr #8\n\
+         eor r12, r12, r0, lsr #16\n\
+         eor r12, r12, r0, lsr #24\n\
+         mov r10, r9\n\
+         ldr r2, [r10], #4\n\
+         sub r8, r10, r9\n\
+         eor r12, r12, r2\n\
+         eor r12, r12, r2, lsr #8\n\
+         eor r12, r12, r2, lsr #16\n\
+         eor r12, r12, r2, lsr #24\n\
+         eor r12, r12, r8\n\
+         add r10, r9, #8\n\
+         ldr r3, =0xaabbccdd\n\
+         str r3, [r10, #-4]!\n\
+         sub r8, r10, r9\n\
+         ldr r0, [r10]\n\
+         eor r12, r12, r0\n\
+         eor r12, r12, r0, lsr #8\n\
+         eor r12, r12, r0, lsr #16\n\
+         eor r12, r12, r0, lsr #24\n\
+         eor r12, r12, r8\n\
+         mov r10, r9\n\
+         mov r4, #0x55\n\
+         strb r4, [r10, #1]\n\
+         ldrb r5, [r10, #1]\n\
+         eor r12, r12, r5\n\
+         mov r10, r9\n\
+         mov r11, #2\n\
+         ldr r6, [r10, r11, lsl #2]\n\
+         eor r12, r12, r6\n\
+         eor r12, r12, r6, lsr #8\n\
+         eor r12, r12, r6, lsr #16\n\
+         eor r12, r12, r6, lsr #24\n\
+         add r10, r9, #12\n\
+         mov r11, #1\n\
+         ldr r7, =0x55667788\n\
+         str r7, [r10, -r11, lsl #2]\n\
+         ldr r0, [r9, #8]\n\
+         eor r12, r12, r0\n\
+         eor r12, r12, r0, lsr #8\n\
+         eor r12, r12, r0, lsr #16\n\
+         eor r0, r12, r0, lsr #24\n\
+         .data\n\
+         .align 2\n\
+         data: .word 0, 0x01020304, 0x99aabbcc, 0\n\
+         .text",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 0x200);
+    let base = 0x100;
+    mem.load_arm_words(base, &[0, 0x0102_0304, 0x99aa_bbcc, 0])
+        .unwrap();
+    let mut folded = 0;
+
+    cpu.set_reg(9, base);
+    cpu.set_reg(1, 0x1122_3344);
+    cpu.execute_arm(
+        arm_single_transfer_imm(false, false, true, true, false, 9, 1, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // str r1, [r9]
+    cpu.execute_arm(
+        arm_single_transfer_imm(true, false, true, true, false, 9, 0, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r0, [r9]
+    folded ^= byte_fold(cpu.reg(0));
+
+    cpu.set_reg(10, base + 16);
+    cpu.execute_arm(
+        arm_single_transfer_imm(true, false, true, false, false, 10, 0, 8),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r0, [r10, #-8]
+    folded ^= byte_fold(cpu.reg(0));
+
+    cpu.set_reg(10, base);
+    cpu.execute_arm(
+        arm_single_transfer_imm(true, false, false, true, false, 10, 2, 4),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r2, [r10], #4
+    folded ^= byte_fold(cpu.reg(2));
+    folded ^= cpu.reg(10).wrapping_sub(base);
+
+    cpu.set_reg(10, base + 8);
+    cpu.set_reg(3, 0xaabb_ccdd);
+    cpu.execute_arm(
+        arm_single_transfer_imm(false, false, true, false, true, 10, 3, 4),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // str r3, [r10, #-4]!
+    cpu.execute_arm(
+        arm_single_transfer_imm(true, false, true, true, false, 10, 0, 0),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r0, [r10]
+    folded ^= byte_fold(cpu.reg(0));
+    folded ^= cpu.reg(10).wrapping_sub(base);
+
+    cpu.set_reg(10, base);
+    cpu.set_reg(4, 0x55);
+    cpu.execute_arm(
+        arm_single_transfer_imm(false, true, true, true, false, 10, 4, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // strb r4, [r10, #1]
+    cpu.execute_arm(
+        arm_single_transfer_imm(true, true, true, true, false, 10, 5, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldrb r5, [r10, #1]
+    folded ^= cpu.reg(5);
+
+    cpu.set_reg(10, base);
+    cpu.set_reg(11, 2);
+    cpu.execute_arm(
+        arm_single_transfer_reg(true, false, true, true, false, 10, 6, 11, 0, 2),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r6, [r10, r11, lsl #2]
+    folded ^= byte_fold(cpu.reg(6));
+
+    cpu.set_reg(10, base + 12);
+    cpu.set_reg(11, 1);
+    cpu.set_reg(7, 0x5566_7788);
+    cpu.execute_arm(
+        arm_single_transfer_reg(false, false, true, false, false, 10, 7, 11, 0, 2),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // str r7, [r10, -r11, lsl #2]
+    cpu.execute_arm(
+        arm_single_transfer_imm(true, false, true, true, false, 9, 0, 8),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // ldr r0, [r9, #8]
+    folded ^= byte_fold(cpu.reg(0));
+
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
