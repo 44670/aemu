@@ -87,7 +87,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   square-root/divide, and invalid float-to-integer conversions: `DZC` for
   finite nonzero divide by zero and `IOC` for negative square root, zero
   divided by zero, NaN conversion, out-of-range conversion, and negative
-  unsigned conversion
+  unsigned conversion; `IXC` for inexact float-to-integer conversions that
+  round without raising `IOC`
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
   privileged traps for user-mode `FPEXC`/`FPINST` accesses; compare remains
@@ -119,8 +120,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags remain incomplete
   beyond basic `IOC`/`DZC` divide, square-root, and conversion invalid cases,
-  and several less common edge cases still need an instruction-by-instruction
-  audit. VFPv3 fixed-point conversions are outside the ARMv6/VFPv2 baseline.
+  plus basic conversion `IXC` cases; several less common edge cases still need
+  an instruction-by-instruction audit. VFPv3 fixed-point conversions are
+  outside the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.
 - Thumb-2 is intentionally not implemented for the ARMv6 baseline, but

@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 40 unit tests, 86 QEMU oracle tests, and doc tests.
+Result: passing, with 41 unit tests, 86 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -44,7 +44,7 @@ Result: passing, with 40 unit tests, 86 QEMU oracle tests, and doc tests.
 | Write ARMv6 interpreter support | `src/armv6.rs` implements a custom ARM/Thumb interpreter with ARMv5TE, ARMv6 integer/media/sync/status subsets, CP15 TLS/barrier shims, and VFPv2 subsets; `docs/armv6_status.md` tracks coverage. | Partially complete; full instruction-by-instruction ARM ARM audit is still open. |
 | Include ARM and Thumb behavior relevant to old Android `armeabi` games | ARM state, Thumb-1 state, interworking, checked memory, condition codes, common load/store, block transfer, multiply/DSP/media, status, sync, and traps are implemented in `src/armv6.rs`. | Partially complete; ARMv6T2/Thumb-2 is intentionally outside the ARMv6 baseline, and more edge-case audit work remains. |
 | Handle privileged or unsupported instructions safely | `CPS`, `RFE`, `SRS`, Thumb `CPS`, SPSR access, CPSR control writes, invalid VFP `PC` core-register forms, and invalid CP15 TLS/barrier `PC` forms trap explicitly. General unsupported instructions return undefined traps. | Partially complete; broad privileged CP15/system behavior is not modeled. |
-| Provide VFP support | `src/armv6.rs` implements VFPv2 move, arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion, FPSCR short-vector arithmetic/unary handling, basic `IOC`/`DZC` FPSCR exception flags including invalid float-to-integer conversions, and load/store subsets. | Partially complete; broader FPSCR exception flags and uncommon edge cases remain simplified or missing. VFPv3-only fixed-point conversions are outside the ARMv6/VFPv2 baseline. |
+| Provide VFP support | `src/armv6.rs` implements VFPv2 move, arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion, FPSCR short-vector arithmetic/unary handling, basic `IOC`/`DZC`/`IXC` FPSCR exception flags including invalid and inexact float-to-integer conversions, and load/store subsets. | Partially complete; broader FPSCR exception flags and uncommon edge cases remain simplified or missing. VFPv3-only fixed-point conversions are outside the ARMv6/VFPv2 baseline. |
 | Verify with Minecraft PE `.so` | `cargo run -- probe-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk` probes the local APK and `docs/minecraft_pe_probe.md` records the result. | Blocked; local `libminecraftpe.so` is `armeabi-v7a`, ARMv7/Thumb-2/VFPv3/NEON, not ARMv6 `armeabi`. |
 | Test with functions | Unit tests in `src/armv6.rs`, probe tests in `src/elf_probe.rs` and `src/zip_probe.rs`, plus QEMU oracle tests in `tests/qemu_oracle.rs`. | Partially complete; current tests pass but are representative rather than exhaustive/randomized. |
 
@@ -226,6 +226,9 @@ Result: passing, with 40 unit tests, 86 QEMU oracle tests, and doc tests.
 - VFPv2 float-to-integer conversions now set cumulative `IOC` for NaN,
   out-of-range, and negative unsigned conversion cases, and saturate or zero
   results to match the QEMU oracle
+- VFPv2 float-to-integer conversions now set cumulative `IXC` for inexact
+  rounded conversions that do not raise `IOC`, with direct unit coverage and
+  expanded QEMU oracle coverage
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user
@@ -244,10 +247,10 @@ Result: passing, with 40 unit tests, 86 QEMU oracle tests, and doc tests.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
-  divide/square-root/conversion-invalid cases; overflow, underflow, inexact,
-  broader NaN propagation, and broader conversion exception behavior remain
-  simplified or missing. VFPv3 fixed-point conversions remain outside the
-  ARMv6/VFPv2 baseline.
+  divide/square-root/conversion-invalid cases and basic conversion `IXC`;
+  overflow, underflow, arithmetic inexact, broader NaN propagation, and
+  broader conversion exception behavior remain simplified or missing. VFPv3
+  fixed-point conversions remain outside the ARMv6/VFPv2 baseline.
 - The exclusive monitor remains a single-core approximation and does not model
   multiprocessor/global monitor effects.
 - Unpredictable cases are only partially checked; many are simplified to keep

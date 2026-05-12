@@ -69,6 +69,7 @@ pub enum Isa {
 const VFP_FPSID_ARM1136: u32 = 0x4101_20b4;
 const FPSCR_IOC: u32 = 1 << 0;
 const FPSCR_DZC: u32 = 1 << 1;
+const FPSCR_IXC: u32 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cpsr {
@@ -3079,23 +3080,23 @@ fn vfp_div_exception_flags_f64(lhs: f64, rhs: f64) -> u32 {
 }
 
 fn vfp_trunc_to_i32_bits(value: f64) -> (u32, u32) {
-    vfp_i32_result_bits(value.trunc())
+    vfp_i32_result_bits(value, value.trunc())
 }
 
 fn vfp_round_to_i32_bits(value: f64, fpscr: u32) -> (u32, u32) {
-    vfp_i32_result_bits(vfp_round_by_fpscr(value, fpscr))
+    vfp_i32_result_bits(value, vfp_round_by_fpscr(value, fpscr))
 }
 
 fn vfp_trunc_to_u32_bits(value: f64) -> (u32, u32) {
-    vfp_u32_result_bits(value.trunc())
+    vfp_u32_result_bits(value, value.trunc())
 }
 
 fn vfp_round_to_u32_bits(value: f64, fpscr: u32) -> (u32, u32) {
-    vfp_u32_result_bits(vfp_round_by_fpscr(value, fpscr))
+    vfp_u32_result_bits(value, vfp_round_by_fpscr(value, fpscr))
 }
 
-fn vfp_i32_result_bits(rounded: f64) -> (u32, u32) {
-    if rounded.is_nan() {
+fn vfp_i32_result_bits(value: f64, rounded: f64) -> (u32, u32) {
+    let (result, exception_flags) = if rounded.is_nan() {
         (0, FPSCR_IOC)
     } else if rounded > f64::from(i32::MAX) {
         (i32::MAX as u32, FPSCR_IOC)
@@ -3103,11 +3104,15 @@ fn vfp_i32_result_bits(rounded: f64) -> (u32, u32) {
         (i32::MIN as u32, FPSCR_IOC)
     } else {
         (rounded as i32 as u32, 0)
-    }
+    };
+    (
+        result,
+        exception_flags | vfp_conversion_inexact_flag(value, rounded, exception_flags),
+    )
 }
 
-fn vfp_u32_result_bits(rounded: f64) -> (u32, u32) {
-    if rounded.is_nan() {
+fn vfp_u32_result_bits(value: f64, rounded: f64) -> (u32, u32) {
+    let (result, exception_flags) = if rounded.is_nan() {
         (0, FPSCR_IOC)
     } else if rounded < 0.0 {
         (0, FPSCR_IOC)
@@ -3115,6 +3120,18 @@ fn vfp_u32_result_bits(rounded: f64) -> (u32, u32) {
         (u32::MAX, FPSCR_IOC)
     } else {
         (rounded as u32, 0)
+    };
+    (
+        result,
+        exception_flags | vfp_conversion_inexact_flag(value, rounded, exception_flags),
+    )
+}
+
+fn vfp_conversion_inexact_flag(value: f64, rounded: f64, exception_flags: u32) -> u32 {
+    if exception_flags & FPSCR_IOC == 0 && value.is_finite() && rounded != value {
+        FPSCR_IXC
+    } else {
+        0
     }
 }
 
@@ -5399,6 +5416,42 @@ mod tests {
         cpu.execute_arm(0xeefc_0a40, 0, &mut mem).unwrap(); // vcvtr.u32.f32 s1, s0
         assert_eq!(cpu.sreg(1), 0);
         assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+    }
+
+    #[test]
+    fn vfpv2_conversion_inexact_flags_follow_rounding() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_sreg(0, 3.5f32.to_bits());
+        cpu.execute_arm(0xeefd_0ac0, 0, &mut mem).unwrap(); // vcvt.s32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), 3);
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_IXC), FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, (-0.25f32).to_bits());
+        cpu.execute_arm(0xeefc_0ac0, 0, &mut mem).unwrap(); // vcvt.u32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_IXC), FPSCR_IXC);
+
+        cpu.set_reg(2, 2 << 22); // Round toward minus infinity.
+        cpu.execute_arm(0xeee1_2a10, 0, &mut mem).unwrap(); // vmsr fpscr, r2
+        cpu.set_sreg(0, (-0.25f32).to_bits());
+        cpu.execute_arm(0xeefc_0a40, 0, &mut mem).unwrap(); // vcvtr.u32.f32 s1, s0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_IXC), FPSCR_IOC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 2.5f64.to_bits());
+        cpu.execute_arm(0xeefd_0b40, 0, &mut mem).unwrap(); // vcvtr.s32.f64 s1, d0
+        assert_eq!(cpu.sreg(1), 2);
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_IXC), FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 4.0f64.to_bits());
+        cpu.execute_arm(0xeefd_0bc0, 0, &mut mem).unwrap(); // vcvt.s32.f64 s1, d0
+        assert_eq!(cpu.sreg(1), 4);
+        assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_IXC), 0);
     }
 
     #[test]
