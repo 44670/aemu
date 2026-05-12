@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 33 unit tests, 32 QEMU oracle tests, and doc tests.
+Result: passing, with 34 unit tests, 32 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -83,6 +83,9 @@ Result: passing, with 33 unit tests, 32 QEMU oracle tests, and doc tests.
   doubleword-pair, and status-register overlap forms
 - ARM/Thumb no-op/control/hint handling listed in `docs/armv6_status.md`
 - Explicit user-mode privileged traps for `CPS`, `RFE`, and `SRS`
+- Non-baseline ARMv6T2/ARMv7 A32 encodings for `MOVW`, `MOVT`, bitfield
+  operations, `RBIT`, and integer divide trap as undefined instead of being
+  misdecoded as ARMv6 data-processing instructions
 - Status register access for user-mode APSR/CPSR flags, with privileged traps
   for SPSR and CPSR control-field writes, plus invalid `PC` form traps
 - Explicit traps for data-processing exception-return forms that write `PC`

@@ -859,6 +859,10 @@ impl Cpu {
     }
 
     fn exec_arm_misc<M: Memory>(&mut self, instr: u32, pc: u32, mem: &mut M) -> Result<bool> {
+        if is_unsupported_a32_newer_than_armv6(instr) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
         if (instr & 0x0fff_0ff0) == 0x016f_0f10 {
             let rd = ((instr >> 12) & 0xf) as usize;
             let rm = (instr & 0xf) as usize;
@@ -3114,6 +3118,23 @@ fn vfp_double_m(instr: u32) -> usize {
     ((instr & 0xf) | (((instr >> 5) & 1) << 4)) as usize
 }
 
+fn is_unsupported_a32_newer_than_armv6(instr: u32) -> bool {
+    const ARMV6T2_ARMV7_PATTERNS: &[(u32, u32)] = &[
+        (0x0fe0_007f, 0x07c0_001f), // BFC
+        (0x0fe0_0070, 0x07c0_0010), // BFI
+        (0x0ff0_0000, 0x0340_0000), // MOVT
+        (0x0ff0_0000, 0x0300_0000), // MOVW
+        (0x0fe0_0070, 0x07a0_0050), // SBFX
+        (0x0fe0_0070, 0x07e0_0050), // UBFX
+        (0x0fff_0ff0, 0x06ff_0f30), // RBIT
+        (0x0ff0_f0f0, 0x0710_f010), // SDIV
+        (0x0ff0_f0f0, 0x0730_f010), // UDIV
+    ];
+    ARMV6T2_ARMV7_PATTERNS
+        .iter()
+        .any(|&(mask, value)| instr & mask == value)
+}
+
 fn sign_extend(value: u32, bits: u32) -> i32 {
     let shift = 32 - bits;
     ((value << shift) as i32) >> shift
@@ -3743,6 +3764,27 @@ mod tests {
                 instr: 0xe7f0_00f0
             }
         );
+    }
+
+    #[test]
+    fn arm_unsupported_newer_a32_encodings_trap_undefined() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        for instr in [
+            0xe300_0000, // movw r0, #0
+            0xe340_0000, // movt r0, #0
+            0xe7c0_001f, // bfc r0, #0, #1
+            0xe7c0_0010, // bfi r0, r0, #0, #1
+            0xe7a0_0050, // sbfx r0, r0, #0, #1
+            0xe7e0_0050, // ubfx r0, r0, #0, #1
+            0xe6ff_0f30, // rbit r0, r0
+            0xe710_f010, // sdiv r0, r0, r0
+            0xe730_f010, // udiv r0, r0, r0
+        ] {
+            let err = cpu.execute_arm(instr, 0x80, &mut mem).unwrap_err();
+            assert_eq!(err, Trap::UndefinedArm { pc: 0x80, instr });
+        }
     }
 
     #[test]

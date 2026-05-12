@@ -45,6 +45,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   doubleword-pair, and status-register overlap forms
 - ARM no-op/hint/system handling: `PLD`, ARM hint encodings, `SETEND LE`,
   and explicit privileged traps for `CPS`, `RFE`, and `SRS`
+- Explicit undefined traps for non-baseline ARMv6T2/ARMv7 A32 encodings that
+  otherwise overlap ARM data-processing space: `MOVW`, `MOVT`, bitfield
+  extract/insert/clear, `RBIT`, `SDIV`, and `UDIV`
 - Explicit exception/control traps: ARM/Thumb `SVC`, ARM/Thumb `BKPT`,
   ARM/Thumb `UDF`
 - CP15 user-thread registers: `MRC`/`MCR` for `TPIDRURW` and `TPIDRURO`,
