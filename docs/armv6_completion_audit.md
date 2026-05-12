@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 47 unit tests, 90 QEMU oracle tests, and doc tests.
+Result: passing, with 48 unit tests, 91 QEMU oracle tests, and doc tests.
 
 Additional oracle verification:
 
@@ -43,7 +43,7 @@ Additional oracle verification:
 cargo test --test qemu_oracle -- --nocapture
 ```
 
-Result: passing, with 90 QEMU oracle tests and no skip diagnostics.
+Result: passing, with 91 QEMU oracle tests and no skip diagnostics.
 
 ## Prompt-To-Artifact Checklist
 
@@ -255,6 +255,10 @@ Result: passing, with 90 QEMU oracle tests and no skip diagnostics.
 - VFPv2 double-precision arithmetic now sets cumulative `OFC|IXC` for selected
   overflow add, multiply, divide, and multiply-accumulate cases, with direct
   unit and QEMU oracle coverage
+- VFPv2 double-precision arithmetic now sets cumulative `UFC|IXC` for selected
+  zero-result underflow multiply, divide, and multiply-accumulate cases, while
+  exact subnormal multiplication remains flag-clean, with direct unit and QEMU
+  oracle coverage
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user
@@ -276,7 +280,7 @@ Result: passing, with 90 QEMU oracle tests and no skip diagnostics.
   divide/square-root/compare-NaN/conversion-invalid cases, selected
   single-precision arithmetic flags, selected double invalid/overflow
   arithmetic flags, and basic conversion `IXC`/`OFC`/`UFC`; double-precision
-  arithmetic underflow/general inexact behavior, broader NaN propagation, and
+  subnormal-underflow/general inexact behavior, broader NaN propagation, and
   broader conversion exception behavior remain simplified or missing. VFPv3
   fixed-point conversions remain outside the ARMv6/VFPv2 baseline.
 - The exclusive monitor remains a single-core approximation and does not model

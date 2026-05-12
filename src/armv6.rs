@@ -3274,6 +3274,7 @@ fn vfp_div_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
         if lhs.is_finite() { FPSCR_DZC } else { 0 }
     } else if lhs.is_finite() && rhs.is_finite() {
         vfp_overflow_exception_flags_f64(result)
+            | vfp_zero_underflow_exception_flags_f64(lhs, rhs, result)
     } else {
         0
     }
@@ -3317,6 +3318,7 @@ fn vfp_mul_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
         FPSCR_IOC
     } else if lhs.is_finite() && rhs.is_finite() {
         vfp_overflow_exception_flags_f64(result)
+            | vfp_zero_underflow_exception_flags_f64(lhs, rhs, result)
     } else {
         0
     }
@@ -3325,6 +3327,14 @@ fn vfp_mul_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
 fn vfp_overflow_exception_flags_f64(result: f64) -> u32 {
     if result.is_infinite() {
         FPSCR_OFC | FPSCR_IXC
+    } else {
+        0
+    }
+}
+
+fn vfp_zero_underflow_exception_flags_f64(lhs: f64, rhs: f64, result: f64) -> u32 {
+    if lhs != 0.0 && rhs != 0.0 && result == 0.0 {
+        FPSCR_UFC | FPSCR_IXC
     } else {
         0
     }
@@ -5805,6 +5815,41 @@ mod tests {
         cpu.execute_arm(0xee07_6b08, 0, &mut mem).unwrap(); // vmla.f64 d6, d7, d8
         assert_eq!(f64::from_bits(cpu.dreg(6)), f64::INFINITY);
         assert_eq!(cpu.fpscr & mask, FPSCR_OFC | FPSCR_IXC);
+    }
+
+    #[test]
+    fn vfpv2_double_zero_underflow_exception_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+        let mask = FPSCR_IOC | FPSCR_DZC | FPSCR_OFC | FPSCR_UFC | FPSCR_IXC;
+
+        cpu.set_dreg(0, 1);
+        cpu.set_dreg(1, 0.5f64.to_bits());
+        cpu.execute_arm(0xee20_2b01, 0, &mut mem).unwrap(); // vmul.f64 d2, d0, d1
+        assert_eq!(cpu.dreg(2), 0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_UFC | FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::MIN_POSITIVE.to_bits());
+        cpu.set_dreg(1, 0.5f64.to_bits());
+        cpu.execute_arm(0xee20_2b01, 0, &mut mem).unwrap(); // vmul.f64 d2, d0, d1
+        assert_eq!(cpu.dreg(2), 0x0008_0000_0000_0000);
+        assert_eq!(cpu.fpscr & mask, 0);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 1);
+        cpu.set_dreg(1, 2.0f64.to_bits());
+        cpu.execute_arm(0xee80_2b01, 0, &mut mem).unwrap(); // vdiv.f64 d2, d0, d1
+        assert_eq!(cpu.dreg(2), 0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_UFC | FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(6, 1.0f64.to_bits());
+        cpu.set_dreg(7, 1);
+        cpu.set_dreg(8, 0.5f64.to_bits());
+        cpu.execute_arm(0xee07_6b08, 0, &mut mem).unwrap(); // vmla.f64 d6, d7, d8
+        assert_eq!(f64::from_bits(cpu.dreg(6)), 1.0);
+        assert_eq!(cpu.fpscr & mask, FPSCR_UFC | FPSCR_IXC);
     }
 
     #[test]
