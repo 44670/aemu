@@ -1,0 +1,189 @@
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn main() {
+    let mut args = env::args().skip(1);
+    match args.next().as_deref() {
+        Some("probe-so") => {
+            let Some(path) = args.next() else {
+                eprintln!("usage: aemu probe-so <lib.so>");
+                std::process::exit(2);
+            };
+            match aemu::elf_probe::probe_arm_elf(Path::new(&path)) {
+                Ok(probe) => print_probe(&probe),
+                Err(err) => {
+                    eprintln!("probe failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("probe-apk") => {
+            let Some(path) = args.next() else {
+                eprintln!("usage: aemu probe-apk <app.apk>");
+                std::process::exit(2);
+            };
+            if let Err(err) = probe_apk(Path::new(&path)) {
+                eprintln!("probe failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        Some("sdl2-shell") => run_sdl2_shell(args.collect()),
+        _ => {
+            eprintln!("usage:");
+            eprintln!("  aemu probe-so <lib.so>");
+            eprintln!("  aemu probe-apk <app.apk>");
+            eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
+        }
+    }
+}
+
+fn print_probe(probe: &aemu::elf_probe::ElfProbe) {
+    println!("path: {}", probe.path.display());
+    println!("machine: {}", probe.machine);
+    println!("eabi: {}", probe.eabi);
+    if probe.attributes.is_empty() {
+        println!("attributes: <none>");
+    } else {
+        println!("attributes:");
+        for attr in &probe.attributes {
+            println!("  {}: {}", attr.name, attr.value);
+        }
+    }
+    println!("requires:");
+    println!("  armv7_or_newer: {}", probe.requires_armv7_or_newer());
+    println!("  thumb2: {}", probe.requires_thumb2());
+    println!("  vfp: {}", probe.requires_vfp());
+    println!("  neon: {}", probe.requires_neon());
+}
+
+fn probe_apk(path: &Path) -> Result<(), String> {
+    let zip_entries = aemu::zip_probe::read_zip_entries(path)
+        .map_err(|err| format!("failed to inspect ZIP metadata: {err}"))?;
+    let listing = Command::new("unzip")
+        .arg("-Z1")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("failed to run unzip: {err}"))?;
+    if !listing.status.success() {
+        return Err(String::from_utf8_lossy(&listing.stderr).into_owned());
+    }
+
+    let entries = String::from_utf8_lossy(&listing.stdout);
+    let libs: Vec<&str> = entries
+        .lines()
+        .filter(|entry| entry.starts_with("lib/") && entry.ends_with(".so"))
+        .collect();
+    if libs.is_empty() {
+        println!("no native libraries found in {}", path.display());
+        return Ok(());
+    }
+
+    println!("apk: {}", path.display());
+    println!("native libraries: {}", libs.len());
+    for entry in libs {
+        println!();
+        println!("entry: {entry}");
+        if let Some(zip_entry) = zip_entries.iter().find(|candidate| candidate.name == entry) {
+            let saved = zip_entry
+                .saved_percent()
+                .map(|value| format!("{value}%"))
+                .unwrap_or_else(|| "n/a".to_string());
+            println!(
+                "zip: method {}, compressed {} bytes, uncompressed {} bytes, saved {}",
+                zip_entry.compression,
+                zip_entry.compressed_size,
+                zip_entry.uncompressed_size,
+                saved
+            );
+        }
+        let bytes = Command::new("unzip")
+            .arg("-p")
+            .arg(path)
+            .arg(entry)
+            .output()
+            .map_err(|err| format!("failed to extract {entry}: {err}"))?;
+        if !bytes.status.success() {
+            println!(
+                "  extract failed: {}",
+                String::from_utf8_lossy(&bytes.stderr)
+            );
+            continue;
+        }
+        match aemu::elf_probe::probe_arm_elf_bytes(
+            PathBuf::from(format!("{}!{entry}", path.display())),
+            &bytes.stdout,
+        ) {
+            Ok(probe) => print_probe(&probe),
+            Err(err) => println!("  probe failed: {err}"),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "sdl2")]
+fn run_sdl2_shell(args: Vec<String>) {
+    match parse_sdl2_shell_args(args) {
+        Ok((config, max_frames)) => {
+            if let Err(err) = aemu::sdl_shell::run_debug_shell(config, max_frames) {
+                eprintln!("sdl2 shell failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            eprintln!("usage: aemu sdl2-shell [--frames N] [--width W] [--height H]");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(feature = "sdl2")]
+fn parse_sdl2_shell_args(
+    args: Vec<String>,
+) -> Result<(aemu::host::HostConfig, Option<u64>), String> {
+    let mut config = aemu::host::HostConfig::default();
+    let mut max_frames = None;
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--frames" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--frames needs a numeric value".to_string())?;
+                max_frames = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid --frames value: {value}"))?,
+                );
+            }
+            "--width" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--width needs a numeric value".to_string())?;
+                config.width = value
+                    .parse()
+                    .map_err(|_| format!("invalid --width value: {value}"))?;
+            }
+            "--height" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--height needs a numeric value".to_string())?;
+                config.height = value
+                    .parse()
+                    .map_err(|_| format!("invalid --height value: {value}"))?;
+            }
+            _ => return Err(format!("unknown sdl2-shell argument: {arg}")),
+        }
+    }
+
+    Ok((config, max_frames))
+}
+
+#[cfg(not(feature = "sdl2"))]
+fn run_sdl2_shell(_args: Vec<String>) {
+    eprintln!("sdl2-shell requires rebuilding with --features sdl2");
+    std::process::exit(2);
+}

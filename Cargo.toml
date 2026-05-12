@@ -1,0 +1,12 @@
+[package]
+name = "aemu"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+sdl2 = ["dep:sdl2"]
+webgl = []
+
+[dependencies]
+sdl2 = { version = "0.38", optional = true }
