@@ -76,6 +76,23 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("link-apk") => {
+            let (path, config, limit) = match parse_link_apk_args(args.collect()) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("{err}");
+                    eprintln!("usage: aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
+                    std::process::exit(2);
+                }
+            };
+            match aemu::native_loader::load_apk_native_libraries_with_config(&path, &config) {
+                Ok(report) => print_native_link_report(&report, limit),
+                Err(err) => {
+                    eprintln!("link failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("sdl2-shell") => run_sdl2_shell(args.collect()),
         _ => {
             eprintln!("usage:");
@@ -84,6 +101,7 @@ fn main() {
             eprintln!("  aemu plan-apk <app.apk>");
             eprintln!("  aemu imports-so <lib.so> [--limit N|--all]");
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
+            eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -333,6 +351,135 @@ fn print_relocations(relocations: &aemu::elf_dynamic::ElfRelocationInfo) {
                 .unwrap_or_else(|| "unknown".to_string())
         ),
         None => println!("plt_relocations: <none>"),
+    }
+}
+
+fn parse_link_apk_args(
+    args: Vec<String>,
+) -> Result<
+    (
+        PathBuf,
+        aemu::native_loader::NativeLoadConfig,
+        Option<usize>,
+    ),
+    String,
+> {
+    let mut iter = args.into_iter();
+    let Some(path) = iter.next() else {
+        return Err("missing APK path".to_string());
+    };
+
+    let mut config = aemu::native_loader::NativeLoadConfig::default();
+    let mut limit = Some(40usize);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--abi" => {
+                config.abi = iter
+                    .next()
+                    .ok_or_else(|| "--abi needs an ABI value".to_string())?;
+            }
+            "--all" => limit = None,
+            "--limit" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--limit needs a numeric value".to_string())?;
+                limit = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid --limit value: {value}"))?,
+                );
+            }
+            _ => return Err(format!("unknown link-apk argument: {arg}")),
+        }
+    }
+
+    Ok((PathBuf::from(path), config, limit))
+}
+
+fn print_native_link_report(report: &aemu::native_loader::NativeLinkReport, limit: Option<usize>) {
+    println!("apk: {}", report.apk_path.display());
+    println!("abi: {}", report.abi);
+    println!(
+        "result: {}",
+        if report.is_linked() {
+            "loaded and relocated"
+        } else {
+            "loaded with unresolved link work"
+        }
+    );
+    println!("addressing: 1:1 guest virtual addresses");
+    println!("objects: {}", report.objects.len());
+    for object in &report.objects {
+        println!(
+            "  {}: load_bias {:#010x}, mapped {:#010x}+{:#x}, entry {:#010x}, relocations {}",
+            object.library_name,
+            object.load_bias,
+            object.memory_base,
+            object.memory_size,
+            object.entry,
+            object.relocation_count
+        );
+        if !object.needed.is_empty() {
+            println!("    needed: {}", object.needed.join(", "));
+        }
+        if let Some(init) = object.init {
+            println!("    init: {init:#010x}");
+        }
+        if let Some(init_array) = object.init_array {
+            println!(
+                "    init_array: {:#010x}+{:#x}",
+                init_array.addr, init_array.size
+            );
+        }
+    }
+
+    println!("native exports: {}", report.global_symbols.len());
+    println!("HLE reserved symbols: {}", report.hle_symbols.len());
+    print_hle_symbols(report, limit);
+    println!("resolved imports: {}", report.resolved_imports.len());
+    println!("unresolved imports: {}", report.unresolved_imports.len());
+    print_unresolved_imports(report, limit);
+    if !report.relocation_errors.is_empty() {
+        println!("relocation errors: {}", report.relocation_errors.len());
+        for error in &report.relocation_errors {
+            println!("  {}: {}", error.library_name, error.error);
+        }
+    }
+}
+
+fn print_hle_symbols(report: &aemu::native_loader::NativeLinkReport, limit: Option<usize>) {
+    let shown = limit
+        .unwrap_or(report.hle_symbols.len())
+        .min(report.hle_symbols.len());
+    for symbol in report.hle_symbols.iter().take(shown) {
+        println!(
+            "  {:#010x} {} [{}]",
+            symbol.address, symbol.name, symbol.kind
+        );
+    }
+    if shown < report.hle_symbols.len() {
+        println!(
+            "  ... {} more HLE symbols (use --all or --limit N)",
+            report.hle_symbols.len() - shown
+        );
+    }
+}
+
+fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limit: Option<usize>) {
+    let shown = limit
+        .unwrap_or(report.unresolved_imports.len())
+        .min(report.unresolved_imports.len());
+    for import in report.unresolved_imports.iter().take(shown) {
+        println!(
+            "  {}: {} [{}]",
+            import.library_name, import.name, import.binding
+        );
+    }
+    if shown < report.unresolved_imports.len() {
+        println!(
+            "  ... {} more unresolved imports (use --all or --limit N)",
+            report.unresolved_imports.len() - shown
+        );
     }
 }
 

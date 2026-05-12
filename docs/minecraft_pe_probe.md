@@ -84,6 +84,29 @@ The parser also verifies representative Minecraft imports such as
 work is relocation application plus binding imported symbols to Bionic,
 Android, EGL/GLES, OpenSL, zlib, FMOD, and C++ runtime HLE surfaces.
 
+Native linker probe:
+
+```sh
+cargo run -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --limit 30
+```
+
+This is a loader/HLE-surface probe only because the APK is ARMv7. The probe
+loads all three APK-local libraries into a 1:1 guest virtual address map:
+
+```text
+libfmod.so: load_bias 0x70000000, mapped 0x70000000+0x15c000
+libgnustl_shared.so: load_bias 0x70300000, mapped 0x70300000+0xb6000
+libminecraftpe.so: load_bias 0x70500000, mapped 0x70500000+0x1701000
+```
+
+The same run found 53,631 APK-local dynamic exports, reserved 268 guest HLE
+trampoline symbols, resolved 665 imports, and reported 241 remaining unresolved
+system imports. The default ARMv6 command still fails correctly with:
+
+```text
+no native libraries found for ABI armeabi; available ABIs: armeabi-v7a
+```
+
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:
 

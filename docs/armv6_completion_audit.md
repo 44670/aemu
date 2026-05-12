@@ -301,6 +301,10 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
 - A checked multi-region guest memory map now supports disjoint mappings for
   shared libraries, stack/TLS, and future HLE pages; the ELF loader can load
   segments into any `Memory` implementation.
+- Native APK linker probing now loads APK-local shared libraries in
+  `DT_NEEDED` order, keeps a 1:1 guest virtual address map, collects dynamic
+  exports, reserves guest HLE trampoline addresses, and reports unresolved
+  imports before attempting relocations.
 
 ## Known Incomplete Or Weakly Verified Areas
 
@@ -310,9 +314,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   barrier idioms.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
-- ELF dynamic linking is not complete yet: dependency ordering, real symbol
-  lookup across loaded objects, constructor invocation, and HLE import binding
-  remain open.
+- ELF dynamic linking is not complete yet: real HLE behavior, constructor
+  invocation, weak-symbol edge cases, and a complete Bionic/system-library shim
+  set remain open.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
   divide/square-root/compare-NaN/conversion-invalid cases, selected
   single-precision arithmetic flags, selected double invalid/overflow

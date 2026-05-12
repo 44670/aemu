@@ -6,6 +6,7 @@ pub mod elf_loader;
 pub mod elf_probe;
 pub mod guest_memory;
 pub mod host;
+pub mod native_loader;
 #[cfg(feature = "sdl2")]
 pub mod sdl_shell;
 pub mod wasm_webgl;

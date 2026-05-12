@@ -188,6 +188,28 @@ keyboard, mouse, touch, resize, and quit events through `src/host.rs`.
 Browser/WebGL scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains the
 default target for GLES2 guest rendering.
 
+## Guest Addressing
+
+Use a 1:1 guest virtual address map in the runtime path.
+
+- Map ELF `PT_LOAD` segments at their final guest virtual addresses.
+- Treat `load_bias + st_value`, relocation places, init arrays, stacks, TLS,
+  and HLE trampoline addresses as guest addresses directly.
+- Do not add a separate runtime address-translation layer between ELF/object
+  addresses and guest memory.
+- Host storage may use internal vector offsets, but those offsets must stay
+  hidden behind the `Memory` trait.
+
+The native linker probe is:
+
+```sh
+cargo run -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk
+```
+
+The default ABI is `armeabi`. Use `--abi armeabi-v7a` only as a research probe
+for the current local Minecraft PE APK; it is not valid for the ARMv6 runtime
+target.
+
 ## Test APKs
 
 Local test APKs live under:
