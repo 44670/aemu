@@ -69,6 +69,8 @@ pub enum Isa {
 const VFP_FPSID_ARM1136: u32 = 0x4101_20b4;
 const FPSCR_IOC: u32 = 1 << 0;
 const FPSCR_DZC: u32 = 1 << 1;
+const FPSCR_OFC: u32 = 1 << 2;
+const FPSCR_UFC: u32 = 1 << 3;
 const FPSCR_IXC: u32 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -687,7 +689,9 @@ impl Cpu {
             0x0eb7_0bc0 => {
                 let sd = vfp_single_d(instr);
                 let dm = vfp_double_m(instr);
-                self.sregs[sd] = (f64::from_bits(self.checked_dreg_bits(dm)?) as f32).to_bits();
+                let (result, exception_flags) = vfp_f64_to_f32_bits(self.checked_dreg_bits(dm)?);
+                self.sregs[sd] = result;
+                self.fpscr |= exception_flags;
                 return Ok(true);
             }
             0x0ebd_0ac0 => {
@@ -3173,6 +3177,29 @@ fn vfp_int_to_f32_inexact_flag(value: f64, result: f32) -> u32 {
     }
 }
 
+fn vfp_f64_to_f32_bits(value: u64) -> (u32, u32) {
+    let input = f64::from_bits(value);
+    let result = input as f32;
+    let mut exception_flags = if f64_is_signaling_nan_bits(value) {
+        FPSCR_IOC
+    } else {
+        0
+    };
+
+    if input.is_finite() {
+        if result.is_infinite() {
+            exception_flags |= FPSCR_OFC | FPSCR_IXC;
+        } else if f64::from(result) != input {
+            exception_flags |= FPSCR_IXC;
+            if result == 0.0 || result.is_subnormal() {
+                exception_flags |= FPSCR_UFC;
+            }
+        }
+    }
+
+    (result.to_bits(), exception_flags)
+}
+
 fn vfp_round_by_fpscr(value: f64, fpscr: u32) -> f64 {
     if !value.is_finite() {
         return value;
@@ -5555,6 +5582,41 @@ mod tests {
         cpu.execute_arm(0xeeb8_0b40, 0, &mut mem).unwrap(); // vcvt.f64.u32 d0, s0
         assert_eq!(f64::from_bits(cpu.dreg(0)), f64::from(u32::MAX));
         assert_eq!(cpu.fpscr & FPSCR_IXC, 0);
+    }
+
+    #[test]
+    fn vfpv2_double_to_single_exception_flags() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_dreg(0, 1.1f64.to_bits());
+        cpu.execute_arm(0xeef7_0bc0, 0, &mut mem).unwrap(); // vcvt.f32.f64 s1, d0
+        assert_eq!(f32::from_bits(cpu.sreg(1)), 1.1f32);
+        assert_eq!(cpu.fpscr & (FPSCR_OFC | FPSCR_UFC | FPSCR_IXC), FPSCR_IXC);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 1.0e40f64.to_bits());
+        cpu.execute_arm(0xeef7_0bc0, 0, &mut mem).unwrap(); // vcvt.f32.f64 s1, d0
+        assert_eq!(f32::from_bits(cpu.sreg(1)), f32::INFINITY);
+        assert_eq!(
+            cpu.fpscr & (FPSCR_OFC | FPSCR_UFC | FPSCR_IXC),
+            FPSCR_OFC | FPSCR_IXC
+        );
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 1.0e-50f64.to_bits());
+        cpu.execute_arm(0xeef7_0bc0, 0, &mut mem).unwrap(); // vcvt.f32.f64 s1, d0
+        assert_eq!(cpu.sreg(1), 0);
+        assert_eq!(
+            cpu.fpscr & (FPSCR_OFC | FPSCR_UFC | FPSCR_IXC),
+            FPSCR_UFC | FPSCR_IXC
+        );
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, f64::from(f32::from_bits(1)).to_bits());
+        cpu.execute_arm(0xeef7_0bc0, 0, &mut mem).unwrap(); // vcvt.f32.f64 s1, d0
+        assert_eq!(cpu.sreg(1), 1);
+        assert_eq!(cpu.fpscr & (FPSCR_OFC | FPSCR_UFC | FPSCR_IXC), 0);
     }
 
     #[test]

@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 43 unit tests, 87 QEMU oracle tests, and doc tests.
+Result: passing, with 44 unit tests, 87 QEMU oracle tests, and doc tests.
 
 Additional oracle verification:
 
@@ -242,6 +242,9 @@ Result: passing, with 87 QEMU oracle tests and no skip diagnostics.
 - VFPv2 integer-to-single conversions now set cumulative `IXC` when the
   `S32`/`U32` source cannot be represented exactly as `F32`; integer-to-double
   remains exact for 32-bit inputs
+- VFPv2 double-to-single conversions now set cumulative `IXC`, `OFC`, and
+  `UFC` for inexact, overflowing, and underflowing narrowing cases, while exact
+  subnormal narrowing remains flag-clean
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user
@@ -261,9 +264,10 @@ Result: passing, with 87 QEMU oracle tests and no skip diagnostics.
   TLS/barrier shims.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
   divide/square-root/compare-NaN/conversion-invalid cases and basic conversion
-  `IXC`; overflow, underflow, arithmetic inexact, broader NaN propagation, and
-  broader conversion exception behavior remain simplified or missing. VFPv3
-  fixed-point conversions remain outside the ARMv6/VFPv2 baseline.
+  `IXC`/`OFC`/`UFC`; arithmetic overflow, arithmetic underflow, arithmetic
+  inexact, broader NaN propagation, and broader conversion exception behavior
+  remain simplified or missing. VFPv3 fixed-point conversions remain outside
+  the ARMv6/VFPv2 baseline.
 - The exclusive monitor remains a single-core approximation and does not model
   multiprocessor/global monitor effects.
 - Unpredictable cases are only partially checked; many are simplified to keep
