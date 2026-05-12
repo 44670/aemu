@@ -3740,6 +3740,53 @@ fn qemu_oracle_parallel_media_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_parallel_media_ge_flags_match_interpreter() {
+    const CASES: &[(&str, u32, u32, u32, u32)] = &[
+        ("sadd16", 1, 0, 0x0001_ffff, 0x0001_0001),
+        ("sasx", 1, 1, 0x0001_8000, 0x7fff_0002),
+        ("ssax", 1, 2, 0x7fff_8000, 0x0001_ffff),
+        ("ssub16", 1, 3, 0x8001_7fff, 0x0002_ffff),
+        ("uadd8", 5, 4, 0xf010_20ff, 0x1020_f001),
+        ("usub8", 5, 7, 0x9010_9010, 0x1020_1020),
+        ("uasx", 5, 1, 0x0001_ffff, 0x0100_0002),
+        ("usax", 5, 2, 0x0100_0002, 0x0001_ffff),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (mnemonic, _, _, rn, rm) in CASES {
+        body.push_str(&format!(
+            "ldr r1, ={rn:#010x}\n\
+             ldr r2, ={rm:#010x}\n\
+             {mnemonic} r0, r1, r2\n\
+             mrs r3, cpsr\n\
+             and r3, r3, #0x000f0000\n\
+             eor r12, r12, r3, lsr #16\n"
+        ));
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (_, family, op, rn, rm) in CASES {
+        cpu.cpsr.ge = 0;
+        cpu.set_reg(1, *rn);
+        cpu.set_reg(2, *rm);
+        cpu.execute_arm(arm_parallel_media_instr(*family, *op, 0, 1, 2), 0, &mut mem)
+            .unwrap();
+        folded ^= u32::from(cpu.cpsr.ge);
+    }
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_sel_uses_parallel_ge_flags_matches_interpreter() {
     const CASES: &[(u32, u32, u32, u32)] = &[
         (0x9010_9010, 0x1020_1020, 0xa1a2_a3a4, 0xb1b2_b3b4),
