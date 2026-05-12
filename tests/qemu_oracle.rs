@@ -3061,6 +3061,26 @@ fn qemu_oracle_thumb_mov_pc_stays_thumb_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_cp15_tpidrurw_roundtrip_matches_interpreter() {
+    let asm = oracle_program(
+        "ldr r1, =0x123456ab\n\
+         mcr p15, #0, r1, c13, c0, #2\n\
+         mrc p15, #0, r0, c13, c0, #2",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_reg(1, 0x1234_56ab);
+    cpu.execute_arm(0xee0d_1f50, 0, &mut mem).unwrap(); // mcr p15, #0, r1, c13, c0, #2
+    cpu.execute_arm(0xee1d_0f50, 0, &mut mem).unwrap(); // mrc p15, #0, r0, c13, c0, #2
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_ldm_pc_interworking_matches_interpreter() {
     let asm = ".syntax unified\n\
          .arch armv6\n\

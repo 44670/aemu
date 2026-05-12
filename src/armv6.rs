@@ -866,12 +866,15 @@ impl Cpu {
                 if rt == 15 {
                     return Err(Trap::Unpredictable("CP15 TLS MCR from PC"));
                 }
-                let value = self.arm_read_reg(rt, pc);
-                if opc2 == 2 {
-                    self.cp15_tpidrurw = value;
-                } else {
-                    self.cp15_tpidruro = value;
+                if opc2 == 3 {
+                    return Err(Trap::Privileged {
+                        pc,
+                        instr,
+                        operation: "MCR TPIDRURO",
+                    });
                 }
+                let value = self.arm_read_reg(rt, pc);
+                self.cp15_tpidrurw = value;
             }
             return Ok(true);
         }
@@ -4008,12 +4011,24 @@ mod tests {
         cpu.set_reg(1, 0xfeed_cafe);
         cpu.execute_arm(0xee0d_1f50, 0, &mut mem).unwrap(); // mcr p15, #0, r1, c13, c0, #2
         assert_eq!(cpu.cp15_tpidrurw, 0xfeed_cafe);
+        cpu.execute_arm(0xee1d_3f70, 0, &mut mem).unwrap(); // mrc p15, #0, r3, c13, c0, #3
+        assert_eq!(cpu.reg(3), 0x1234_5678);
 
         let err = cpu.execute_arm(0xee1d_ff50, 0x10, &mut mem).unwrap_err(); // mrc p15, #0, pc, c13, c0, #2
         assert_eq!(err, Trap::Unpredictable("CP15 TLS MRC to PC"));
 
         let err = cpu.execute_arm(0xee0d_ff50, 0x14, &mut mem).unwrap_err(); // mcr p15, #0, pc, c13, c0, #2
         assert_eq!(err, Trap::Unpredictable("CP15 TLS MCR from PC"));
+        let err = cpu.execute_arm(0xee0d_1f70, 0x18, &mut mem).unwrap_err(); // mcr p15, #0, r1, c13, c0, #3
+        assert_eq!(
+            err,
+            Trap::Privileged {
+                pc: 0x18,
+                instr: 0xee0d_1f70,
+                operation: "MCR TPIDRURO",
+            }
+        );
+        assert_eq!(cpu.cp15_tpidruro, 0x1234_5678);
     }
 
     #[test]

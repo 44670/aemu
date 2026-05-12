@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 76 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 77 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -205,8 +205,10 @@ Result: passing, with 36 unit tests, 76 QEMU oracle tests, and doc tests.
 - FPSCR VFP short-vector `LEN`/`STRIDE` modes now trap explicitly on
   vectorizable VFP arithmetic and unary operations instead of silently running
   scalar semantics
-- CP15 user thread ID shim: `TPIDRURW`, `TPIDRURO`, with explicit traps for
-  invalid `PC` source/destination forms
+- CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user
+  `MCR` writes for `TPIDRURW`, privileged traps for user `TPIDRURO` writes,
+  explicit traps for invalid `PC` source/destination forms, and QEMU oracle
+  coverage for the `TPIDRURW` roundtrip path
 - CP15 barrier HLE no-ops for ARMv6-style DMB, DSB, and ISB/prefetch-flush
   `MCR` forms
 

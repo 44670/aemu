@@ -50,8 +50,10 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   extract/insert/clear, `RBIT`, `SDIV`, and `UDIV`
 - Explicit exception/control traps: ARM/Thumb `SVC`, ARM/Thumb `BKPT`,
   ARM/Thumb `UDF`
-- CP15 user-thread registers: `MRC`/`MCR` for `TPIDRURW` and `TPIDRURO`,
-  with explicit unpredictable traps for invalid `PC` source/destination forms
+- CP15 user-thread registers: user `MRC` reads for `TPIDRURW`/`TPIDRURO`,
+  user `MCR` writes for `TPIDRURW`, privileged traps for user `TPIDRURO`
+  writes, and explicit unpredictable traps for invalid `PC`
+  source/destination forms
 - CP15 barrier idioms: user-mode HLE no-ops for ARMv6-style DMB, DSB, and
   ISB/prefetch-flush `MCR` forms
 - ARMv5/ARMv6 misc integer: `CLZ`, `REV`, `REV16`, `REVSH`
