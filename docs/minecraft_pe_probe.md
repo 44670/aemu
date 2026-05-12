@@ -12,6 +12,16 @@ As of the latest local scan, this is also the only APK under:
 /mnt/hgfs/deb13/AndroidGames
 ```
 
+Rechecked on 2026-05-12:
+
+```sh
+find /mnt/hgfs/deb13/AndroidGames -maxdepth 3 -type f \( -iname '*.apk' -o -iname '*.so' \) -print
+find /mnt/hgfs/deb13 -maxdepth 5 -type f \( -iname '*minecraft*apk' -o -iname 'libminecraftpe.so' \) -print
+```
+
+Both searches still only found the APK listed above; no standalone
+`libminecraftpe.so` and no older ARMv6 Minecraft PE APK were present.
+
 Native libraries found:
 
 ```text
