@@ -4020,8 +4020,8 @@ fn qemu_oracle_thumb_literal_pc_sp_matrix_matches_interpreter() {
          eors r6, r0\n\
          .align 2\n\
          pc_adds:\n\
-         add r2, pc, #12\n\
-         add r3, pc, #20\n\
+         .hword 0xa203\n\
+         .hword 0xa305\n\
          subs r3, r3, r2\n\
          eors r6, r3\n\
          ldr r5, =stack_top\n\

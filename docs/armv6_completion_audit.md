@@ -37,6 +37,14 @@ cargo test
 
 Result: passing, with 42 unit tests, 87 QEMU oracle tests, and doc tests.
 
+Additional oracle verification:
+
+```sh
+cargo test --test qemu_oracle -- --nocapture
+```
+
+Result: passing, with 87 QEMU oracle tests and no skip diagnostics.
+
 ## Prompt-To-Artifact Checklist
 
 | Requirement | Evidence | Status |
