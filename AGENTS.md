@@ -214,6 +214,10 @@ System-library import metadata and the first HLE dispatcher live in
 `src/hle_imports.rs`. Keep adding symbols there from real APK unresolved import
 reports, not from speculative Android surface area.
 
+`src/native_runtime.rs` wires the interpreter to HLE imports: ARM UDF trap
+stubs in the HLE page are resolved back to imported symbol names and dispatched
+through the HLE runtime, returning through guest LR.
+
 ## Test APKs
 
 Local test APKs live under:

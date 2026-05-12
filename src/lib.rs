@@ -8,6 +8,7 @@ pub mod guest_memory;
 pub mod hle_imports;
 pub mod host;
 pub mod native_loader;
+pub mod native_runtime;
 #[cfg(feature = "sdl2")]
 pub mod sdl_shell;
 pub mod wasm_webgl;

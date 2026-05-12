@@ -107,8 +107,9 @@ useful, but it does not replace the browser WebGL backend.
    reports unresolved imports before relocation. Initial system-library HLE
    metadata and dispatch now covers the local Minecraft PE import set well
    enough for the `armeabi-v7a` research probe to load and relocate with zero
-   unresolved imports. Constructor invocation and real EGL/GLES/audio/Android
-   lifecycle behavior are still pending.
+   unresolved imports. A native runtime shell now maps stack/TLS/heap and wires
+   ARM HLE trap stubs back to symbol-name dispatch. Constructor invocation and
+   real EGL/GLES/audio/Android lifecycle behavior are still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.
