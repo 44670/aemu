@@ -1,5 +1,6 @@
 pub mod apk_plan;
 pub mod armv6;
+pub mod elf_dynamic;
 pub mod elf_loader;
 pub mod elf_probe;
 pub mod host;

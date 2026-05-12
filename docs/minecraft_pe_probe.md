@@ -61,6 +61,27 @@ Result: no `lib/armeabi/*.so` group is present. All three native libraries are
 under `lib/armeabi-v7a/` and require ARMv7/Thumb-2; `libfmod.so` and
 `libminecraftpe.so` also require NEON.
 
+Dynamic import inspection:
+
+```sh
+cargo run -- imports-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --limit 25
+```
+
+Observed dependency/import counts:
+
+```text
+libfmod.so: needs liblog.so, libstdc++.so, libm.so, libc.so, libdl.so; 106 imports
+libgnustl_shared.so: needs libm.so, libc.so, libdl.so; 117 imports
+libminecraftpe.so: needs libfmod.so, libgnustl_shared.so, liblog.so,
+  libandroid.so, libGLESv1_CM.so, libEGL.so, libGLESv2.so, libOpenSLES.so,
+  libz.so, libm.so, libdl.so, libc.so; 683 imports
+```
+
+The parser also verifies representative Minecraft imports such as
+`eglGetProcAddress` and `glCreateShader`, which confirms that the next runtime
+work is relocation application plus binding imported symbols to Bionic,
+Android, EGL/GLES, OpenSL, zlib, FMOD, and C++ runtime HLE surfaces.
+
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:
 

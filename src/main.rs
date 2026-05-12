@@ -40,12 +40,50 @@ fn main() {
                 }
             }
         }
+        Some("imports-so") => {
+            let Some(path) = args.next() else {
+                eprintln!("usage: aemu imports-so <lib.so> [--limit N|--all]");
+                std::process::exit(2);
+            };
+            let limit = match parse_import_limit(args.collect()) {
+                Ok(limit) => limit,
+                Err(err) => {
+                    eprintln!("{err}");
+                    eprintln!("usage: aemu imports-so <lib.so> [--limit N|--all]");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(err) = imports_so(Path::new(&path), limit) {
+                eprintln!("imports failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        Some("imports-apk") => {
+            let Some(path) = args.next() else {
+                eprintln!("usage: aemu imports-apk <app.apk> [--limit N|--all]");
+                std::process::exit(2);
+            };
+            let limit = match parse_import_limit(args.collect()) {
+                Ok(limit) => limit,
+                Err(err) => {
+                    eprintln!("{err}");
+                    eprintln!("usage: aemu imports-apk <app.apk> [--limit N|--all]");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(err) = imports_apk(Path::new(&path), limit) {
+                eprintln!("imports failed: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("sdl2-shell") => run_sdl2_shell(args.collect()),
         _ => {
             eprintln!("usage:");
             eprintln!("  aemu probe-so <lib.so>");
             eprintln!("  aemu probe-apk <app.apk>");
             eprintln!("  aemu plan-apk <app.apk>");
+            eprintln!("  aemu imports-so <lib.so> [--limit N|--all]");
+            eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -160,6 +198,140 @@ fn print_apk_plan(plan: &aemu::apk_plan::ApkRunPlan) {
             };
             println!("  {} [{}]: {status}", library.entry_name, library.abi);
         }
+    }
+}
+
+fn imports_so(path: &Path, limit: Option<usize>) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("failed to read ELF: {err}"))?;
+    let info = aemu::elf_dynamic::parse_elf_dynamic_bytes(path.to_path_buf(), &bytes)
+        .map_err(|err| format!("failed to parse dynamic metadata: {err}"))?;
+    print_dynamic_info(&info, limit);
+    Ok(())
+}
+
+fn imports_apk(path: &Path, limit: Option<usize>) -> Result<(), String> {
+    let zip_entries = aemu::zip_probe::read_zip_entries(path)
+        .map_err(|err| format!("failed to inspect ZIP metadata: {err}"))?;
+    let bytes = std::fs::read(path).map_err(|err| format!("failed to read APK: {err}"))?;
+    let libs: Vec<_> = zip_entries
+        .iter()
+        .filter(|entry| entry.name.starts_with("lib/") && entry.name.ends_with(".so"))
+        .collect();
+    if libs.is_empty() {
+        println!("no native libraries found in {}", path.display());
+        return Ok(());
+    }
+
+    println!("apk: {}", path.display());
+    println!("native libraries: {}", libs.len());
+    for entry in libs {
+        println!();
+        println!("entry: {}", entry.name);
+        let extracted = aemu::zip_probe::extract_parsed_zip_entry(&bytes, entry)
+            .map_err(|err| format!("failed to extract {}: {err}", entry.name))?;
+        match aemu::elf_dynamic::parse_elf_dynamic_bytes(
+            PathBuf::from(format!("{}!{}", path.display(), entry.name)),
+            &extracted,
+        ) {
+            Ok(info) => print_dynamic_info(&info, limit),
+            Err(err) => println!("  dynamic parse failed: {err}"),
+        }
+    }
+    Ok(())
+}
+
+fn parse_import_limit(args: Vec<String>) -> Result<Option<usize>, String> {
+    let mut limit = Some(40usize);
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--all" => limit = None,
+            "--limit" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--limit needs a numeric value".to_string())?;
+                limit = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid --limit value: {value}"))?,
+                );
+            }
+            _ => return Err(format!("unknown imports argument: {arg}")),
+        }
+    }
+    Ok(limit)
+}
+
+fn print_dynamic_info(info: &aemu::elf_dynamic::ElfDynamicInfo, limit: Option<usize>) {
+    println!("path: {}", info.path.display());
+    if info.needed.is_empty() {
+        println!("needed: <none>");
+    } else {
+        println!("needed:");
+        for needed in &info.needed {
+            println!("  {needed}");
+        }
+    }
+
+    match info.dynsym {
+        Some(dynsym) => println!(
+            "dynsym: addr {:#010x}, entry_size {}",
+            dynsym.addr,
+            dynsym
+                .entry_size
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        None => println!("dynsym: <none>"),
+    }
+    print_relocations(&info.relocations);
+    if let Some(init) = info.init {
+        println!("init: {init:#010x}");
+    }
+    if let Some(init_array) = info.init_array {
+        println!(
+            "init_array: addr {:#010x}, size {} bytes",
+            init_array.addr, init_array.size
+        );
+    }
+
+    println!("imports: {}", info.imports.len());
+    let shown = limit.unwrap_or(info.imports.len()).min(info.imports.len());
+    for import in info.imports.iter().take(shown) {
+        println!("  {} [{} {}]", import.name, import.binding, import.kind);
+    }
+    if shown < info.imports.len() {
+        println!(
+            "  ... {} more imports (use --all or --limit N)",
+            info.imports.len() - shown
+        );
+    }
+}
+
+fn print_relocations(relocations: &aemu::elf_dynamic::ElfRelocationInfo) {
+    match relocations.rel {
+        Some(rel) => println!(
+            "relocations: rel addr {:#010x}, size {} bytes, entry_size {}",
+            rel.addr,
+            rel.size,
+            relocations
+                .rel_entry_size
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        None => println!("relocations: rel <none>"),
+    }
+    match relocations.plt_rel {
+        Some(plt) => println!(
+            "plt_relocations: addr {:#010x}, size {} bytes, kind {}",
+            plt.addr,
+            plt.size,
+            relocations
+                .plt_rel_kind
+                .map(|kind| kind.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        None => println!("plt_relocations: <none>"),
     }
 }
 

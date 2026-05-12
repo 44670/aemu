@@ -288,6 +288,10 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
 - Initial ELF loader planning now parses ARM ELF32 program headers, maps
   `PT_LOAD` file ranges plus zero-filled BSS into checked `VecMemory`, and
   records the biased entry point for future interpreter startup.
+- Dynamic ELF metadata parsing now reports `DT_NEEDED`, dynamic imports,
+  `DT_REL`/PLT relocation table ranges, and init/init-array metadata, with
+  optional local Minecraft coverage for `libGLESv2.so`, `glCreateShader`, and
+  `eglGetProcAddress`.
 
 ## Known Incomplete Or Weakly Verified Areas
 
@@ -297,8 +301,8 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   barrier idioms.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
-- ELF dynamic linking is not implemented yet: dynamic sections, relocations,
-  symbol resolution, dependency ordering, and HLE import binding remain open.
+- ELF dynamic linking is not implemented yet: relocation application, symbol
+  resolution, dependency ordering, and HLE import binding remain open.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
   divide/square-root/compare-NaN/conversion-invalid cases, selected
   single-precision arithmetic flags, selected double invalid/overflow
