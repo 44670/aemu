@@ -104,8 +104,11 @@ useful, but it does not replace the browser WebGL backend.
    native APK linker probe now loads APK-local `.so` dependencies in dependency
    order, maps every segment at its final 1:1 guest virtual address, builds a
    global dynamic-symbol table, reserves guest HLE trampoline addresses, and
-   reports unresolved imports before relocation. Real HLE behavior and
-   constructor invocation are still pending.
+   reports unresolved imports before relocation. Initial system-library HLE
+   metadata and dispatch now covers the local Minecraft PE import set well
+   enough for the `armeabi-v7a` research probe to load and relocate with zero
+   unresolved imports. Constructor invocation and real EGL/GLES/audio/Android
+   lifecycle behavior are still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.

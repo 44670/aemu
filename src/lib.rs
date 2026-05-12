@@ -5,6 +5,7 @@ pub mod elf_linker;
 pub mod elf_loader;
 pub mod elf_probe;
 pub mod guest_memory;
+pub mod hle_imports;
 pub mod host;
 pub mod native_loader;
 #[cfg(feature = "sdl2")]

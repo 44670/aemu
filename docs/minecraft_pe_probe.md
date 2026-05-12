@@ -99,9 +99,10 @@ libgnustl_shared.so: load_bias 0x70300000, mapped 0x70300000+0xb6000
 libminecraftpe.so: load_bias 0x70500000, mapped 0x70500000+0x1701000
 ```
 
-The same run found 53,631 APK-local dynamic exports, reserved 268 guest HLE
-trampoline symbols, resolved 665 imports, and reported 241 remaining unresolved
-system imports. The default ARMv6 command still fails correctly with:
+After adding the initial system-library HLE import table, the same probe found
+53,631 APK-local dynamic exports, reserved 462 guest HLE symbols, resolved 906
+imports, and applied 119,008 relocation entries with zero unresolved imports.
+The default ARMv6 command still fails correctly with:
 
 ```text
 no native libraries found for ABI armeabi; available ABIs: armeabi-v7a

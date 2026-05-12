@@ -453,8 +453,8 @@ fn print_hle_symbols(report: &aemu::native_loader::NativeLinkReport, limit: Opti
         .min(report.hle_symbols.len());
     for symbol in report.hle_symbols.iter().take(shown) {
         println!(
-            "  {:#010x} {} [{}]",
-            symbol.address, symbol.name, symbol.kind
+            "  {:#010x} {} [{} {} {}]",
+            symbol.address, symbol.name, symbol.kind, symbol.shape, symbol.behavior
         );
     }
     if shown < report.hle_symbols.len() {

@@ -305,6 +305,12 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   `DT_NEEDED` order, keeps a 1:1 guest virtual address map, collects dynamic
   exports, reserves guest HLE trampoline addresses, and reports unresolved
   imports before attempting relocations.
+- Initial system-library HLE import metadata and dispatch now covers Bionic
+  libc/pthread/socket/file/time/string/data symbols, libm, libdl, liblog,
+  Android native input/activity/assets, EGL/GLES, OpenSL, zlib, and C++ ABI
+  symbols demanded by the local Minecraft PE APK. The local `armeabi-v7a`
+  research probe resolves 906 imports and applies 119,008 relocations with no
+  unresolved imports.
 
 ## Known Incomplete Or Weakly Verified Areas
 
@@ -314,9 +320,9 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
   barrier idioms.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
-- ELF dynamic linking is not complete yet: real HLE behavior, constructor
-  invocation, weak-symbol edge cases, and a complete Bionic/system-library shim
-  set remain open.
+- ELF/native execution is not complete yet: constructor invocation, interpreter
+  handoff, real EGL/GLES rendering, Android lifecycle/input/assets behavior,
+  audio, filesystem persistence, and broad Bionic semantics remain open.
 - VFP FPSCR exception flags are still incomplete beyond the basic `IOC`/`DZC`
   divide/square-root/compare-NaN/conversion-invalid cases, selected
   single-precision arithmetic flags, selected double invalid/overflow

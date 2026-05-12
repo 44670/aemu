@@ -210,6 +210,10 @@ The default ABI is `armeabi`. Use `--abi armeabi-v7a` only as a research probe
 for the current local Minecraft PE APK; it is not valid for the ARMv6 runtime
 target.
 
+System-library import metadata and the first HLE dispatcher live in
+`src/hle_imports.rs`. Keep adding symbols there from real APK unresolved import
+reports, not from speculative Android surface area.
+
 ## Test APKs
 
 Local test APKs live under:

@@ -3,7 +3,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::apk_plan::ARMV6_TARGET_ABI;
-use crate::armv6::Memory;
 use crate::elf_dynamic::{
     ElfDynamicError, ElfDynamicInfo, ElfDynamicSymbol, ElfImport, ElfRelocation, SymbolBinding,
     parse_elf_dynamic_bytes,
@@ -11,6 +10,10 @@ use crate::elf_dynamic::{
 use crate::elf_linker::apply_arm_rel_relocations;
 use crate::elf_loader::{ElfLoadError, ElfLoadPlan, load_elf_into_memory, plan_elf_load};
 use crate::guest_memory::{MappedMemory, MappedMemoryError};
+use crate::hle_imports::{
+    HleCallBehavior, HleImportDescriptor, HleSymbolKind, HleSymbolShape, describe_hle_import,
+    initialize_hle_symbol,
+};
 use crate::zip_probe::{ZipEntry, ZipProbeError, extract_parsed_zip_entry, parse_zip_entries};
 
 pub const DEFAULT_SHARED_OBJECT_BASE: u32 = 0x7000_0000;
@@ -56,6 +59,15 @@ impl NativeLinkReport {
     pub fn is_linked(&self) -> bool {
         self.unresolved_imports.is_empty() && self.relocation_errors.is_empty()
     }
+
+    pub fn hle_symbol_by_address(&self, address: u32) -> Option<&HleSymbol> {
+        self.hle_symbols.iter().find(|symbol| {
+            symbol
+                .address
+                .checked_add(symbol.shape.size())
+                .is_some_and(|end| address >= symbol.address && address < end)
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,37 +99,8 @@ pub struct HleSymbol {
     pub name: String,
     pub address: u32,
     pub kind: HleSymbolKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum HleSymbolKind {
-    Libc,
-    Libm,
-    Libdl,
-    Liblog,
-    Android,
-    Egl,
-    Gles,
-    OpenSl,
-    Zlib,
-    CxxAbi,
-}
-
-impl fmt::Display for HleSymbolKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Libc => write!(f, "libc"),
-            Self::Libm => write!(f, "libm"),
-            Self::Libdl => write!(f, "libdl"),
-            Self::Liblog => write!(f, "liblog"),
-            Self::Android => write!(f, "android"),
-            Self::Egl => write!(f, "EGL"),
-            Self::Gles => write!(f, "GLES"),
-            Self::OpenSl => write!(f, "OpenSL"),
-            Self::Zlib => write!(f, "zlib"),
-            Self::CxxAbi => write!(f, "cxxabi"),
-        }
-    }
+    pub shape: HleSymbolShape,
+    pub behavior: HleCallBehavior,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +154,7 @@ pub enum NativeLoadError {
     },
     Memory(MappedMemoryError),
     GuestMemory(String),
+    Hle(String),
     AddressOverflow,
 }
 
@@ -203,6 +187,7 @@ impl fmt::Display for NativeLoadError {
             } => write!(f, "{library_name}: {source}"),
             Self::Memory(err) => write!(f, "{err}"),
             Self::GuestMemory(err) => write!(f, "{err}"),
+            Self::Hle(err) => write!(f, "{err}"),
             Self::AddressOverflow => write!(f, "guest address range overflow"),
         }
     }
@@ -263,7 +248,7 @@ pub fn load_apk_native_libraries_bytes(
 
     let global_symbols = collect_global_symbols(&loaded);
     let hle_symbols = collect_hle_symbols(&loaded, config)?;
-    write_hle_trap_stubs(&mut memory, &hle_symbols)?;
+    write_hle_symbols(&mut memory, &hle_symbols)?;
     let (resolved_imports, unresolved_imports) =
         resolve_imports(&loaded, &global_symbols, &hle_symbols);
     let relocation_errors = if unresolved_imports.is_empty() {
@@ -479,41 +464,56 @@ fn collect_hle_symbols(
     objects: &[LoadedNativeObject],
     config: &NativeLoadConfig,
 ) -> Result<Vec<HleSymbol>, NativeLoadError> {
-    let mut by_name = BTreeMap::<String, HleSymbolKind>::new();
+    let mut by_name = BTreeMap::<String, HleImportDescriptor>::new();
     for object in objects {
         for import in &object.imports {
-            if let Some(kind) = classify_hle_symbol(&import.name) {
-                by_name.entry(import.name.clone()).or_insert(kind);
+            if let Some(descriptor) = describe_hle_import(&import.name) {
+                by_name.entry(import.name.clone()).or_insert(descriptor);
             }
         }
     }
 
     let mut out = Vec::with_capacity(by_name.len());
-    for (idx, (name, kind)) in by_name.into_iter().enumerate() {
-        let byte_off = idx.checked_mul(4).ok_or(NativeLoadError::AddressOverflow)?;
-        if byte_off + 4 > config.hle_page_size {
+    let mut byte_off = 0u32;
+    for (name, descriptor) in by_name {
+        byte_off = align_up(byte_off, 4).ok_or(NativeLoadError::AddressOverflow)?;
+        let size = descriptor.shape.size();
+        let end = byte_off
+            .checked_add(size)
+            .ok_or(NativeLoadError::AddressOverflow)?;
+        if end as usize > config.hle_page_size {
             return Err(NativeLoadError::AddressOverflow);
         }
         out.push(HleSymbol {
             name,
             address: config
                 .hle_base
-                .checked_add(byte_off as u32)
+                .checked_add(byte_off)
                 .ok_or(NativeLoadError::AddressOverflow)?,
-            kind,
+            kind: descriptor.kind,
+            shape: descriptor.shape,
+            behavior: descriptor.behavior,
         });
+        byte_off = end;
     }
     Ok(out)
 }
 
-fn write_hle_trap_stubs(
+fn write_hle_symbols(
     memory: &mut MappedMemory,
     hle_symbols: &[HleSymbol],
 ) -> Result<(), NativeLoadError> {
     for symbol in hle_symbols {
-        memory
-            .store32(symbol.address, 0xe7f0_00f0)
-            .map_err(|err| NativeLoadError::GuestMemory(err.to_string()))?;
+        initialize_hle_symbol(
+            memory,
+            HleImportDescriptor {
+                kind: symbol.kind,
+                shape: symbol.shape,
+                behavior: symbol.behavior,
+            },
+            symbol.address,
+        )
+        .map_err(|err| NativeLoadError::Hle(err.to_string()))?;
     }
     Ok(())
 }
@@ -603,196 +603,6 @@ fn apply_relocations(
     errors
 }
 
-fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
-    if name.starts_with("gl") && name.as_bytes().get(2).is_some_and(u8::is_ascii_uppercase) {
-        return Some(HleSymbolKind::Gles);
-    }
-    if name.starts_with("egl") && name.as_bytes().get(3).is_some_and(u8::is_ascii_uppercase) {
-        return Some(HleSymbolKind::Egl);
-    }
-    if name.starts_with("sl") && name.as_bytes().get(2).is_some_and(u8::is_ascii_uppercase) {
-        return Some(HleSymbolKind::OpenSl);
-    }
-    if name.starts_with("ANative")
-        || name.starts_with("AInput")
-        || name.starts_with("AAsset")
-        || name.starts_with("ALooper")
-        || name.starts_with("AConfiguration")
-        || name.starts_with("android_")
-    {
-        return Some(HleSymbolKind::Android);
-    }
-    if name.starts_with("__android_log_") {
-        return Some(HleSymbolKind::Liblog);
-    }
-    if matches!(name, "dlopen" | "dlsym" | "dlclose" | "dlerror") {
-        return Some(HleSymbolKind::Libdl);
-    }
-    if is_libm_symbol(name) {
-        return Some(HleSymbolKind::Libm);
-    }
-    if is_zlib_symbol(name) {
-        return Some(HleSymbolKind::Zlib);
-    }
-    if is_cxxabi_symbol(name) {
-        return Some(HleSymbolKind::CxxAbi);
-    }
-    if is_libc_symbol(name) {
-        return Some(HleSymbolKind::Libc);
-    }
-    None
-}
-
-fn is_libc_symbol(name: &str) -> bool {
-    matches!(
-        name,
-        "abort"
-            | "access"
-            | "atoi"
-            | "atof"
-            | "calloc"
-            | "clock"
-            | "close"
-            | "exit"
-            | "fclose"
-            | "fflush"
-            | "fopen"
-            | "fprintf"
-            | "fread"
-            | "free"
-            | "fseek"
-            | "ftell"
-            | "fwrite"
-            | "getenv"
-            | "gettimeofday"
-            | "localtime"
-            | "malloc"
-            | "memcmp"
-            | "memcpy"
-            | "memmove"
-            | "memset"
-            | "mmap"
-            | "munmap"
-            | "open"
-            | "printf"
-            | "pthread_attr_destroy"
-            | "pthread_attr_init"
-            | "pthread_attr_setdetachstate"
-            | "pthread_create"
-            | "pthread_getspecific"
-            | "pthread_join"
-            | "pthread_key_create"
-            | "pthread_key_delete"
-            | "pthread_mutex_destroy"
-            | "pthread_mutex_init"
-            | "pthread_mutex_lock"
-            | "pthread_mutex_unlock"
-            | "pthread_once"
-            | "pthread_setspecific"
-            | "puts"
-            | "qsort"
-            | "rand"
-            | "read"
-            | "realloc"
-            | "snprintf"
-            | "sprintf"
-            | "srand"
-            | "sscanf"
-            | "stat"
-            | "strcasecmp"
-            | "strcat"
-            | "strchr"
-            | "strcmp"
-            | "strcpy"
-            | "strdup"
-            | "strlen"
-            | "strncasecmp"
-            | "strncmp"
-            | "strncpy"
-            | "strrchr"
-            | "strstr"
-            | "strtod"
-            | "strtof"
-            | "strtol"
-            | "strtoul"
-            | "time"
-            | "usleep"
-            | "vsnprintf"
-            | "write"
-    ) || name.starts_with("__aeabi_")
-        || name.starts_with("__errno")
-}
-
-fn is_libm_symbol(name: &str) -> bool {
-    matches!(
-        name,
-        "acos"
-            | "acosf"
-            | "asin"
-            | "asinf"
-            | "atan"
-            | "atan2"
-            | "atan2f"
-            | "atanf"
-            | "ceil"
-            | "ceilf"
-            | "cos"
-            | "cosf"
-            | "exp"
-            | "expf"
-            | "fabs"
-            | "fabsf"
-            | "floor"
-            | "floorf"
-            | "fmod"
-            | "fmodf"
-            | "log"
-            | "log10"
-            | "log10f"
-            | "logf"
-            | "pow"
-            | "powf"
-            | "sin"
-            | "sinf"
-            | "sqrt"
-            | "sqrtf"
-            | "tan"
-            | "tanf"
-    )
-}
-
-fn is_zlib_symbol(name: &str) -> bool {
-    matches!(
-        name,
-        "adler32"
-            | "compress"
-            | "compress2"
-            | "crc32"
-            | "deflate"
-            | "deflateEnd"
-            | "deflateInit_"
-            | "deflateInit2_"
-            | "inflate"
-            | "inflateEnd"
-            | "inflateInit_"
-            | "inflateInit2_"
-            | "uncompress"
-            | "zlibVersion"
-    )
-}
-
-fn is_cxxabi_symbol(name: &str) -> bool {
-    name.starts_with("__cxa_")
-        || name.starts_with("__gxx_personality")
-        || matches!(
-            name,
-            "_Unwind_Resume"
-                | "_Unwind_DeleteException"
-                | "_Unwind_GetRegionStart"
-                | "_Unwind_GetLanguageSpecificData"
-        )
-}
-
 fn align_up(value: u32, align: u32) -> Option<u32> {
     if align == 0 || !align.is_power_of_two() {
         return None;
@@ -872,6 +682,10 @@ mod tests {
             .address;
         assert_eq!(gl_addr, DEFAULT_HLE_BASE);
         assert_eq!(report.memory.load32(gl_addr).unwrap(), 0xe7f0_00f0);
+        assert_eq!(
+            report.hle_symbol_by_address(gl_addr).unwrap().name,
+            "glCreateShader"
+        );
         assert!(report.unresolved_imports.is_empty());
 
         let game_bias = report.objects[1].load_bias;
