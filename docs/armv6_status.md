@@ -89,10 +89,11 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   divided by zero, NaN conversion, out-of-range conversion, and negative
   unsigned conversion; `IXC` for inexact float-to-integer conversions that
   round without raising `IOC`
-- VFP status/compare subset: single and double `VCMP`, compare with zero,
-  `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
+- VFP status/compare subset: single and double `VCMP`/`VCMPE`, compare with
+  zero, `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
   privileged traps for user-mode `FPEXC`/`FPINST` accesses; compare remains
-  scalar when FPSCR short-vector `LEN` is nonzero
+  scalar when FPSCR short-vector `LEN` is nonzero and raises `IOC` for
+  signaling-NaN `VCMP` or any-NaN `VCMPE`
 - VFP conversion subset: `VCVT` between `F32`, `F64`, `S32`, and `U32`,
   plus `VCVTR` float-to-integer rounding through FPSCR rounding mode;
   conversion remains scalar when FPSCR short-vector `LEN` is nonzero
@@ -119,10 +120,10 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   multiply, and absolute-difference cases has not been audited
   instruction-by-instruction against the ARM ARM.
 - Full VFP/VFPv2 is not implemented; FPSCR exception flags remain incomplete
-  beyond basic `IOC`/`DZC` divide, square-root, and conversion invalid cases,
-  plus basic conversion `IXC` cases; several less common edge cases still need
-  an instruction-by-instruction audit. VFPv3 fixed-point conversions are
-  outside the ARMv6/VFPv2 baseline.
+  beyond basic `IOC`/`DZC` divide, square-root, compare-NaN, and conversion
+  invalid cases, plus basic conversion `IXC` cases; several less common edge
+  cases still need an instruction-by-instruction audit. VFPv3 fixed-point
+  conversions are outside the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.
 - Thumb-2 is intentionally not implemented for the ARMv6 baseline, but

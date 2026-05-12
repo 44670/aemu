@@ -649,29 +649,27 @@ impl Cpu {
         if compare == 0x0eb4_0a40 {
             let sn = vfp_single_d(instr);
             let sm = vfp_single_m(instr);
-            self.set_fpscr_compare_f32(
-                f32::from_bits(self.sregs[sn]),
-                f32::from_bits(self.sregs[sm]),
-            );
+            self.set_fpscr_compare_f32_bits(self.sregs[sn], self.sregs[sm], instr & 0x80 != 0);
             return Ok(true);
         }
-        if (instr & 0x0fbf_0fff) == 0x0eb5_0a40 {
+        if (instr & 0x0fbf_0f7f) == 0x0eb5_0a40 {
             let sn = vfp_single_d(instr);
-            self.set_fpscr_compare_f32(f32::from_bits(self.sregs[sn]), 0.0);
+            self.set_fpscr_compare_f32_bits(self.sregs[sn], 0, instr & 0x80 != 0);
             return Ok(true);
         }
         if compare == 0x0eb4_0b40 {
             let dn = vfp_double_d(instr);
             let dm = vfp_double_m(instr);
-            self.set_fpscr_compare_f64(
-                f64::from_bits(self.checked_dreg_bits(dn)?),
-                f64::from_bits(self.checked_dreg_bits(dm)?),
+            self.set_fpscr_compare_f64_bits(
+                self.checked_dreg_bits(dn)?,
+                self.checked_dreg_bits(dm)?,
+                instr & 0x80 != 0,
             );
             return Ok(true);
         }
-        if (instr & 0x0fbf_0fff) == 0x0eb5_0b40 {
+        if (instr & 0x0fbf_0f7f) == 0x0eb5_0b40 {
             let dn = vfp_double_d(instr);
-            self.set_fpscr_compare_f64(f64::from_bits(self.checked_dreg_bits(dn)?), 0.0);
+            self.set_fpscr_compare_f64_bits(self.checked_dreg_bits(dn)?, 0, instr & 0x80 != 0);
             return Ok(true);
         }
 
@@ -2816,12 +2814,28 @@ impl Cpu {
         ((reg + delta) & 0x3) | (reg & !0x3)
     }
 
-    fn set_fpscr_compare_f32(&mut self, lhs: f32, rhs: f32) {
-        self.set_fpscr_compare_order(lhs.partial_cmp(&rhs));
+    fn set_fpscr_compare_f32_bits(&mut self, lhs: u32, rhs: u32, signal_all_nans: bool) {
+        let lhs_value = f32::from_bits(lhs);
+        let rhs_value = f32::from_bits(rhs);
+        let unordered = lhs_value.partial_cmp(&rhs_value).is_none();
+        self.set_fpscr_compare_order(lhs_value.partial_cmp(&rhs_value));
+        if unordered
+            && (signal_all_nans || f32_is_signaling_nan_bits(lhs) || f32_is_signaling_nan_bits(rhs))
+        {
+            self.fpscr |= FPSCR_IOC;
+        }
     }
 
-    fn set_fpscr_compare_f64(&mut self, lhs: f64, rhs: f64) {
-        self.set_fpscr_compare_order(lhs.partial_cmp(&rhs));
+    fn set_fpscr_compare_f64_bits(&mut self, lhs: u64, rhs: u64, signal_all_nans: bool) {
+        let lhs_value = f64::from_bits(lhs);
+        let rhs_value = f64::from_bits(rhs);
+        let unordered = lhs_value.partial_cmp(&rhs_value).is_none();
+        self.set_fpscr_compare_order(lhs_value.partial_cmp(&rhs_value));
+        if unordered
+            && (signal_all_nans || f64_is_signaling_nan_bits(lhs) || f64_is_signaling_nan_bits(rhs))
+        {
+            self.fpscr |= FPSCR_IOC;
+        }
     }
 
     fn set_fpscr_compare_order(&mut self, order: Option<std::cmp::Ordering>) {
@@ -3133,6 +3147,16 @@ fn vfp_conversion_inexact_flag(value: f64, rounded: f64, exception_flags: u32) -
     } else {
         0
     }
+}
+
+fn f32_is_signaling_nan_bits(value: u32) -> bool {
+    (value & 0x7f80_0000) == 0x7f80_0000 && (value & 0x007f_ffff) != 0 && (value & 0x0040_0000) == 0
+}
+
+fn f64_is_signaling_nan_bits(value: u64) -> bool {
+    (value & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+        && (value & 0x000f_ffff_ffff_ffff) != 0
+        && (value & 0x0008_0000_0000_0000) == 0
 }
 
 fn vfp_round_by_fpscr(value: f64, fpscr: u32) -> f64 {
@@ -5452,6 +5476,42 @@ mod tests {
         cpu.execute_arm(0xeefd_0bc0, 0, &mut mem).unwrap(); // vcvt.s32.f64 s1, d0
         assert_eq!(cpu.sreg(1), 4);
         assert_eq!(cpu.fpscr & (FPSCR_IOC | FPSCR_IXC), 0);
+    }
+
+    #[test]
+    fn vfpv2_compare_nan_exception_flags_match_vcmp_variant() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 0x100);
+
+        cpu.set_sreg(0, 0x7fc0_0000);
+        cpu.set_sreg(1, 1.0f32.to_bits());
+        cpu.execute_arm(0xeeb4_0a60, 0, &mut mem).unwrap(); // vcmp.f32 s0, s1
+        assert_eq!(cpu.fpscr & FPSCR_IOC, 0);
+        assert_eq!(cpu.fpscr & 0xf000_0000, 0x3000_0000);
+
+        cpu.fpscr = 0;
+        cpu.execute_arm(0xeeb4_0ae0, 0, &mut mem).unwrap(); // vcmpe.f32 s0, s1
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+        assert_eq!(cpu.fpscr & 0xf000_0000, 0x3000_0000);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 0x7fa0_0000);
+        cpu.execute_arm(0xeeb4_0a60, 0, &mut mem).unwrap(); // vcmp.f32 s0, s1
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+        assert_eq!(cpu.fpscr & 0xf000_0000, 0x3000_0000);
+
+        cpu.fpscr = 0;
+        cpu.set_sreg(0, 0x7fc0_0000);
+        cpu.execute_arm(0xeeb5_0ac0, 0, &mut mem).unwrap(); // vcmpe.f32 s0, #0
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+        assert_eq!(cpu.fpscr & 0xf000_0000, 0x3000_0000);
+
+        cpu.fpscr = 0;
+        cpu.set_dreg(0, 0x7ff8_0000_0000_0000);
+        cpu.set_dreg(1, 1.0f64.to_bits());
+        cpu.execute_arm(0xeeb4_0bc1, 0, &mut mem).unwrap(); // vcmpe.f64 d0, d1
+        assert_eq!(cpu.fpscr & FPSCR_IOC, FPSCR_IOC);
+        assert_eq!(cpu.fpscr & 0xf000_0000, 0x3000_0000);
     }
 
     #[test]

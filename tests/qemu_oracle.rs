@@ -5121,7 +5121,8 @@ fn qemu_oracle_parallel_media_full_matrix_matches_interpreter() {
 #[test]
 fn qemu_oracle_vfp_add_matches_interpreter() {
     let asm = oracle_program(
-        "ldr r0, =0x3fc00000\n\
+        ".fpu vfp\n\
+         ldr r0, =0x3fc00000\n\
          ldr r1, =0x40100000\n\
          vmov s0, r0\n\
          vmov s1, r1\n\
@@ -5297,7 +5298,8 @@ fn qemu_oracle_vfp_single_arithmetic_matrix_matches_interpreter() {
 #[test]
 fn qemu_oracle_vfp_vmla_sqrt_matches_interpreter() {
     let asm = oracle_program(
-        "ldr r0, =0x41200000\n\
+        ".fpu vfp\n\
+         ldr r0, =0x41200000\n\
          ldr r1, =0x40000000\n\
          ldr r2, =0x40400000\n\
          vmov s0, r0\n\
@@ -6174,6 +6176,106 @@ fn qemu_oracle_vfp_conversion_exception_flags_match_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_vfp_compare_exception_flags_match_interpreter() {
+    let mut body = String::from(
+        ".fpu vfp\n\
+         mov r12, #0\n",
+    );
+    let fold_fpscr = |body: &mut String| {
+        body.push_str(
+            "vmrs r3, fpscr\n\
+             eor r12, r12, r3\n\
+             eor r12, r12, r3, lsr #8\n\
+             eor r12, r12, r3, lsr #16\n\
+             eor r12, r12, r3, lsr #24\n",
+        );
+    };
+
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x7fc00000\n\
+         vmov s0, r0\n\
+         ldr r0, =0x3f800000\n\
+         vmov s1, r0\n\
+         vcmp.f32 s0, s1\n",
+    );
+    fold_fpscr(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         vcmpe.f32 s0, s1\n",
+    );
+    fold_fpscr(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x7fa00000\n\
+         vmov s0, r0\n\
+         vcmp.f32 s0, s1\n",
+    );
+    fold_fpscr(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         ldr r0, =0x7fc00000\n\
+         vmov s0, r0\n\
+         vcmpe.f32 s0, #0\n",
+    );
+    fold_fpscr(&mut body);
+    body.push_str(
+        "mov r2, #0\n\
+         vmsr fpscr, r2\n\
+         mov r0, #0\n\
+         ldr r1, =0x7ff80000\n\
+         vmov d0, r0, r1\n\
+         mov r0, #0\n\
+         ldr r1, =0x3ff00000\n\
+         vmov d1, r0, r1\n\
+         vcmpe.f64 d0, d1\n",
+    );
+    fold_fpscr(&mut body);
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+
+    cpu.set_sreg(0, 0x7fc0_0000);
+    cpu.set_sreg(1, 1.0f32.to_bits());
+    cpu.execute_arm(0xeeb4_0a60, 0, &mut mem).unwrap(); // vcmp.f32 s0, s1
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.execute_arm(0xeeb4_0ae0, 0, &mut mem).unwrap(); // vcmpe.f32 s0, s1
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_sreg(0, 0x7fa0_0000);
+    cpu.execute_arm(0xeeb4_0a60, 0, &mut mem).unwrap(); // vcmp.f32 s0, s1
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_sreg(0, 0x7fc0_0000);
+    cpu.execute_arm(0xeeb5_0ac0, 0, &mut mem).unwrap(); // vcmpe.f32 s0, #0
+    folded ^= byte_fold(cpu.fpscr);
+
+    cpu.fpscr = 0;
+    cpu.set_dreg(0, 0x7ff8_0000_0000_0000);
+    cpu.set_dreg(1, 1.0f64.to_bits());
+    cpu.execute_arm(0xeeb4_0bc1, 0, &mut mem).unwrap(); // vcmpe.f64 d0, d1
+    folded ^= byte_fold(cpu.fpscr);
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_vfp_double_conversion_matrix_matches_interpreter() {
     let mut body = String::from(
         ".fpu vfp\n\
@@ -6335,7 +6437,8 @@ fn qemu_oracle_vcvtr_uses_fpscr_rounding_mode() {
 #[test]
 fn qemu_oracle_vfp_compare_matrix_matches_interpreter() {
     let asm = oracle_program(
-        "mov r12, #0\n\
+        ".fpu vfp\n\
+         mov r12, #0\n\
          ldr r0, =0x3f800000\n\
          vmov s0, r0\n\
          ldr r0, =0x40000000\n\
