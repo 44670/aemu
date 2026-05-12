@@ -78,7 +78,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - Explicit unpredictable traps for unsupported FPSCR VFP short-vector
   `LEN`/`STRIDE` modes on vectorizable VFP arithmetic and unary operations
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
-  `VMRS`, `VMSR`
+  `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
+  privileged traps for user-mode `FPEXC`/`FPINST` accesses
 - VFP conversion subset: `VCVT` between `F32`, `F64`, `S32`, and `U32`,
   plus `VCVTR` float-to-integer rounding through FPSCR rounding mode
 - Explicit unpredictable traps for invalid VFP core-register forms that use

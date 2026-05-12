@@ -95,6 +95,9 @@ Result: passing, with 36 unit tests, 32 QEMU oracle tests, and doc tests.
 - VFPv2 arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion,
   move, `VMOV.32` double-lane, and load/store subset listed in
   `docs/armv6_status.md`
+- VFPv2 FPSCR system-register moves remain supported, `VMRS FPSID` now returns
+  an ARM1136-style VFPv2 ID value, `VMSR FPSID` is ignored, and user-mode
+  `FPEXC`/`FPINST` accesses trap explicitly
 - VFPv2 load/store invalid ranges, empty multiple-transfer lists, and
   writeback with `PC` as base trap explicitly
 - VFPv2 double-register encodings that select D16-D31 now trap explicitly

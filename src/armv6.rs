@@ -66,6 +66,8 @@ pub enum Isa {
     Thumb,
 }
 
+const VFP_FPSID_ARM1136: u32 = 0x4101_20b4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cpsr {
     pub n: bool,
@@ -565,25 +567,65 @@ impl Cpu {
             return Ok(true);
         }
 
-        if (instr & 0x0fff_0fff) == 0x0ef1_0a10 {
+        if (instr & 0x0fe0_0fff) == 0x0ee0_0a10 {
             let rt = ((instr >> 12) & 0xf) as usize;
-            if rt == 15 {
-                self.cpsr.n = self.fpscr & (1 << 31) != 0;
-                self.cpsr.z = self.fpscr & (1 << 30) != 0;
-                self.cpsr.c = self.fpscr & (1 << 29) != 0;
-                self.cpsr.v = self.fpscr & (1 << 28) != 0;
+            let load = instr & (1 << 20) != 0;
+            let sysreg = (instr >> 16) & 0xf;
+            if load {
+                let value = match sysreg {
+                    0 => VFP_FPSID_ARM1136,
+                    1 => self.fpscr,
+                    8 => {
+                        return Err(Trap::Privileged {
+                            pc,
+                            instr,
+                            operation: "VMRS FPEXC",
+                        });
+                    }
+                    9 | 10 => {
+                        return Err(Trap::Privileged {
+                            pc,
+                            instr,
+                            operation: "VMRS FPINST",
+                        });
+                    }
+                    _ => return Err(Trap::UndefinedArm { pc, instr }),
+                };
+                if rt == 15 {
+                    if sysreg != 1 {
+                        return Err(Trap::Unpredictable("VFP VMRS non-FPSCR to PC"));
+                    }
+                    self.cpsr.n = value & (1 << 31) != 0;
+                    self.cpsr.z = value & (1 << 30) != 0;
+                    self.cpsr.c = value & (1 << 29) != 0;
+                    self.cpsr.v = value & (1 << 28) != 0;
+                } else {
+                    self.write_reg_arm(rt, value);
+                }
             } else {
-                self.write_reg_arm(rt, self.fpscr);
+                if rt == 15 {
+                    return Err(Trap::Unpredictable("VFP VMSR from PC"));
+                }
+                match sysreg {
+                    0 => {}
+                    1 => self.fpscr = self.regs[rt],
+                    8 => {
+                        return Err(Trap::Privileged {
+                            pc,
+                            instr,
+                            operation: "VMSR FPEXC",
+                        });
+                    }
+                    9 | 10 => {
+                        return Err(Trap::Privileged {
+                            pc,
+                            instr,
+                            operation: "VMSR FPINST",
+                        });
+                    }
+                    _ => return Err(Trap::UndefinedArm { pc, instr }),
+                }
             }
-            return Ok(true);
-        }
-
-        if (instr & 0x0fff_0fff) == 0x0ee1_0a10 {
-            let rt = ((instr >> 12) & 0xf) as usize;
-            if rt == 15 {
-                return Err(Trap::Unpredictable("VFP VMSR from PC"));
-            }
-            self.fpscr = self.regs[rt];
             return Ok(true);
         }
 
@@ -4738,12 +4780,32 @@ mod tests {
         cpu.execute_arm(0xeef1_1a10, 0, &mut mem).unwrap(); // vmrs r1, fpscr
         assert_eq!(cpu.reg(1), 0xf000_0000);
 
+        cpu.execute_arm(0xeef0_0a10, 0, &mut mem).unwrap(); // vmrs r0, fpsid
+        assert_eq!(cpu.reg(0), VFP_FPSID_ARM1136);
+        cpu.set_reg(2, 0xffff_ffff);
+        cpu.execute_arm(0xeee0_2a10, 0, &mut mem).unwrap(); // vmsr fpsid, r2
+        cpu.execute_arm(0xeef0_0a10, 0, &mut mem).unwrap(); // vmrs r0, fpsid
+        assert_eq!(cpu.reg(0), VFP_FPSID_ARM1136);
+
         let err = cpu.execute_arm(0xee00_fa10, 0x20, &mut mem).unwrap_err(); // vmov s0, pc
         assert!(matches!(err, Trap::Unpredictable("VFP VMOV from PC")));
         let err = cpu.execute_arm(0xee10_fa10, 0x24, &mut mem).unwrap_err(); // vmov pc, s0
         assert!(matches!(err, Trap::Unpredictable("VFP VMOV to PC")));
         let err = cpu.execute_arm(0xeee1_fa10, 0x28, &mut mem).unwrap_err(); // vmsr fpscr, pc
         assert!(matches!(err, Trap::Unpredictable("VFP VMSR from PC")));
+        let err = cpu.execute_arm(0xeef0_fa10, 0x2c, &mut mem).unwrap_err(); // vmrs pc, fpsid
+        assert!(matches!(
+            err,
+            Trap::Unpredictable("VFP VMRS non-FPSCR to PC")
+        ));
+        let err = cpu.execute_arm(0xeef8_0a10, 0x30, &mut mem).unwrap_err(); // vmrs r0, fpexc
+        assert!(matches!(
+            err,
+            Trap::Privileged {
+                operation: "VMRS FPEXC",
+                ..
+            }
+        ));
 
         cpu.set_sreg(2, 3.75f32.to_bits());
         cpu.execute_arm(0xeefd_1ac1, 0, &mut mem).unwrap(); // vcvt.s32.f32 s3, s2
