@@ -4317,6 +4317,41 @@ fn qemu_oracle_thumb_bx_register_interworking_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb_bx_pc_interworking_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv6\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         bx pc\n\
+         nop\n\
+         .arm\n\
+         arm_target:\n\
+         mov r0, #0x67\n\
+         mov r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    cpu.execute_thumb(0x4778, 0x1000, &mut mem).unwrap(); // bx pc
+    assert!(!cpu.cpsr.t);
+    assert_eq!(cpu.pc(), 0x1004);
+    cpu.execute_arm(0xe3a0_0067, 0x1004, &mut mem).unwrap(); // mov r0, #0x67
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_thumb_bl_immediate_matches_interpreter() {
     let asm = oracle_program(
         "mov r4, #0\n\
