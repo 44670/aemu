@@ -119,6 +119,50 @@ fn arm_high_word_multiply_instr(
         | rn as u32
 }
 
+fn arm_multiply_instr(
+    accumulate: bool,
+    set_flags: bool,
+    rd: usize,
+    rn: usize,
+    rs: usize,
+    rm: usize,
+) -> u32 {
+    0xe000_0090
+        | (u32::from(accumulate) << 21)
+        | (u32::from(set_flags) << 20)
+        | ((rd as u32) << 16)
+        | ((rn as u32) << 12)
+        | ((rs as u32) << 8)
+        | rm as u32
+}
+
+fn arm_long_multiply_instr(
+    signed: bool,
+    accumulate: bool,
+    set_flags: bool,
+    rd_hi: usize,
+    rd_lo: usize,
+    rs: usize,
+    rm: usize,
+) -> u32 {
+    0xe080_0090
+        | (u32::from(signed) << 22)
+        | (u32::from(accumulate) << 21)
+        | (u32::from(set_flags) << 20)
+        | ((rd_hi as u32) << 16)
+        | ((rd_lo as u32) << 12)
+        | ((rs as u32) << 8)
+        | rm as u32
+}
+
+fn arm_umaal_instr(rd_lo: usize, rd_hi: usize, rn: usize, rm: usize) -> u32 {
+    0xe040_0090 | ((rd_hi as u32) << 16) | ((rd_lo as u32) << 12) | ((rm as u32) << 8) | rn as u32
+}
+
+fn byte_fold(value: u32) -> u32 {
+    value ^ (value >> 8) ^ (value >> 16) ^ (value >> 24)
+}
+
 #[test]
 fn qemu_oracle_usad8_matches_interpreter() {
     let asm = oracle_program(
@@ -682,6 +726,77 @@ fn qemu_oracle_high_word_multiply_matrix_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_arm_multiply_matrix_matches_interpreter() {
+    const CASES: &[(&str, bool, bool, u32, u32, u32)] = &[
+        ("mul", false, false, 0x0001_2345, 0x0001_0003, 0),
+        ("muls", false, true, 0, 0x9876_5432, 0),
+        ("mla", true, false, 0xffff_fffe, 3, 7),
+        ("mlas", true, true, 0x8000_0000, 1, 0),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (mnemonic, accumulate, set_flags, rm, rs, rn) in CASES {
+        body.push_str(&format!(
+            "ldr r1, ={rm:#010x}\n\
+             ldr r2, ={rs:#010x}\n"
+        ));
+        if *accumulate {
+            body.push_str(&format!(
+                "ldr r3, ={rn:#010x}\n\
+                 {mnemonic} r0, r1, r2, r3\n"
+            ));
+        } else {
+            body.push_str(&format!("{mnemonic} r0, r1, r2\n"));
+        }
+        body.push_str(
+            "eor r12, r12, r0\n\
+             eor r12, r12, r0, lsr #8\n\
+             eor r12, r12, r0, lsr #16\n\
+             eor r12, r12, r0, lsr #24\n",
+        );
+        if *set_flags {
+            body.push_str(
+                "mrs r4, cpsr\n\
+                 eor r12, r12, r4, lsr #30\n",
+            );
+        }
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (_, accumulate, set_flags, rm, rs, rn) in CASES {
+        cpu.set_reg(1, *rm);
+        cpu.set_reg(2, *rs);
+        let rn_reg = if *accumulate {
+            cpu.set_reg(3, *rn);
+            3
+        } else {
+            0
+        };
+        cpu.execute_arm(
+            arm_multiply_instr(*accumulate, *set_flags, 0, rn_reg, 2, 1),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= byte_fold(cpu.reg(0));
+        if *set_flags {
+            folded ^= (cpu.cpsr.to_u32() >> 30) & 0x3;
+        }
+    }
+    cpu.set_reg(0, folded);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_dual_long_multiply_matches_interpreter() {
     let asm = oracle_program(
         "mov r0, #1\n\
@@ -757,6 +872,128 @@ fn qemu_oracle_umaal_matches_interpreter() {
     cpu.set_reg(3, 0x0001_0002);
     cpu.execute_arm(0xe041_0392, 0, &mut mem).unwrap(); // umaal r0, r1, r2, r3
     cpu.set_reg(0, cpu.reg(0) ^ cpu.reg(1));
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_long_multiply_umaal_matrix_matches_interpreter() {
+    const LONG_CASES: &[(&str, bool, bool, bool, u32, u32, u32, u32)] = &[
+        ("umull", false, false, false, 0x1234_5678, 0x0001_0002, 0, 0),
+        ("umulls", false, false, true, 0, 0x1111_1111, 0, 0),
+        (
+            "umlal",
+            false,
+            true,
+            false,
+            0xffff_0001,
+            0x0000_0003,
+            0x1111_1111,
+            0x2222_2222,
+        ),
+        ("umlals", false, true, true, 0x8000_0000, 0x0000_0002, 0, 0),
+        ("smull", true, false, false, 0xffff_fffe, 0x0000_0003, 0, 0),
+        ("smulls", true, false, true, 0x8000_0000, 0x0000_0002, 0, 0),
+        (
+            "smlal",
+            true,
+            true,
+            false,
+            0xffff_0000,
+            0x0000_0010,
+            0x0101_0101,
+            0,
+        ),
+        ("smlals", true, true, true, 0xffff_ffff, 1, 1, 0),
+    ];
+    const UMAAL_CASES: &[(u32, u32, u32, u32)] = &[
+        (0x1111_1111, 0x2222_2222, 0x1234_5678, 0x0001_0002),
+        (0xffff_ffff, 0, 2, 3),
+        (0, 0xffff_ffff, 0x8000_0000, 2),
+        (0x89ab_cdef, 0x7654_3210, 0xfedc_ba98, 0x1357_2468),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (mnemonic, _, _accumulate, set_flags, rm, rs, acc_lo, acc_hi) in LONG_CASES {
+        body.push_str(&format!(
+            "ldr r0, ={acc_lo:#010x}\n\
+             ldr r1, ={acc_hi:#010x}\n\
+             ldr r2, ={rm:#010x}\n\
+             ldr r3, ={rs:#010x}\n\
+             {mnemonic} r0, r1, r2, r3\n"
+        ));
+        body.push_str(
+            "eor r12, r12, r0\n\
+             eor r12, r12, r0, lsr #8\n\
+             eor r12, r12, r0, lsr #16\n\
+             eor r12, r12, r0, lsr #24\n\
+             eor r12, r12, r1\n\
+             eor r12, r12, r1, lsr #8\n\
+             eor r12, r12, r1, lsr #16\n\
+             eor r12, r12, r1, lsr #24\n",
+        );
+        if *set_flags {
+            body.push_str(
+                "mrs r4, cpsr\n\
+                 eor r12, r12, r4, lsr #30\n",
+            );
+        }
+    }
+    for (lo, hi, rn, rm) in UMAAL_CASES {
+        body.push_str(&format!(
+            "ldr r0, ={lo:#010x}\n\
+             ldr r1, ={hi:#010x}\n\
+             ldr r2, ={rn:#010x}\n\
+             ldr r3, ={rm:#010x}\n\
+             umaal r0, r1, r2, r3\n\
+             eor r12, r12, r0\n\
+             eor r12, r12, r0, lsr #8\n\
+             eor r12, r12, r0, lsr #16\n\
+             eor r12, r12, r0, lsr #24\n\
+             eor r12, r12, r1\n\
+             eor r12, r12, r1, lsr #8\n\
+             eor r12, r12, r1, lsr #16\n\
+             eor r12, r12, r1, lsr #24\n"
+        ));
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (_, signed, accumulate, set_flags, rm, rs, acc_lo, acc_hi) in LONG_CASES {
+        cpu.set_reg(0, *acc_lo);
+        cpu.set_reg(1, *acc_hi);
+        cpu.set_reg(2, *rm);
+        cpu.set_reg(3, *rs);
+        cpu.execute_arm(
+            arm_long_multiply_instr(*signed, *accumulate, *set_flags, 1, 0, 3, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap();
+        folded ^= byte_fold(cpu.reg(0));
+        folded ^= byte_fold(cpu.reg(1));
+        if *set_flags {
+            folded ^= (cpu.cpsr.to_u32() >> 30) & 0x3;
+        }
+    }
+    for (lo, hi, rn, rm) in UMAAL_CASES {
+        cpu.set_reg(0, *lo);
+        cpu.set_reg(1, *hi);
+        cpu.set_reg(2, *rn);
+        cpu.set_reg(3, *rm);
+        cpu.execute_arm(arm_umaal_instr(0, 1, 2, 3), 0, &mut mem)
+            .unwrap();
+        folded ^= byte_fold(cpu.reg(0));
+        folded ^= byte_fold(cpu.reg(1));
+    }
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }

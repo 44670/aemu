@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 37 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 39 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -70,9 +70,12 @@ Result: passing, with 36 unit tests, 37 QEMU oracle tests, and doc tests.
 - Thumb-1 invalid high-register `ADD/CMP`, empty `PUSH/POP`, and `STMIA`
   base-in-list forms trap explicitly
 - ARMv5TE and ARMv6 multiply/DSP families listed in `docs/armv6_status.md`,
-  with QEMU oracle coverage for representative dual 16-bit multiply,
-  dual-long multiply, and high-word multiply variants, plus direct traps for
-  invalid `PC` register forms
+  with QEMU oracle coverage for base multiply, long multiply, dual 16-bit
+  multiply, dual-long multiply, high-word multiply, and `UMAAL` variants, plus
+  direct traps for invalid `PC` register forms
+- Base ARM multiply and long multiply now have QEMU oracle matrix coverage for
+  `MUL{S}`, `MLA{S}`, `UMULL{S}`, `UMLAL{S}`, `SMULL{S}`, `SMLAL{S}`, and
+  multi-case `UMAAL`
 - ARMv5TE signed halfword multiply now has QEMU oracle matrix coverage for all
   `SMLAxy`, `SMLALxy`, `SMULxy`, `SMLAWy`, and `SMULWy` variants
 - ARMv6 dual 16-bit DSP multiply now has QEMU oracle matrix coverage for

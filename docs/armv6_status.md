@@ -112,8 +112,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   enough for user-mode HLE work.
 - Exclusive monitor behavior is approximate and single-address only.
 - Some unpredictable edge cases are simplified.
-- Only small QEMU oracle smoke tests exist; no broad randomized differential
-  suite exists yet.
+- QEMU oracle coverage is still family-focused; no broad randomized
+  differential suite exists yet.
 
 ## Minecraft PE Verification Status
 
