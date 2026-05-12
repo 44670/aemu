@@ -2663,6 +2663,38 @@ fn qemu_oracle_arm_branch_condition_matrix_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_arm_blx_immediate_interworking_matches_interpreter() {
+    let asm = oracle_program(
+        "mov r4, #0\n\
+         .word 0xfa000002\n\
+         eor r4, r4, r0\n\
+         mov r0, r4\n\
+         b done\n\
+         .thumb\n\
+         .thumb_func\n\
+         thumb_target:\n\
+         movs r0, #0x3c\n\
+         bx lr\n\
+         .arm\n\
+         done:",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_reg(4, 0);
+    cpu.execute_arm(0xfa00_0002, 0x1004, &mut mem).unwrap(); // blx thumb target
+    cpu.set_reg(0, 0x3c);
+    cpu.execute_thumb(0x4770, 0x1016, &mut mem).unwrap(); // bx lr
+    cpu.execute_arm(0xe024_4000, 0x1008, &mut mem).unwrap(); // eor r4, r4, r0
+    cpu.execute_arm(0xe1a0_0004, 0x100c, &mut mem).unwrap(); // mov r0, r4
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
 fn qemu_oracle_arm_data_processing_shift_matrix_matches_interpreter() {
     const CASES: &[(&str, u32, bool, u32, u32, u32, u32, bool)] = &[
         ("ands", 0x0, true, 0xf0f0_0ff0, 0x1020_3040, 0, 3, true),
