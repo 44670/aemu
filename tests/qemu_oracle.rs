@@ -65,6 +65,10 @@ fn arm_parallel_media_instr(family: u32, op: u32, rd: usize, rn: usize, rm: usiz
     0xe600_0f10 | (family << 20) | ((rn as u32) << 16) | ((rd as u32) << 12) | (op << 5) | rm as u32
 }
 
+fn arm_sel_instr(rd: usize, rn: usize, rm: usize) -> u32 {
+    0xe680_0fb0 | ((rn as u32) << 16) | ((rd as u32) << 12) | rm as u32
+}
+
 fn arm_extend_instr(key: u32, rn: usize, rd: usize, rm: usize, rotate: u32) -> u32 {
     0xe000_0000
         | key
@@ -3064,6 +3068,52 @@ fn qemu_oracle_parallel_media_matches_interpreter() {
         cpu.execute_arm(0xe681_0fb2, 0, &mut mem).unwrap(); // sel r0, r1, r2
         cpu.set_reg(0, if cpu.reg(0) == 0x1122_1122 { 66 } else { 4 });
     }
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_sel_uses_parallel_ge_flags_matches_interpreter() {
+    const CASES: &[(u32, u32, u32, u32)] = &[
+        (0x9010_9010, 0x1020_1020, 0xa1a2_a3a4, 0xb1b2_b3b4),
+        (0x1020_3040, 0x0102_5001, 0x0102_0304, 0xf1f2_f3f4),
+        (0x0010_ff80, 0x010f_7f90, 0x5566_7788, 0x1122_3344),
+    ];
+
+    let mut body = String::from("mov r12, #0\n");
+    for (lhs, rhs, from_ge, from_clear) in CASES {
+        body.push_str(&format!(
+            "ldr r1, ={lhs:#010x}\n\
+             ldr r2, ={rhs:#010x}\n\
+             usub8 r0, r1, r2\n\
+             ldr r3, ={from_ge:#010x}\n\
+             ldr r4, ={from_clear:#010x}\n\
+             sel r5, r3, r4\n\
+             eor r12, r12, r5\n"
+        ));
+    }
+    body.push_str("mov r0, r12");
+
+    let asm = oracle_program(&body);
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    let mut folded = 0;
+    for (lhs, rhs, from_ge, from_clear) in CASES {
+        cpu.set_reg(1, *lhs);
+        cpu.set_reg(2, *rhs);
+        cpu.execute_arm(arm_parallel_media_instr(5, 7, 0, 1, 2), 0, &mut mem)
+            .unwrap(); // usub8 r0, r1, r2
+        cpu.set_reg(3, *from_ge);
+        cpu.set_reg(4, *from_clear);
+        cpu.execute_arm(arm_sel_instr(5, 3, 4), 0, &mut mem)
+            .unwrap(); // sel r5, r3, r4
+        folded ^= cpu.reg(5);
+    }
+    cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
