@@ -118,6 +118,13 @@ impl Cpsr {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct VfpVectorPlan {
+    count: usize,
+    delta_d: usize,
+    delta_m: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Cpu {
     regs: [u32; 16],
@@ -757,34 +764,27 @@ impl Cpu {
 
         let unary = instr & 0x0fbf_0fc0;
         if matches!(unary, 0x0eb0_0a40 | 0x0eb1_0a40 | 0x0eb0_0ac0 | 0x0eb1_0ac0) {
-            self.require_vfp_scalar_mode()?;
             let sd = vfp_single_d(instr);
             let sm = vfp_single_m(instr);
-            let value = self.sregs[sm];
-            self.sregs[sd] = match unary {
+            self.exec_vfp_2op_f32(sd, sm, |value| match unary {
                 0x0eb0_0a40 => value,
                 0x0eb1_0a40 => value ^ 0x8000_0000,
                 0x0eb0_0ac0 => value & 0x7fff_ffff,
                 0x0eb1_0ac0 => f32::from_bits(value).sqrt().to_bits(),
                 _ => unreachable!(),
-            };
+            })?;
             return Ok(true);
         }
         if matches!(unary, 0x0eb0_0b40 | 0x0eb1_0b40 | 0x0eb0_0bc0 | 0x0eb1_0bc0) {
-            self.require_vfp_scalar_mode()?;
             let dd = vfp_double_d(instr);
             let dm = vfp_double_m(instr);
-            let value = self.checked_dreg_bits(dm)?;
-            self.set_checked_dreg_bits(
-                dd,
-                match unary {
-                    0x0eb0_0b40 => value,
-                    0x0eb1_0b40 => value ^ 0x8000_0000_0000_0000,
-                    0x0eb0_0bc0 => value & 0x7fff_ffff_ffff_ffff,
-                    0x0eb1_0bc0 => f64::from_bits(value).sqrt().to_bits(),
-                    _ => unreachable!(),
-                },
-            )?;
+            self.exec_vfp_2op_f64(dd, dm, |value| match unary {
+                0x0eb0_0b40 => value,
+                0x0eb1_0b40 => value ^ 0x8000_0000_0000_0000,
+                0x0eb0_0bc0 => value & 0x7fff_ffff_ffff_ffff,
+                0x0eb1_0bc0 => f64::from_bits(value).sqrt().to_bits(),
+                _ => unreachable!(),
+            })?;
             return Ok(true);
         }
 
@@ -802,23 +802,20 @@ impl Cpu {
             _ => None,
         };
         if let Some(op_kind) = op_kind {
-            self.require_vfp_scalar_mode()?;
             if op & 0x100 == 0 {
                 let sd = vfp_single_d(instr);
                 let sn = vfp_single_n(instr);
                 let sm = vfp_single_m(instr);
-                let dst = f32::from_bits(self.sregs[sd]);
-                let lhs = f32::from_bits(self.sregs[sn]);
-                let rhs = f32::from_bits(self.sregs[sm]);
-                self.sregs[sd] = op_kind.eval_f32(dst, lhs, rhs).to_bits();
+                self.exec_vfp_3op_f32(sd, sn, sm, |dst, lhs, rhs| {
+                    op_kind.eval_f32(dst, lhs, rhs).to_bits()
+                })?;
             } else {
                 let dd = vfp_double_d(instr);
                 let dn = vfp_double_n(instr);
                 let dm = vfp_double_m(instr);
-                let dst = f64::from_bits(self.checked_dreg_bits(dd)?);
-                let lhs = f64::from_bits(self.checked_dreg_bits(dn)?);
-                let rhs = f64::from_bits(self.checked_dreg_bits(dm)?);
-                self.set_checked_dreg_bits(dd, op_kind.eval_f64(dst, lhs, rhs).to_bits())?;
+                self.exec_vfp_3op_f64(dd, dn, dm, |dst, lhs, rhs| {
+                    op_kind.eval_f64(dst, lhs, rhs).to_bits()
+                })?;
             }
             return Ok(true);
         }
@@ -2561,14 +2558,175 @@ impl Cpu {
         }
     }
 
-    fn require_vfp_scalar_mode(&self) -> Result<()> {
-        const FPSCR_LEN_MASK: u32 = 0b111 << 16;
-        const FPSCR_STRIDE_MASK: u32 = 0b11 << 20;
-        if self.fpscr & (FPSCR_LEN_MASK | FPSCR_STRIDE_MASK) != 0 {
-            Err(Trap::Unpredictable("VFP vector mode unsupported"))
-        } else {
-            Ok(())
+    fn exec_vfp_2op_f32<F>(&mut self, mut vd: usize, mut vm: usize, op: F) -> Result<()>
+    where
+        F: Fn(u32) -> u32,
+    {
+        let plan = self.vfp_vector_plan(false, vd, vm)?;
+        let mut src = self.sregs[vm];
+        for lane in 0..plan.count {
+            self.sregs[vd] = op(src);
+            if lane + 1 == plan.count {
+                break;
+            }
+            vd = Self::vfp_advance_sreg(vd, plan.delta_d);
+            if plan.delta_m != 0 {
+                vm = Self::vfp_advance_sreg(vm, plan.delta_m);
+                src = self.sregs[vm];
+            }
         }
+        Ok(())
+    }
+
+    fn exec_vfp_2op_f64<F>(&mut self, mut vd: usize, mut vm: usize, op: F) -> Result<()>
+    where
+        F: Fn(u64) -> u64,
+    {
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        let plan = self.vfp_vector_plan(true, vd, vm)?;
+        let mut src = self.dreg_bits(vm);
+        for lane in 0..plan.count {
+            self.set_dreg_bits(vd, op(src));
+            if lane + 1 == plan.count {
+                break;
+            }
+            vd = Self::vfp_advance_dreg(vd, plan.delta_d);
+            if plan.delta_m != 0 {
+                vm = Self::vfp_advance_dreg(vm, plan.delta_m);
+                src = self.dreg_bits(vm);
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_vfp_3op_f32<F>(
+        &mut self,
+        mut vd: usize,
+        mut vn: usize,
+        mut vm: usize,
+        op: F,
+    ) -> Result<()>
+    where
+        F: Fn(f32, f32, f32) -> u32,
+    {
+        let plan = self.vfp_vector_plan(false, vd, vm)?;
+        let mut lhs = self.sregs[vn];
+        let mut rhs = self.sregs[vm];
+        for lane in 0..plan.count {
+            let dst = f32::from_bits(self.sregs[vd]);
+            self.sregs[vd] = op(dst, f32::from_bits(lhs), f32::from_bits(rhs));
+            if lane + 1 == plan.count {
+                break;
+            }
+            vd = Self::vfp_advance_sreg(vd, plan.delta_d);
+            vn = Self::vfp_advance_sreg(vn, plan.delta_d);
+            lhs = self.sregs[vn];
+            if plan.delta_m != 0 {
+                vm = Self::vfp_advance_sreg(vm, plan.delta_m);
+                rhs = self.sregs[vm];
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_vfp_3op_f64<F>(
+        &mut self,
+        mut vd: usize,
+        mut vn: usize,
+        mut vm: usize,
+        op: F,
+    ) -> Result<()>
+    where
+        F: Fn(f64, f64, f64) -> u64,
+    {
+        self.check_dreg(vd)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vm)?;
+        let plan = self.vfp_vector_plan(true, vd, vm)?;
+        let mut lhs = self.dreg_bits(vn);
+        let mut rhs = self.dreg_bits(vm);
+        for lane in 0..plan.count {
+            let dst = f64::from_bits(self.dreg_bits(vd));
+            self.set_dreg_bits(vd, op(dst, f64::from_bits(lhs), f64::from_bits(rhs)));
+            if lane + 1 == plan.count {
+                break;
+            }
+            vd = Self::vfp_advance_dreg(vd, plan.delta_d);
+            vn = Self::vfp_advance_dreg(vn, plan.delta_d);
+            lhs = self.dreg_bits(vn);
+            if plan.delta_m != 0 {
+                vm = Self::vfp_advance_dreg(vm, plan.delta_m);
+                rhs = self.dreg_bits(vm);
+            }
+        }
+        Ok(())
+    }
+
+    fn vfp_vector_plan(&self, double: bool, vd: usize, vm: usize) -> Result<VfpVectorPlan> {
+        let len = ((self.fpscr >> 16) & 0x7) as usize + 1;
+        let raw_stride = (self.fpscr >> 20) & 0x3;
+        let stride = match raw_stride {
+            0b00 => 1,
+            0b11 => 2,
+            _ => return Err(Trap::Unpredictable("invalid VFP vector stride")),
+        };
+
+        if len == 1 {
+            if stride != 1 {
+                return Err(Trap::Unpredictable("invalid VFP vector stride"));
+            }
+            return Ok(VfpVectorPlan {
+                count: 1,
+                delta_d: 0,
+                delta_m: 0,
+            });
+        }
+
+        let dst_scalar = if double {
+            Self::vfp_dreg_is_scalar(vd)
+        } else {
+            Self::vfp_sreg_is_scalar(vd)
+        };
+        if dst_scalar {
+            return Ok(VfpVectorPlan {
+                count: 1,
+                delta_d: 0,
+                delta_m: 0,
+            });
+        }
+
+        let bank_size = if double { 4 } else { 8 };
+        if stride * len > bank_size {
+            return Err(Trap::Unpredictable("invalid VFP vector length/stride"));
+        }
+
+        let m_scalar = if double {
+            Self::vfp_dreg_is_scalar(vm)
+        } else {
+            Self::vfp_sreg_is_scalar(vm)
+        };
+        Ok(VfpVectorPlan {
+            count: len,
+            delta_d: stride,
+            delta_m: if m_scalar { 0 } else { stride },
+        })
+    }
+
+    fn vfp_sreg_is_scalar(reg: usize) -> bool {
+        (reg & 0x18) == 0
+    }
+
+    fn vfp_dreg_is_scalar(reg: usize) -> bool {
+        (reg & 0x0c) == 0
+    }
+
+    fn vfp_advance_sreg(reg: usize, delta: usize) -> usize {
+        ((reg + delta) & 0x7) | (reg & !0x7)
+    }
+
+    fn vfp_advance_dreg(reg: usize, delta: usize) -> usize {
+        ((reg + delta) & 0x3) | (reg & !0x3)
     }
 
     fn set_fpscr_compare_f32(&mut self, lhs: f32, rhs: f32) {
@@ -4874,30 +5032,49 @@ mod tests {
     }
 
     #[test]
-    fn vfpv2_vector_mode_arithmetic_traps() {
+    fn vfpv2_short_vector_arithmetic_and_unary() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 0x100);
 
-        cpu.set_sreg(0, 1.0f32.to_bits());
-        cpu.set_sreg(1, 2.0f32.to_bits());
-        cpu.set_dreg(2, 4.0f64.to_bits());
+        cpu.fpscr = 1 << 16; // LEN=2, stride=1.
+        cpu.set_sreg(16, 1.0f32.to_bits());
+        cpu.set_sreg(17, 2.0f32.to_bits());
+        cpu.set_sreg(24, 10.0f32.to_bits());
+        cpu.set_sreg(25, 20.0f32.to_bits());
+        cpu.execute_arm(0xee38_4a0c, 0, &mut mem).unwrap(); // vadd.f32 s8, s16, s24
+        assert_eq!(f32::from_bits(cpu.sreg(8)), 11.0);
+        assert_eq!(f32::from_bits(cpu.sreg(9)), 22.0);
 
-        cpu.set_reg(2, 1 << 16);
-        cpu.execute_arm(0xeee1_2a10, 0, &mut mem).unwrap(); // vmsr fpscr, r2
+        cpu.set_sreg(0, (-3.5f32).to_bits());
+        cpu.execute_arm(0xeeb0_5ac0, 0, &mut mem).unwrap(); // vabs.f32 s10, s0
+        assert_eq!(f32::from_bits(cpu.sreg(10)), 3.5);
+        assert_eq!(f32::from_bits(cpu.sreg(11)), 3.5);
 
-        let err = cpu.execute_arm(0xee30_1a20, 0, &mut mem).unwrap_err(); // vadd.f32 s2, s0, s1
-        assert_eq!(err, Trap::Unpredictable("VFP vector mode unsupported"));
+        cpu.fpscr = (1 << 16) | (3 << 20); // LEN=2, stride=2.
+        cpu.set_sreg(16, 1.0f32.to_bits());
+        cpu.set_sreg(18, 3.0f32.to_bits());
+        cpu.set_sreg(24, 10.0f32.to_bits());
+        cpu.set_sreg(26, 30.0f32.to_bits());
+        cpu.execute_arm(0xee38_4a0c, 0, &mut mem).unwrap(); // vadd.f32 s8, s16, s24
+        assert_eq!(f32::from_bits(cpu.sreg(8)), 11.0);
+        assert_eq!(f32::from_bits(cpu.sreg(10)), 33.0);
 
-        let err = cpu.execute_arm(0xeeb0_3bc2, 0, &mut mem).unwrap_err(); // vabs.f64 d3, d2
-        assert_eq!(err, Trap::Unpredictable("VFP vector mode unsupported"));
+        cpu.fpscr = 1 << 16; // LEN=2, stride=1.
+        cpu.set_dreg(8, 1.5f64.to_bits());
+        cpu.set_dreg(9, 2.5f64.to_bits());
+        cpu.set_dreg(12, 10.0f64.to_bits());
+        cpu.set_dreg(13, 20.0f64.to_bits());
+        cpu.execute_arm(0xee38_4b0c, 0, &mut mem).unwrap(); // vadd.f64 d4, d8, d12
+        assert_eq!(f64::from_bits(cpu.dreg(4)), 11.5);
+        assert_eq!(f64::from_bits(cpu.dreg(5)), 22.5);
 
-        cpu.execute_arm(0xee10_0a10, 0, &mut mem).unwrap(); // vmov r0, s0
-        assert_eq!(cpu.reg(0), 1.0f32.to_bits());
+        cpu.fpscr = 3 << 20;
+        let err = cpu.execute_arm(0xee38_4a0c, 0, &mut mem).unwrap_err(); // vadd.f32 s8, s16, s24
+        assert_eq!(err, Trap::Unpredictable("invalid VFP vector stride"));
 
-        cpu.set_reg(2, 1 << 22);
-        cpu.execute_arm(0xeee1_2a10, 0, &mut mem).unwrap(); // vmsr fpscr, r2
-        cpu.execute_arm(0xee30_1a20, 0, &mut mem).unwrap(); // vadd.f32 s2, s0, s1
-        assert_eq!(f32::from_bits(cpu.sreg(2)), 3.0);
+        cpu.fpscr = (4 << 16) | (3 << 20);
+        let err = cpu.execute_arm(0xee38_4a0c, 0, &mut mem).unwrap_err(); // vadd.f32 s8, s16, s24
+        assert_eq!(err, Trap::Unpredictable("invalid VFP vector length/stride"));
     }
 
     #[test]

@@ -79,8 +79,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
 - Explicit unpredictable traps for VFPv2 double-register encodings that select
   D16-D31 across core-register moves, `VMOV.32`, arithmetic, compare, and
   conversion paths
-- Explicit unpredictable traps for unsupported FPSCR VFP short-vector
-  `LEN`/`STRIDE` modes on vectorizable VFP arithmetic and unary operations
+- FPSCR VFP short-vector `LEN`/`STRIDE` support for vectorizable VFPv2
+  arithmetic and unary operations, including scalar destination/source-bank
+  handling and invalid vector length/stride traps
 - VFP status/compare subset: single and double `VCMP`, compare with zero,
   `VMRS`/`VMSR FPSCR`, `VMRS FPSID`, ignored `VMSR FPSID`, and explicit
   privileged traps for user-mode `FPEXC`/`FPINST` accesses
@@ -108,10 +109,9 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   ARMv5TE signed-halfword multiply, dual 16-bit DSP multiply, high-word signed
   multiply, and absolute-difference cases has not been audited
   instruction-by-instruction against the ARM ARM.
-- Full VFP/VFPv2 is not implemented; FPSCR exception flags, vector-stride
-  emulation, and several less common edge cases still need an
-  instruction-by-instruction audit. VFPv3 fixed-point conversions are outside
-  the ARMv6/VFPv2 baseline.
+- Full VFP/VFPv2 is not implemented; FPSCR exception flags and several less
+  common edge cases still need an instruction-by-instruction audit. VFPv3
+  fixed-point conversions are outside the ARMv6/VFPv2 baseline.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.
 - Thumb-2 is intentionally not implemented for the ARMv6 baseline, but

@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 37 unit tests, 80 QEMU oracle tests, and doc tests.
+Result: passing, with 37 unit tests, 81 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -44,7 +44,7 @@ Result: passing, with 37 unit tests, 80 QEMU oracle tests, and doc tests.
 | Write ARMv6 interpreter support | `src/armv6.rs` implements a custom ARM/Thumb interpreter with ARMv5TE, ARMv6 integer/media/sync/status subsets, CP15 TLS/barrier shims, and VFPv2 subsets; `docs/armv6_status.md` tracks coverage. | Partially complete; full instruction-by-instruction ARM ARM audit is still open. |
 | Include ARM and Thumb behavior relevant to old Android `armeabi` games | ARM state, Thumb-1 state, interworking, checked memory, condition codes, common load/store, block transfer, multiply/DSP/media, status, sync, and traps are implemented in `src/armv6.rs`. | Partially complete; ARMv6T2/Thumb-2 is intentionally outside the ARMv6 baseline, and more edge-case audit work remains. |
 | Handle privileged or unsupported instructions safely | `CPS`, `RFE`, `SRS`, Thumb `CPS`, SPSR access, CPSR control writes, invalid VFP `PC` core-register forms, and invalid CP15 TLS/barrier `PC` forms trap explicitly. General unsupported instructions return undefined traps. | Partially complete; broad privileged CP15/system behavior is not modeled. |
-| Provide VFP support | `src/armv6.rs` implements VFPv2 move, arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion, and load/store subsets. | Partially complete; FPSCR exception flags and uncommon edge cases remain simplified or missing. VFPv3-only fixed-point conversions are outside the ARMv6/VFPv2 baseline. |
+| Provide VFP support | `src/armv6.rs` implements VFPv2 move, arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion, FPSCR short-vector arithmetic/unary handling, and load/store subsets. | Partially complete; FPSCR exception flags and uncommon edge cases remain simplified or missing. VFPv3-only fixed-point conversions are outside the ARMv6/VFPv2 baseline. |
 | Verify with Minecraft PE `.so` | `cargo run -- probe-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk` probes the local APK and `docs/minecraft_pe_probe.md` records the result. | Blocked; local `libminecraftpe.so` is `armeabi-v7a`, ARMv7/Thumb-2/VFPv3/NEON, not ARMv6 `armeabi`. |
 | Test with functions | Unit tests in `src/armv6.rs`, probe tests in `src/elf_probe.rs` and `src/zip_probe.rs`, plus QEMU oracle tests in `tests/qemu_oracle.rs`. | Partially complete; current tests pass but are representative rather than exhaustive/randomized. |
 
@@ -208,9 +208,10 @@ Result: passing, with 37 unit tests, 80 QEMU oracle tests, and doc tests.
 - VFPv2 double-register encodings that select D16-D31 now trap explicitly
   across core-register moves, `VMOV.32`, arithmetic, compare, and conversion
   paths instead of indexing beyond the modeled VFPv2 D0-D15 register file
-- FPSCR VFP short-vector `LEN`/`STRIDE` modes now trap explicitly on
-  vectorizable VFP arithmetic and unary operations instead of silently running
-  scalar semantics
+- FPSCR VFP short-vector `LEN`/`STRIDE` modes now execute for vectorizable
+  VFPv2 arithmetic and unary operations, with unit coverage for stride-1,
+  stride-2, scalar source replication, double precision, and invalid
+  length/stride traps, plus QEMU oracle coverage for the stride-1 path
 - VFPv3-only immediate moves and fixed-point conversion encodings now have
   direct undefined-trap coverage to keep the ARMv6/VFPv2 boundary explicit
 - CP15 user thread ID shim: user `MRC` reads for `TPIDRURW`/`TPIDRURO`, user
@@ -228,9 +229,9 @@ Result: passing, with 37 unit tests, 80 QEMU oracle tests, and doc tests.
   barrier idioms.
 - General coprocessor instructions are not implemented beyond VFP and CP15
   TLS/barrier shims.
-- VFP FPSCR exception flags and vector stride/length emulation details are
-  simplified or missing; VFPv3 fixed-point conversions remain outside the
-  ARMv6/VFPv2 baseline.
+- VFP FPSCR exception flags and uncommon edge cases remain simplified or
+  missing; VFPv3 fixed-point conversions remain outside the ARMv6/VFPv2
+  baseline.
 - Unpredictable cases are only partially checked; many are simplified to keep
   the HLE interpreter practical.
 - QEMU oracle coverage is representative, not exhaustive or randomized.
