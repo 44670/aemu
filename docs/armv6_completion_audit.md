@@ -35,7 +35,7 @@ Latest verified test command:
 cargo test
 ```
 
-Result: passing, with 36 unit tests, 62 QEMU oracle tests, and doc tests.
+Result: passing, with 36 unit tests, 63 QEMU oracle tests, and doc tests.
 
 ## Prompt-To-Artifact Checklist
 
@@ -138,6 +138,8 @@ Result: passing, with 36 unit tests, 62 QEMU oracle tests, and doc tests.
   doubleword-pair, and status-register overlap forms
 - ARMv6 exclusive word operations now have QEMU oracle coverage for both
   successful `STREX` and failed `STREX` after `CLREX`
+- ARMv6 exclusive byte, halfword, and doubleword operations now have QEMU
+  oracle coverage for success and failed store-after-`CLREX` paths
 - ARM/Thumb no-op/control/hint handling listed in `docs/armv6_status.md`
 - Explicit user-mode privileged traps for `CPS`, `RFE`, and `SRS`
 - Non-baseline ARMv6T2/ARMv7 A32 encodings for `MOVW`, `MOVT`, bitfield

@@ -2201,6 +2201,185 @@ fn qemu_oracle_exclusive_word_failure_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_exclusive_width_success_failure_matches_interpreter() {
+    let asm = oracle_program(
+        ".arch armv6k\n\
+         ldr r12, =data\n\
+         mov r11, #0\n\
+         ldrexb r0, [r12]\n\
+         mov r2, #0xa5\n\
+         strexb r1, r2, [r12]\n\
+         ldrb r3, [r12]\n\
+         eor r11, r11, r0\n\
+         eor r11, r11, r1\n\
+         eor r11, r11, r3\n\
+         add r4, r12, #1\n\
+         ldrexb r0, [r4]\n\
+         clrex\n\
+         mov r2, #0x5a\n\
+         strexb r1, r2, [r4]\n\
+         ldrb r3, [r4]\n\
+         eor r11, r11, r0\n\
+         eor r11, r11, r1\n\
+         eor r11, r11, r3\n\
+         add r4, r12, #4\n\
+         ldrexh r0, [r4]\n\
+         ldr r2, =0xcafe\n\
+         strexh r1, r2, [r4]\n\
+         ldrh r3, [r4]\n\
+         eor r11, r11, r0\n\
+         eor r11, r11, r0, lsr #8\n\
+         eor r11, r11, r1\n\
+         eor r11, r11, r3\n\
+         eor r11, r11, r3, lsr #8\n\
+         add r4, r12, #6\n\
+         ldrexh r0, [r4]\n\
+         clrex\n\
+         ldr r2, =0xface\n\
+         strexh r1, r2, [r4]\n\
+         ldrh r3, [r4]\n\
+         eor r11, r11, r0\n\
+         eor r11, r11, r0, lsr #8\n\
+         eor r11, r11, r1\n\
+         eor r11, r11, r3\n\
+         eor r11, r11, r3, lsr #8\n\
+         add r4, r12, #8\n\
+         ldrexd r0, r1, [r4]\n\
+         ldr r2, =0x01020304\n\
+         ldr r3, =0x05060708\n\
+         strexd r5, r2, r3, [r4]\n\
+         ldr r6, [r4]\n\
+         ldr r7, [r4, #4]\n\
+         eor r11, r11, r0\n\
+         eor r11, r11, r0, lsr #8\n\
+         eor r11, r11, r0, lsr #16\n\
+         eor r11, r11, r0, lsr #24\n\
+         eor r11, r11, r1\n\
+         eor r11, r11, r1, lsr #8\n\
+         eor r11, r11, r1, lsr #16\n\
+         eor r11, r11, r1, lsr #24\n\
+         eor r11, r11, r5\n\
+         eor r11, r11, r6\n\
+         eor r11, r11, r6, lsr #8\n\
+         eor r11, r11, r6, lsr #16\n\
+         eor r11, r11, r6, lsr #24\n\
+         eor r11, r11, r7\n\
+         eor r11, r11, r7, lsr #8\n\
+         eor r11, r11, r7, lsr #16\n\
+         eor r11, r11, r7, lsr #24\n\
+         add r4, r12, #16\n\
+         ldrexd r0, r1, [r4]\n\
+         clrex\n\
+         ldr r2, =0x10203040\n\
+         ldr r3, =0x50607080\n\
+         strexd r5, r2, r3, [r4]\n\
+         ldr r6, [r4]\n\
+         ldr r7, [r4, #4]\n\
+         eor r11, r11, r0\n\
+         eor r11, r11, r0, lsr #8\n\
+         eor r11, r11, r0, lsr #16\n\
+         eor r11, r11, r0, lsr #24\n\
+         eor r11, r11, r1\n\
+         eor r11, r11, r1, lsr #8\n\
+         eor r11, r11, r1, lsr #16\n\
+         eor r11, r11, r1, lsr #24\n\
+         eor r11, r11, r5\n\
+         eor r11, r11, r6\n\
+         eor r11, r11, r6, lsr #8\n\
+         eor r11, r11, r6, lsr #16\n\
+         eor r11, r11, r6, lsr #24\n\
+         eor r11, r11, r7\n\
+         eor r11, r11, r7, lsr #8\n\
+         eor r11, r11, r7, lsr #16\n\
+         eor r11, r11, r7, lsr #24\n\
+         mov r0, r11\n\
+         .data\n\
+         .align 3\n\
+         data:\n\
+         .byte 0x11\n\
+         .byte 0x22\n\
+         .byte 0, 0\n\
+         .hword 0x3344\n\
+         .hword 0x5566\n\
+         .word 0x11223344\n\
+         .word 0x55667788\n\
+         .word 0x99aabbcc\n\
+         .word 0xddeeff00\n\
+         .text",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x2000, 0x100);
+    let base = 0x2040;
+    mem.store8(base, 0x11).unwrap();
+    mem.store8(base + 1, 0x22).unwrap();
+    mem.store16(base + 4, 0x3344).unwrap();
+    mem.store16(base + 6, 0x5566).unwrap();
+    mem.store32(base + 8, 0x1122_3344).unwrap();
+    mem.store32(base + 12, 0x5566_7788).unwrap();
+    mem.store32(base + 16, 0x99aa_bbcc).unwrap();
+    mem.store32(base + 20, 0xddee_ff00).unwrap();
+
+    let mut folded = 0;
+
+    cpu.set_reg(12, base);
+    cpu.execute_arm(0xe1dc_0f9f, 0, &mut mem).unwrap(); // ldrexb r0, [r12]
+    cpu.set_reg(2, 0xa5);
+    cpu.execute_arm(0xe1cc_1f92, 0, &mut mem).unwrap(); // strexb r1, r2, [r12]
+    folded ^= cpu.reg(0) ^ cpu.reg(1) ^ u32::from(mem.load8(base).unwrap());
+
+    cpu.set_reg(4, base + 1);
+    cpu.execute_arm(0xe1d4_0f9f, 0, &mut mem).unwrap(); // ldrexb r0, [r4]
+    cpu.execute_arm(0xf57f_f01f, 0, &mut mem).unwrap(); // clrex
+    cpu.set_reg(2, 0x5a);
+    cpu.execute_arm(0xe1c4_1f92, 0, &mut mem).unwrap(); // strexb r1, r2, [r4]
+    folded ^= cpu.reg(0) ^ cpu.reg(1) ^ u32::from(mem.load8(base + 1).unwrap());
+
+    cpu.set_reg(4, base + 4);
+    cpu.execute_arm(0xe1f4_0f9f, 0, &mut mem).unwrap(); // ldrexh r0, [r4]
+    cpu.set_reg(2, 0xcafe);
+    cpu.execute_arm(0xe1e4_1f92, 0, &mut mem).unwrap(); // strexh r1, r2, [r4]
+    folded ^=
+        byte_fold(cpu.reg(0)) ^ cpu.reg(1) ^ byte_fold(u32::from(mem.load16(base + 4).unwrap()));
+
+    cpu.set_reg(4, base + 6);
+    cpu.execute_arm(0xe1f4_0f9f, 0, &mut mem).unwrap(); // ldrexh r0, [r4]
+    cpu.execute_arm(0xf57f_f01f, 0, &mut mem).unwrap(); // clrex
+    cpu.set_reg(2, 0xface);
+    cpu.execute_arm(0xe1e4_1f92, 0, &mut mem).unwrap(); // strexh r1, r2, [r4]
+    folded ^=
+        byte_fold(cpu.reg(0)) ^ cpu.reg(1) ^ byte_fold(u32::from(mem.load16(base + 6).unwrap()));
+
+    cpu.set_reg(4, base + 8);
+    cpu.execute_arm(0xe1b4_0f9f, 0, &mut mem).unwrap(); // ldrexd r0, r1, [r4]
+    cpu.set_reg(2, 0x0102_0304);
+    cpu.set_reg(3, 0x0506_0708);
+    cpu.execute_arm(0xe1a4_5f92, 0, &mut mem).unwrap(); // strexd r5, r2, r3, [r4]
+    folded ^= byte_fold(cpu.reg(0))
+        ^ byte_fold(cpu.reg(1))
+        ^ cpu.reg(5)
+        ^ byte_fold(mem.load32(base + 8).unwrap())
+        ^ byte_fold(mem.load32(base + 12).unwrap());
+
+    cpu.set_reg(4, base + 16);
+    cpu.execute_arm(0xe1b4_0f9f, 0, &mut mem).unwrap(); // ldrexd r0, r1, [r4]
+    cpu.execute_arm(0xf57f_f01f, 0, &mut mem).unwrap(); // clrex
+    cpu.set_reg(2, 0x1020_3040);
+    cpu.set_reg(3, 0x5060_7080);
+    cpu.execute_arm(0xe1a4_5f92, 0, &mut mem).unwrap(); // strexd r5, r2, r3, [r4]
+    folded ^= byte_fold(cpu.reg(0))
+        ^ byte_fold(cpu.reg(1))
+        ^ cpu.reg(5)
+        ^ byte_fold(mem.load32(base + 16).unwrap())
+        ^ byte_fold(mem.load32(base + 20).unwrap());
+
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_swap_matches_interpreter() {
     let asm = oracle_program(
         "ldr r1, =data\n\
