@@ -190,11 +190,13 @@ The native launch probe currently completes `libfmod.so`,
 `JNI_OnLoad` for FMOD and Minecraft, invokes `nativeRegisterThis`,
 `ANativeActivity_onCreate`, and `android_main`. The runtime now intercepts
 linked `__dynamic_cast` and uses a 32 MiB default guest stack below TLS, which
-gets past the earlier C++ RTTI stack crash. The latest trace reaches the
-configured 200M-step limit in `libgnustl_shared.so` near `std::string` copy
-construction from the MCPE resource-pack load path. It does not show an
-undefined NEON opcode; the remaining blocker is runtime/libgnustl startup
-progress rather than vector instruction decode.
+gets past the earlier C++ RTTI stack crash. The latest draw-focused trace runs
+through EGL setup, texture upload, `glViewport`, `glDepthRangef`, and MCPE UI
+render setup before reaching the configured 800M-step limit around
+`TextBox::setTextboxText(std::string const&)` / `Button::renderBg`. It does
+not show an undefined NEON opcode; the remaining blocker is frame progress from
+GLES state/UI setup to `glDraw*` or `eglSwapBuffers` rather than vector
+instruction decode.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.

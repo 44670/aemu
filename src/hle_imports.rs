@@ -110,6 +110,12 @@ const GL_RENDERER: u32 = 0x1f01;
 const GL_VERSION: u32 = 0x1f02;
 const GL_EXTENSIONS: u32 = 0x1f03;
 const GL_MAX_TEXTURE_SIZE: u32 = 0x0d33;
+const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
+const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
+const GL_TEXTURE_WRAP_S: u32 = 0x2802;
+const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+const GL_LINEAR: u32 = 0x2601;
+const GL_REPEAT: u32 = 0x2901;
 const GL_MAX_TEXTURE_IMAGE_UNITS: u32 = 0x8872;
 const GL_MAX_VERTEX_ATTRIBS: u32 = 0x8869;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
@@ -120,6 +126,12 @@ const GL_ACTIVE_UNIFORM_MAX_LENGTH: u32 = 0x8b87;
 const GL_ACTIVE_ATTRIBUTES: u32 = 0x8b89;
 const GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: u32 = 0x8b8a;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
+const GL_LOW_FLOAT: u32 = 0x8df0;
+const GL_MEDIUM_FLOAT: u32 = 0x8df1;
+const GL_HIGH_FLOAT: u32 = 0x8df2;
+const GL_LOW_INT: u32 = 0x8df3;
+const GL_MEDIUM_INT: u32 = 0x8df4;
+const GL_HIGH_INT: u32 = 0x8df5;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8cd5;
 const WCTYPE_ALNUM: u32 = 1 << 0;
 const WCTYPE_ALPHA: u32 = 1 << 1;
@@ -503,6 +515,8 @@ impl HleRuntime {
             "_ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_" => {
                 self.libstdcxx_string_erase_range(cpu, memory)
             }
+            "_ZSt11_Hash_bytesPKvjj" => self.libstdcxx_hash_bytes(cpu, memory),
+            "_ZSt15_Fnv_hash_bytesPKvjj" => self.libstdcxx_fnv_hash_bytes(cpu, memory),
             "_ZN8WebTokenC1ERKS_" | "_ZN8WebTokenC2ERKS_" => {
                 self.minecraft_webtoken_copy_ctor(cpu, memory)
             }
@@ -514,6 +528,23 @@ impl HleRuntime {
             }
             "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
             | "_ZN9UIControl18_resolvePostCreateEv" => self.minecraft_ui_control_resolve_noop(cpu),
+            "_ZN12ProfilerLite4tickEbb" | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd" => {
+                Ok(self.return32(cpu, 0))
+            }
+            "_ZN18MinecraftTelemetry4tickEv"
+            | "_ZN18MinecraftTelemetry15forceSendEventsEv"
+            | "_ZN6Social11Multiplayer18needToHandleInviteEv"
+            | "_ZN6Social11Multiplayer4tickEb"
+            | "_ZN6Social11Multiplayer22tickMultiplayerManagerEv"
+            | "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE"
+            | "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE"
+            | "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE"
+            | "_ZN6Social11UserManager4tickEv"
+            | "_ZNK6Social11UserManager10isSignedInEv"
+            | "_ZN9RealmsAPI6updateEv" => Ok(self.return32(cpu, 0)),
+            "_ZN11MouseDevice5resetEv"
+            | "_ZN10Multitouch5resetEv"
+            | "_ZN11TouchMapper21clearInputDeviceQueueEv" => Ok(self.return32(cpu, 0)),
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
             }
@@ -1444,6 +1475,24 @@ impl HleRuntime {
         Ok(self.return32(cpu, string))
     }
 
+    fn libstdcxx_hash_bytes<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let value = libstdcxx_hash_bytes(memory, cpu.reg(0), cpu.reg(1), cpu.reg(2))?;
+        Ok(self.return32(cpu, value))
+    }
+
+    fn libstdcxx_fnv_hash_bytes<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let value = libstdcxx_fnv_hash_bytes(memory, cpu.reg(0), cpu.reg(1), cpu.reg(2))?;
+        Ok(self.return32(cpu, value))
+    }
+
     fn libstdcxx_string_default_ctor<M: Memory>(
         &mut self,
         cpu: &mut Cpu,
@@ -2324,6 +2373,26 @@ impl HleRuntime {
                 }
                 Ok(self.return32(cpu, 0))
             }
+            "glGetShaderPrecisionFormat" => {
+                let (range_min, range_max, precision) = gl_shader_precision(cpu.reg(1));
+                let range_ptr = cpu.reg(2);
+                let precision_ptr = cpu.reg(3);
+                if range_ptr != 0 {
+                    store32(memory, range_ptr, range_min)?;
+                    store32(memory, range_ptr.wrapping_add(4), range_max)?;
+                }
+                if precision_ptr != 0 {
+                    store32(memory, precision_ptr, precision)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "glGetTexParameteriv" => {
+                let value = gl_tex_parameter_iv(cpu.reg(1));
+                if cpu.reg(2) != 0 {
+                    store32(memory, cpu.reg(2), value)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
             "glGetActiveUniform" | "glGetActiveAttrib" => {
                 let length_ptr = cpu.reg(3);
                 let size_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
@@ -2843,6 +2912,22 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN13GeometryGroup14tryGetGeometryERKSs"
             | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
             | "_ZN9UIControl18_resolvePostCreateEv"
+            | "_ZN12ProfilerLite4tickEbb"
+            | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd"
+            | "_ZN18MinecraftTelemetry4tickEv"
+            | "_ZN18MinecraftTelemetry15forceSendEventsEv"
+            | "_ZN6Social11Multiplayer18needToHandleInviteEv"
+            | "_ZN6Social11Multiplayer4tickEb"
+            | "_ZN6Social11Multiplayer22tickMultiplayerManagerEv"
+            | "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE"
+            | "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE"
+            | "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE"
+            | "_ZN6Social11UserManager4tickEv"
+            | "_ZNK6Social11UserManager10isSignedInEv"
+            | "_ZN9RealmsAPI6updateEv"
+            | "_ZN11MouseDevice5resetEv"
+            | "_ZN10Multitouch5resetEv"
+            | "_ZN11TouchMapper21clearInputDeviceQueueEv"
     )
 }
 
@@ -3231,6 +3316,8 @@ fn is_libstdcxx_symbol(name: &str) -> bool {
             | "_ZNKSs13find_first_ofEPKcjj"
             | "_ZNKSs16find_last_not_ofEPKcjj"
             | "_ZNKSs17find_first_not_ofEPKcjj"
+            | "_ZSt11_Hash_bytesPKvjj"
+            | "_ZSt15_Fnv_hash_bytesPKvjj"
     )
 }
 
@@ -3528,6 +3615,68 @@ fn find_last_of(haystack: &[u8], needles: &[u8], pos: u32, want_match: bool) -> 
         .unwrap_or(CXX_STRING_NPOS)
 }
 
+fn libstdcxx_hash_bytes<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    len: u32,
+    seed: u32,
+) -> Result<u32, HleError> {
+    const MURMUR_M: u32 = 0x5bd1_e995;
+
+    let mut hash = seed ^ len;
+    let mut offset = 0;
+    while len.wrapping_sub(offset) > 3 {
+        let mut k = u32::from(load8(memory, ptr.wrapping_add(offset))?)
+            | (u32::from(load8(memory, ptr.wrapping_add(offset + 1))?) << 8)
+            | (u32::from(load8(memory, ptr.wrapping_add(offset + 2))?) << 16)
+            | (u32::from(load8(memory, ptr.wrapping_add(offset + 3))?) << 24);
+        hash = hash.wrapping_mul(MURMUR_M);
+        k = k.wrapping_mul(MURMUR_M);
+        k ^= k >> 24;
+        k = k.wrapping_mul(MURMUR_M);
+        hash ^= k;
+        offset += 4;
+    }
+
+    match len & 3 {
+        3 => {
+            hash ^= u32::from(load8(memory, ptr.wrapping_add(offset + 2))?) << 16;
+            hash ^= u32::from(load8(memory, ptr.wrapping_add(offset + 1))?) << 8;
+            hash ^= u32::from(load8(memory, ptr.wrapping_add(offset))?);
+            hash = hash.wrapping_mul(MURMUR_M);
+        }
+        2 => {
+            hash ^= u32::from(load8(memory, ptr.wrapping_add(offset + 1))?) << 8;
+            hash ^= u32::from(load8(memory, ptr.wrapping_add(offset))?);
+            hash = hash.wrapping_mul(MURMUR_M);
+        }
+        1 => {
+            hash ^= u32::from(load8(memory, ptr.wrapping_add(offset))?);
+            hash = hash.wrapping_mul(MURMUR_M);
+        }
+        _ => {}
+    }
+
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(MURMUR_M);
+    hash ^= hash >> 15;
+    Ok(hash)
+}
+
+fn libstdcxx_fnv_hash_bytes<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    len: u32,
+    seed: u32,
+) -> Result<u32, HleError> {
+    let mut hash = seed;
+    for offset in 0..len {
+        hash ^= u32::from(load8(memory, ptr.wrapping_add(offset))?);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    Ok(hash)
+}
+
 fn android_asset_entry_candidates(path: &str) -> Vec<String> {
     let mut clean = path.trim_start_matches('/');
     while let Some(stripped) = clean.strip_prefix("./") {
@@ -3754,6 +3903,22 @@ fn gl_integer(name: u32) -> u32 {
     }
 }
 
+fn gl_shader_precision(precision_type: u32) -> (u32, u32, u32) {
+    match precision_type {
+        GL_LOW_FLOAT | GL_MEDIUM_FLOAT | GL_HIGH_FLOAT => (127, 127, 23),
+        GL_LOW_INT | GL_MEDIUM_INT | GL_HIGH_INT => (31, 30, 0),
+        _ => (0, 0, 0),
+    }
+}
+
+fn gl_tex_parameter_iv(name: u32) -> u32 {
+    match name {
+        GL_TEXTURE_MIN_FILTER | GL_TEXTURE_MAG_FILTER => GL_LINEAR,
+        GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T => GL_REPEAT,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -3786,12 +3951,29 @@ mod tests {
             "_ZNSs4_Rep20_S_empty_rep_storageE",
             "_ZNSsC1ERKSs",
             "_ZNSs14_M_replace_auxEjjjc",
+            "_ZSt11_Hash_bytesPKvjj",
             "_ZN8WebTokenC2ERKS_",
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
             "_ZN13GeometryGroup11getGeometryERKSs",
             "_ZN13GeometryGroup14tryGetGeometryERKSs",
             "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
             "_ZN9UIControl18_resolvePostCreateEv",
+            "_ZN12ProfilerLite4tickEbb",
+            "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd",
+            "_ZN18MinecraftTelemetry4tickEv",
+            "_ZN18MinecraftTelemetry15forceSendEventsEv",
+            "_ZN6Social11Multiplayer18needToHandleInviteEv",
+            "_ZN6Social11Multiplayer4tickEb",
+            "_ZN6Social11Multiplayer22tickMultiplayerManagerEv",
+            "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE",
+            "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE",
+            "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE",
+            "_ZN6Social11UserManager4tickEv",
+            "_ZNK6Social11UserManager10isSignedInEv",
+            "_ZN9RealmsAPI6updateEv",
+            "_ZN11MouseDevice5resetEv",
+            "_ZN10Multitouch5resetEv",
+            "_ZN11TouchMapper21clearInputDeviceQueueEv",
         ] {
             assert!(describe_hle_import(name).is_some(), "{name}");
         }
@@ -4075,6 +4257,40 @@ mod tests {
             .unwrap();
         assert_eq!(memory.load32(0x1120).unwrap(), 0);
         assert_eq!(memory.load8(0x1124).unwrap(), 0);
+    }
+
+    #[test]
+    fn dispatches_gles_precision_and_texture_parameter_queries() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(1, GL_HIGH_FLOAT);
+        cpu.set_reg(2, 0x1100);
+        cpu.set_reg(3, 0x1108);
+        hle.dispatch("glGetShaderPrecisionFormat", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1100).unwrap(), 127);
+        assert_eq!(memory.load32(0x1104).unwrap(), 127);
+        assert_eq!(memory.load32(0x1108).unwrap(), 23);
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(1, GL_TEXTURE_MIN_FILTER);
+        cpu.set_reg(2, 0x1110);
+        hle.dispatch("glGetTexParameteriv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1110).unwrap(), GL_LINEAR);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(1, GL_TEXTURE_WRAP_S);
+        cpu.set_reg(2, 0x1114);
+        hle.dispatch("glGetTexParameteriv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1114).unwrap(), GL_REPEAT);
     }
 
     #[test]
@@ -4709,6 +4925,36 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_libstdcxx_hash_bytes() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1100, b"MinecraftPE").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Thumb);
+        let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 11);
+        cpu.set_reg(2, 0x1234_5678);
+        hle.dispatch("_ZSt11_Hash_bytesPKvjj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0xf711_c23b);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+
+        cpu.set_reg(14, 0x2005);
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 11);
+        cpu.set_reg(2, 0x1234_5678);
+        hle.dispatch("_ZSt15_Fnv_hash_bytesPKvjj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0xee96_2070);
+        assert_eq!(cpu.pc(), 0x2004);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
     fn dispatches_minecraft_webtoken_copy_ctor_for_null_source() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x5000).unwrap();
@@ -4846,6 +5092,98 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
         assert_eq!(cpu.pc(), 0x2004);
+    }
+
+    #[test]
+    fn dispatches_profiler_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+
+        hle.dispatch(
+            "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2101);
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 1);
+        hle.dispatch("_ZN12ProfilerLite4tickEbb", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2100);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
+    fn dispatches_no_input_reset_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+
+        for (idx, name) in [
+            "_ZN11MouseDevice5resetEv",
+            "_ZN10Multitouch5resetEv",
+            "_ZN11TouchMapper21clearInputDeviceQueueEv",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cpu.set_isa(Isa::Arm);
+            cpu.set_reg(14, 0x2001 + (idx as u32) * 4);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), 0);
+            assert_eq!(cpu.pc(), 0x2000 + (idx as u32) * 4);
+            assert_eq!(cpu.isa(), Isa::Thumb);
+        }
+    }
+
+    #[test]
+    fn dispatches_no_network_social_tick_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+
+        for (idx, name) in [
+            "_ZN18MinecraftTelemetry4tickEv",
+            "_ZN18MinecraftTelemetry15forceSendEventsEv",
+            "_ZN6Social11Multiplayer18needToHandleInviteEv",
+            "_ZN6Social11Multiplayer4tickEb",
+            "_ZN6Social11Multiplayer22tickMultiplayerManagerEv",
+            "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE",
+            "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE",
+            "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE",
+            "_ZN6Social11UserManager4tickEv",
+            "_ZNK6Social11UserManager10isSignedInEv",
+            "_ZN9RealmsAPI6updateEv",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cpu.set_isa(Isa::Arm);
+            cpu.set_reg(14, 0x2201 + (idx as u32) * 4);
+            cpu.set_reg(0, u32::MAX);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), 0);
+            assert_eq!(cpu.pc(), 0x2200 + (idx as u32) * 4);
+            assert_eq!(cpu.isa(), Isa::Thumb);
+        }
     }
 
     #[test]

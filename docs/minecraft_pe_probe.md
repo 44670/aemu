@@ -106,8 +106,8 @@ libgnustl_shared.so: load_bias 0x70300000, mapped 0x70300000+0xb6000
 libminecraftpe.so: load_bias 0x70500000, mapped 0x70500000+0x1701000
 ```
 
-After adding the initial system-library HLE import table, the same probe found
-53,631 APK-local dynamic exports, reserved 462 guest HLE symbols, resolved 906
+After adding the current system-library HLE import table, the same probe found
+53,631 APK-local dynamic exports, reserved 527 guest HLE symbols, resolved 906
 imports, and applied 119,008 relocation entries with zero unresolved imports.
 The default ARMv6 command still fails correctly with:
 
@@ -118,21 +118,27 @@ no native libraries found for ABI armeabi; available ABIs: armeabi-v7a
 Native constructor execution probe:
 
 ```sh
-cargo run -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 1000
+cargo run --release -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 800000000 --launch
 ```
 
-This reaches actual guest execution in the local ARMv7 research APK and then
-fails in `libfmod.so` constructor code:
+This reaches actual guest execution in the local ARMv7 research APK, completes
+all 1,604 native constructors, and launches the native activity path:
 
 ```text
 constructors: 1604
-libfmod.so constructor 0x70015e30 failed: undefined ARM instruction 0xe30260ab at 0x70015e50
+native constructors completed
+launch: libfmod.so JNI_OnLoad ...
+launch: libminecraftpe.so JNI_OnLoad ...
+launch: nativeRegisterThis ...
+launch: ANativeActivity_onCreate ...
+launch: android_main ...
 ```
 
-That failure is expected for this project target: the instruction is from the
-APK's ARMv7-era code path, while the runtime interpreter is intentionally
-ARMv6/Thumb-1 focused. An older APK with `lib/armeabi/libminecraftpe.so` is
-still required to validate the ARMv6 Minecraft PE path.
+The latest draw-focused run reaches EGL/GLES setup, texture upload,
+`glViewport`, `glDepthRangef`, and MCPE UI render setup before the configured
+step cap. It does not stop on an undefined NEON opcode. An older APK with
+`lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
+Minecraft PE path.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:
