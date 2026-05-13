@@ -95,8 +95,14 @@ const EGL_PBUFFER_BIT: u32 = 0x0001;
 const EGL_OPENGL_ES_BIT: u32 = 0x0001;
 const EGL_OPENGL_ES2_BIT: u32 = 0x0004;
 const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
+const ACONFIGURATION_SIZE: u32 = 8;
 const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
 const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
+const GL_VENDOR: u32 = 0x1f00;
+const GL_RENDERER: u32 = 0x1f01;
+const GL_VERSION: u32 = 0x1f02;
+const GL_EXTENSIONS: u32 = 0x1f03;
+const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -330,6 +336,9 @@ impl HleRuntime {
             "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
             "__cxa_guard_abort" => Ok(self.return32(cpu, 0)),
             "_ZNSs14_M_replace_auxEjjjc" => self.libstdcxx_string_replace_aux(cpu, memory),
+            name if name.starts_with("AConfiguration_") => {
+                self.android_configuration(name, cpu, memory)
+            }
             name if name.starts_with("gl") => self.gles(name, cpu, memory),
             name if name.starts_with("egl") => self.egl(name, cpu, memory),
             _ => self.dispatch_stub(name, descriptor.behavior, cpu, memory),
@@ -987,6 +996,35 @@ impl HleRuntime {
         }
     }
 
+    fn android_configuration<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        match name {
+            "AConfiguration_new" => {
+                let ptr = self.alloc(ACONFIGURATION_SIZE, 4)?;
+                for offset in 0..ACONFIGURATION_SIZE {
+                    store8(memory, ptr.wrapping_add(offset), 0)?;
+                }
+                Ok(self.return32(cpu, ptr))
+            }
+            "AConfiguration_getLanguage" => {
+                write_android_locale_code(memory, cpu.reg(1), b"en")?;
+                Ok(self.return32(cpu, 0))
+            }
+            "AConfiguration_getCountry" => {
+                write_android_locale_code(memory, cpu.reg(1), b"US")?;
+                Ok(self.return32(cpu, 0))
+            }
+            "AConfiguration_fromAssetManager" | "AConfiguration_delete" => {
+                Ok(self.return32(cpu, 0))
+            }
+            _ => self.dispatch_stub(name, HleCallBehavior::ReturnZero, cpu, memory),
+        }
+    }
+
     fn egl<M: Memory>(
         &mut self,
         name: &str,
@@ -1059,13 +1097,20 @@ impl HleRuntime {
         &mut self,
         name: &str,
         cpu: &mut Cpu,
-        _memory: &mut M,
+        memory: &mut M,
     ) -> Result<(), HleError> {
         match name {
             "glCreateProgram" | "glCreateShader" => {
                 let value = self.next_gl_name;
                 self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
                 Ok(self.return32(cpu, value))
+            }
+            "glGetString" => {
+                let Some(value) = gl_query_string(cpu.reg(0)) else {
+                    return Ok(self.return32(cpu, 0));
+                };
+                let ptr = self.alloc_c_string(memory, value)?;
+                Ok(self.return32(cpu, ptr))
             }
             "glGetError" => Ok(self.return32(cpu, 0)),
             "glGetAttribLocation" | "glGetUniformLocation" => Ok(self.return32(cpu, 0)),
@@ -1845,6 +1890,19 @@ fn store32<M: Memory>(memory: &mut M, addr: u32, value: u32) -> Result<(), HleEr
         .map_err(|err| HleError::Memory(err.to_string()))
 }
 
+fn write_android_locale_code<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    code: &[u8; 2],
+) -> Result<(), HleError> {
+    if ptr != 0 {
+        store8(memory, ptr, code[0])?;
+        store8(memory, ptr.wrapping_add(1), code[1])?;
+        store8(memory, ptr.wrapping_add(2), 0)?;
+    }
+    Ok(())
+}
+
 fn f32_arg(cpu: &Cpu, reg: usize) -> f32 {
     f32::from_bits(cpu.reg(reg))
 }
@@ -1912,6 +1970,19 @@ fn egl_surface_attrib(attr: u32) -> u32 {
         EGL_CONFIG_ID => EGL_CONFIG_HANDLE,
         EGL_RENDERABLE_TYPE => EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT,
         _ => 0,
+    }
+}
+
+fn gl_query_string(name: u32) -> Option<&'static str> {
+    match name {
+        GL_VENDOR => Some("AEMU"),
+        GL_RENDERER => Some("AEMU WebGL1 GLES2 HLE"),
+        GL_VERSION => Some("OpenGL ES 2.0 AEMU"),
+        GL_EXTENSIONS => Some(
+            "GL_OES_rgb8_rgba8 GL_OES_depth24 GL_OES_packed_depth_stencil GL_EXT_texture_format_BGRA8888",
+        ),
+        GL_SHADING_LANGUAGE_VERSION => Some("OpenGL ES GLSL ES 1.00 AEMU"),
+        _ => None,
     }
 }
 
@@ -2054,6 +2125,85 @@ mod tests {
         hle.dispatch("eglQuerySurface", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(memory.load32(0x1144).unwrap(), EGL_DEFAULT_SURFACE_HEIGHT);
+    }
+
+    #[test]
+    fn dispatches_gles_string_facade_outputs() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, GL_VERSION);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+
+        hle.dispatch("glGetString", &mut cpu, &mut memory).unwrap();
+        assert_ne!(cpu.reg(0), 0);
+        assert_eq!(
+            load_c_string(&mut memory, cpu.reg(0), 64).unwrap(),
+            "OpenGL ES 2.0 AEMU"
+        );
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, GL_SHADING_LANGUAGE_VERSION);
+        hle.dispatch("glGetString", &mut cpu, &mut memory).unwrap();
+        assert!(
+            load_c_string(&mut memory, cpu.reg(0), 64)
+                .unwrap()
+                .contains("GLSL ES 1.00")
+        );
+        assert_eq!(cpu.pc(), 0x2004);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, 0xffff);
+        hle.dispatch("glGetString", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2008);
+    }
+
+    #[test]
+    fn dispatches_android_configuration_locale_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+
+        cpu.set_reg(14, 0x2000);
+        hle.dispatch("AConfiguration_new", &mut cpu, &mut memory)
+            .unwrap();
+        assert_ne!(cpu.reg(0), 0);
+        let config = cpu.reg(0);
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, config);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("AConfiguration_getLanguage", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_c_string(&mut memory, 0x1100, 4).unwrap(), "en");
+        assert_eq!(cpu.pc(), 0x2004);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, config);
+        cpu.set_reg(1, 0x1110);
+        hle.dispatch("AConfiguration_getCountry", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_c_string(&mut memory, 0x1110, 4).unwrap(), "US");
+        assert_eq!(cpu.pc(), 0x2008);
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, config);
+        hle.dispatch("AConfiguration_fromAssetManager", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.pc(), 0x200c);
+
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, config);
+        hle.dispatch("AConfiguration_delete", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.pc(), 0x2010);
     }
 
     #[test]
