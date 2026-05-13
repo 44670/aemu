@@ -120,6 +120,7 @@ const GL_ACTIVE_UNIFORM_MAX_LENGTH: u32 = 0x8b87;
 const GL_ACTIVE_ATTRIBUTES: u32 = 0x8b89;
 const GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: u32 = 0x8b8a;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
+const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8cd5;
 const WCTYPE_ALNUM: u32 = 1 << 0;
 const WCTYPE_ALPHA: u32 = 1 << 1;
 const WCTYPE_BLANK: u32 = 1 << 2;
@@ -2290,6 +2291,10 @@ impl HleRuntime {
                 self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
                 Ok(self.return32(cpu, value))
             }
+            "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
+                self.gl_gen_names(cpu, memory)
+            }
+            "glCheckFramebufferStatus" => Ok(self.return32(cpu, GL_FRAMEBUFFER_COMPLETE)),
             "glGetString" => {
                 let Some(value) = gl_query_string(cpu.reg(0)) else {
                     return Ok(self.return32(cpu, 0));
@@ -2350,9 +2355,22 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glGetAttribLocation" | "glGetUniformLocation" => Ok(self.return32(cpu, 0)),
-            "glIsTexture" => Ok(self.return32(cpu, 0)),
+            "glIsTexture" => Ok(self.return32(cpu, u32::from(cpu.reg(0) != 0))),
             _ => Ok(self.return32(cpu, 0)),
         }
+    }
+
+    fn gl_gen_names<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let count = cpu.reg(0);
+        let out = cpu.reg(1);
+        if out != 0 {
+            for idx in 0..count {
+                let value = self.next_gl_name;
+                self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
+                store32(memory, out.wrapping_add(idx.wrapping_mul(4)), value)?;
+            }
+        }
+        Ok(self.return32(cpu, 0))
     }
 
     pub(crate) fn alloc(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
@@ -4057,6 +4075,47 @@ mod tests {
             .unwrap();
         assert_eq!(memory.load32(0x1120).unwrap(), 0);
         assert_eq!(memory.load8(0x1124).unwrap(), 0);
+    }
+
+    #[test]
+    fn dispatches_gles_object_name_facade_outputs() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 3);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("glGenTextures", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(memory.load32(0x1100).unwrap(), 1);
+        assert_eq!(memory.load32(0x1104).unwrap(), 2);
+        assert_eq!(memory.load32(0x1108).unwrap(), 3);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 0x1110);
+        hle.dispatch("glGenBuffers", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load32(0x1110).unwrap(), 4);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, memory.load32(0x1100).unwrap());
+        hle.dispatch("glIsTexture", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, 0);
+        hle.dispatch("glIsTexture", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(14, 0x2010);
+        hle.dispatch("glCheckFramebufferStatus", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), GL_FRAMEBUFFER_COMPLETE);
     }
 
     #[test]
