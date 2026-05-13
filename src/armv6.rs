@@ -1174,7 +1174,7 @@ impl Cpu {
             (2, 4) if q => {
                 self.exec_arm_neon_2reg_saturating_narrow(instr, pc, size, true, true, vd, vm)
             }
-            (2, 5) => self.exec_arm_neon_2reg_saturating_narrow(instr, pc, size, !q, false, vd, vm),
+            (2, 5) => self.exec_arm_neon_2reg_saturating_narrow(instr, pc, size, !q, q, vd, vm),
             (2, 4) if !q => {
                 if size == 3 || vm & 1 != 0 {
                     return Err(Trap::UndefinedArm { pc, instr });
@@ -10132,7 +10132,7 @@ mod tests {
             .unwrap(); // vqmovn.u16 d24, q12
         assert_eq!(
             cpu.dreg(24),
-            u64::from_le_bytes([0, 1, 127, 127, 127, 127, 127, 42])
+            u64::from_le_bytes([0, 1, 127, 128, 255, 255, 255, 42])
         );
         assert!(cpu.cpsr.q);
 

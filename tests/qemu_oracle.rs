@@ -6198,6 +6198,55 @@ fn qemu_oracle_neon_vcvt_fpscr_flags_match_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_neon_vqmovn_unsigned_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_qmovn\n\
+         vld1.16 {d0, d1}, [r5]!\n\
+         vqmovn.u16 d2, q0\n\
+         vld1.16 {d4, d5}, [r5]\n\
+         vqmovn.s16 d3, q2\n\
+         ldr r5, =out_qmovn\n\
+         vst1.64 {d2, d3}, [r5]\n\
+         mov r0, #0\n\
+         .rept 4\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_qmovn: .hword 0, 1, 127, 128, 255, 300, 0xffff, 42\n\
+                       .hword 0xffff, 0, 127, 128, 255, 300, 0xfed4, 0x8000\n\
+         out_qmovn: .space 16\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(0, u64::from_le_bytes([0, 0, 1, 0, 127, 0, 128, 0]));
+    cpu.set_dreg(1, u64::from_le_bytes([255, 0, 44, 1, 255, 255, 42, 0]));
+    cpu.execute_arm(neon_2reg_misc_instr(2, 0, 2, 5, true, 0), 0, &mut mem)
+        .unwrap(); // vqmovn.u16 d2, q0
+    assert_eq!(
+        cpu.dreg(2),
+        u64::from_le_bytes([0, 1, 127, 128, 255, 255, 255, 42])
+    );
+
+    cpu.set_dreg(4, u64::from_le_bytes([255, 255, 0, 0, 127, 0, 128, 0]));
+    cpu.set_dreg(5, u64::from_le_bytes([255, 0, 44, 1, 212, 254, 0, 128]));
+    cpu.execute_arm(neon_2reg_misc_instr(3, 0, 2, 5, false, 4), 0, &mut mem)
+        .unwrap(); // vqmovn.s16 d3, q2
+
+    let folded = (cpu.dreg(2) as u32)
+        ^ ((cpu.dreg(2) >> 32) as u32)
+        ^ (cpu.dreg(3) as u32)
+        ^ ((cpu.dreg(3) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_neon_mcpe_scalar_long_matches_interpreter() {
     let asm = neon_oracle_program(
         "ldr r5, =values_mul_a\n\
