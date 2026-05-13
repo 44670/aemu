@@ -5764,6 +5764,97 @@ fn qemu_oracle_neon_mcpe_narrow_and_estimate_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_neon_mcpe_high_narrow_and_recip_step_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_high_narrow\n\
+         vld1.64 {d0, d1}, [r5]!\n\
+         vld1.64 {d2, d3}, [r5]!\n\
+         vaddhn.i16 d8, q0, q1\n\
+         vsubhn.i16 d9, q0, q1\n\
+         vraddhn.i16 d10, q0, q1\n\
+         vrsubhn.i16 d11, q0, q1\n\
+         vld1.32 {d12, d13}, [r5]!\n\
+         vld1.32 {d14, d15}, [r5]\n\
+         vrecps.f32 q8, q6, q7\n\
+         ldr r5, =out_high_narrow\n\
+         vst1.64 {d8, d9, d10, d11}, [r5]!\n\
+         vst1.64 {d16, d17}, [r5]\n\
+         ldr r5, =out_high_narrow\n\
+         mov r0, #0\n\
+         .rept 12\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_high_narrow: .hword 0x0100, 0xff00, 0x7f00, 0x8000\n\
+                             .hword 0x1234, 0xfedc, 0x0001, 0xffff\n\
+                             .hword 0x0010, 0x0100, 0x0100, 0x8000\n\
+                             .hword 0x1111, 0x2222, 0xffff, 0x0001\n\
+                             .word 0x3f000000, 0x40000000, 0xbf800000, 0x40800000\n\
+                             .word 0x3f800000, 0x3e800000, 0xc0000000, 0x3f000000\n\
+         out_high_narrow: .space 48\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(
+        0,
+        u64::from_le_bytes([0x00, 0x01, 0x00, 0xff, 0x00, 0x7f, 0x00, 0x80]),
+    );
+    cpu.set_dreg(
+        1,
+        u64::from_le_bytes([0x34, 0x12, 0xdc, 0xfe, 0x01, 0x00, 0xff, 0xff]),
+    );
+    cpu.set_dreg(
+        2,
+        u64::from_le_bytes([0x10, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x80]),
+    );
+    cpu.set_dreg(
+        3,
+        u64::from_le_bytes([0x11, 0x11, 0x22, 0x22, 0xff, 0xff, 0x01, 0x00]),
+    );
+    cpu.execute_arm(neon_3diff_instr(false, 0, 0, 8, 4, 2), 0, &mut mem)
+        .unwrap(); // vaddhn.i16 d8, q0, q1
+    cpu.execute_arm(neon_3diff_instr(false, 0, 0, 9, 6, 2), 0, &mut mem)
+        .unwrap(); // vsubhn.i16 d9, q0, q1
+    cpu.execute_arm(neon_3diff_instr(true, 0, 0, 10, 4, 2), 0, &mut mem)
+        .unwrap(); // vraddhn.i16 d10, q0, q1
+    cpu.execute_arm(neon_3diff_instr(true, 0, 0, 11, 6, 2), 0, &mut mem)
+        .unwrap(); // vrsubhn.i16 d11, q0, q1
+
+    let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+    cpu.set_dreg(12, pack2(0.5, 2.0));
+    cpu.set_dreg(13, pack2(-1.0, 4.0));
+    cpu.set_dreg(14, pack2(1.0, 0.25));
+    cpu.set_dreg(15, pack2(-2.0, 0.5));
+    cpu.execute_arm(
+        neon_3same_instr(false, 2, 12, 16, 15, true, true, 14),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vrecps.f32 q8, q6, q7
+
+    let folded = [
+        cpu.dreg(8),
+        cpu.dreg(9),
+        cpu.dreg(10),
+        cpu.dreg(11),
+        cpu.dreg(16),
+        cpu.dreg(17),
+    ]
+    .into_iter()
+    .fold(0u32, |acc, value| {
+        acc ^ (value as u32) ^ ((value >> 32) as u32)
+    });
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_neon_mcpe_polynomial_and_high_mul_matches_interpreter() {
     let asm = neon_oracle_program(
         "ldr r5, =values_poly_high\n\

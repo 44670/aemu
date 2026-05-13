@@ -121,11 +121,13 @@ CPU work.
   operations, modified immediates, multiple-structure `VLD`/`VST`,
   single-structure lane and all-lanes `VLD`/`VST`, `VTBL`/`VTBX`, `VEXT`,
   `VDUP`, `VREV`, `VTRN`/`VUZP`/`VZIP`, immediate and register shifts,
-  rounded and saturating narrowing shifts, widening/narrowing moves,
+  rounded and saturating narrowing shifts, high-half add/sub narrowing
+  (`VADDHN`/`VSUBHN`/`VRADDHN`/`VRSUBHN`), widening/narrowing moves,
   3-different-length add/sub/absolute-difference/multiply-long families,
   saturating doubling multiply-long forms, pairwise integer min/max,
   64-bit-lane `VQADD`/`VQSUB`, `VQDMULH`/`VQRDMULH`, ARM-style
-  `VRECPE`/`VRSQRTE` reciprocal estimates, vector `VABS`/`VNEG`, and
+  `VRECPE`/`VRSQRTE` reciprocal estimates, `VRECPS`/`VRSQRTS` reciprocal
+  step operations, vector `VABS`/`VNEG`, and
   MCPE-hot F32 scalar-lane `VMLA`/`VMLS`/`VMUL` Thumb-2 encodings with QEMU
   oracle coverage
 - Runtime HLE now reports ARMv7 NEON/VFPv3/VFP-D32 capability through
