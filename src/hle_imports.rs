@@ -106,6 +106,18 @@ const GL_RENDERER: u32 = 0x1f01;
 const GL_VERSION: u32 = 0x1f02;
 const GL_EXTENSIONS: u32 = 0x1f03;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
+const WCTYPE_ALNUM: u32 = 1 << 0;
+const WCTYPE_ALPHA: u32 = 1 << 1;
+const WCTYPE_BLANK: u32 = 1 << 2;
+const WCTYPE_CNTRL: u32 = 1 << 3;
+const WCTYPE_DIGIT: u32 = 1 << 4;
+const WCTYPE_GRAPH: u32 = 1 << 5;
+const WCTYPE_LOWER: u32 = 1 << 6;
+const WCTYPE_PRINT: u32 = 1 << 7;
+const WCTYPE_PUNCT: u32 = 1 << 8;
+const WCTYPE_SPACE: u32 = 1 << 9;
+const WCTYPE_UPPER: u32 = 1 << 10;
+const WCTYPE_XDIGIT: u32 = 1 << 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -314,6 +326,23 @@ impl HleRuntime {
             "strcat" => self.strcat(cpu, memory),
             "strchr" => self.strchr(cpu, memory),
             "strrchr" => self.strrchr(cpu, memory),
+            "isalnum" => Ok(self.return32(cpu, u32::from(ascii_isalnum(cpu.reg(0))))),
+            "isspace" => Ok(self.return32(cpu, u32::from(ascii_isspace(cpu.reg(0))))),
+            "isupper" => Ok(self.return32(cpu, u32::from(ascii_isupper(cpu.reg(0))))),
+            "isxdigit" => Ok(self.return32(cpu, u32::from(ascii_isxdigit(cpu.reg(0))))),
+            "tolower" => Ok(self.return32(cpu, ascii_tolower(cpu.reg(0)))),
+            "btowc" => Ok(self.return32(cpu, btowc_ascii(cpu.reg(0)))),
+            "wctob" => Ok(self.return32(cpu, wctob_ascii(cpu.reg(0)))),
+            "towlower" => Ok(self.return32(cpu, ascii_tolower(cpu.reg(0)))),
+            "towupper" => Ok(self.return32(cpu, ascii_toupper(cpu.reg(0)))),
+            "iswspace" => Ok(self.return32(cpu, u32::from(ascii_isspace(cpu.reg(0))))),
+            "wctype" => self.wctype(cpu, memory),
+            "iswctype" => Ok(self.return32(cpu, u32::from(ascii_iswctype(cpu.reg(0), cpu.reg(1))))),
+            "mbrtowc" => self.mbrtowc(cpu, memory),
+            "mbstowcs" => self.mbstowcs(cpu, memory),
+            "wcstombs" => self.wcstombs(cpu, memory),
+            "wcrtomb" => self.wcrtomb(cpu, memory),
+            "wcslen" => self.wcslen(cpu, memory),
             "malloc" => self.malloc_call(cpu, memory),
             "calloc" => self.calloc(cpu, memory),
             "realloc" => self.realloc(cpu, memory),
@@ -576,6 +605,98 @@ impl HleRuntime {
             off += 1;
         }
         Ok(self.return32(cpu, found))
+    }
+
+    fn wctype<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let name = load_c_string(memory, cpu.reg(0), 32)?;
+        Ok(self.return32(cpu, ascii_wctype_descriptor(&name).unwrap_or(0)))
+    }
+
+    fn mbrtowc<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let out = cpu.reg(0);
+        let src = cpu.reg(1);
+        let len = cpu.reg(2);
+        if src == 0 {
+            return Ok(self.return32(cpu, 0));
+        }
+        if len == 0 {
+            return Ok(self.return32(cpu, u32::MAX - 1));
+        }
+        let byte = load8(memory, src)?;
+        if out != 0 {
+            store32(memory, out, u32::from(byte))?;
+        }
+        Ok(self.return32(cpu, if byte == 0 { 0 } else { 1 }))
+    }
+
+    fn mbstowcs<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let src = cpu.reg(1);
+        let max = cpu.reg(2);
+        let mut count = 0u32;
+        loop {
+            let byte = load8(memory, src.wrapping_add(count))?;
+            if byte == 0 {
+                if dst != 0 && count < max {
+                    store32(memory, dst.wrapping_add(count * 4), 0)?;
+                }
+                return Ok(self.return32(cpu, count));
+            }
+            if dst != 0 && count < max {
+                store32(memory, dst.wrapping_add(count * 4), u32::from(byte))?;
+            }
+            count = count.wrapping_add(1);
+            if dst != 0 && count >= max {
+                return Ok(self.return32(cpu, count));
+            }
+        }
+    }
+
+    fn wcstombs<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let src = cpu.reg(1);
+        let max = cpu.reg(2);
+        let mut count = 0u32;
+        loop {
+            let value = load32(memory, src.wrapping_add(count * 4))?;
+            if value == 0 {
+                if dst != 0 && count < max {
+                    store8(memory, dst.wrapping_add(count), 0)?;
+                }
+                return Ok(self.return32(cpu, count));
+            }
+            if dst != 0 && count < max {
+                store8(memory, dst.wrapping_add(count), wctob_ascii(value) as u8)?;
+            }
+            count = count.wrapping_add(1);
+            if dst != 0 && count >= max {
+                return Ok(self.return32(cpu, count));
+            }
+        }
+    }
+
+    fn wcrtomb<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let value = cpu.reg(1);
+        if dst == 0 {
+            return Ok(self.return32(cpu, 1));
+        }
+        let byte = wctob_ascii(value);
+        if byte == u32::MAX {
+            self.set_errno(memory, 84)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        store8(memory, dst, byte as u8)?;
+        Ok(self.return32(cpu, 1))
+    }
+
+    fn wcslen<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let mut len = 0u32;
+        while load32(memory, ptr.wrapping_add(len * 4))? != 0 {
+            len = len.wrapping_add(1);
+        }
+        Ok(self.return32(cpu, len))
     }
 
     fn malloc_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -1407,6 +1528,23 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "strcat"
                 | "strchr"
                 | "strrchr"
+                | "isalnum"
+                | "isspace"
+                | "isupper"
+                | "isxdigit"
+                | "tolower"
+                | "btowc"
+                | "wctob"
+                | "towlower"
+                | "towupper"
+                | "iswspace"
+                | "wctype"
+                | "iswctype"
+                | "mbrtowc"
+                | "mbstowcs"
+                | "wcstombs"
+                | "wcrtomb"
+                | "wcslen"
                 | "malloc"
                 | "calloc"
                 | "realloc"
@@ -1935,6 +2073,89 @@ fn ctype_flags(value: u8, _upper: bool) -> u16 {
         flags |= 0x0080;
     }
     flags
+}
+
+fn ascii_byte(value: u32) -> Option<u8> {
+    (value <= 0xff).then_some(value as u8)
+}
+
+fn ascii_isalnum(value: u32) -> bool {
+    ascii_byte(value).is_some_and(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn ascii_isspace(value: u32) -> bool {
+    ascii_byte(value).is_some_and(|byte| byte.is_ascii_whitespace())
+}
+
+fn ascii_isupper(value: u32) -> bool {
+    ascii_byte(value).is_some_and(|byte| byte.is_ascii_uppercase())
+}
+
+fn ascii_isxdigit(value: u32) -> bool {
+    ascii_byte(value).is_some_and(|byte| byte.is_ascii_hexdigit())
+}
+
+fn ascii_tolower(value: u32) -> u32 {
+    ascii_byte(value)
+        .map(|byte| u32::from(byte.to_ascii_lowercase()))
+        .unwrap_or(value)
+}
+
+fn ascii_toupper(value: u32) -> u32 {
+    ascii_byte(value)
+        .map(|byte| u32::from(byte.to_ascii_uppercase()))
+        .unwrap_or(value)
+}
+
+fn btowc_ascii(value: u32) -> u32 {
+    if value == u32::MAX {
+        u32::MAX
+    } else {
+        u32::from(value as u8)
+    }
+}
+
+fn wctob_ascii(value: u32) -> u32 {
+    ascii_byte(value).map(u32::from).unwrap_or(u32::MAX)
+}
+
+fn ascii_wctype_descriptor(name: &str) -> Option<u32> {
+    match name {
+        "alnum" => Some(WCTYPE_ALNUM),
+        "alpha" => Some(WCTYPE_ALPHA),
+        "blank" => Some(WCTYPE_BLANK),
+        "cntrl" => Some(WCTYPE_CNTRL),
+        "digit" => Some(WCTYPE_DIGIT),
+        "graph" => Some(WCTYPE_GRAPH),
+        "lower" => Some(WCTYPE_LOWER),
+        "print" => Some(WCTYPE_PRINT),
+        "punct" => Some(WCTYPE_PUNCT),
+        "space" => Some(WCTYPE_SPACE),
+        "upper" => Some(WCTYPE_UPPER),
+        "xdigit" => Some(WCTYPE_XDIGIT),
+        _ => None,
+    }
+}
+
+fn ascii_iswctype(value: u32, descriptor: u32) -> bool {
+    let Some(byte) = ascii_byte(value) else {
+        return false;
+    };
+    match descriptor {
+        WCTYPE_ALNUM => byte.is_ascii_alphanumeric(),
+        WCTYPE_ALPHA => byte.is_ascii_alphabetic(),
+        WCTYPE_BLANK => matches!(byte, b' ' | b'\t'),
+        WCTYPE_CNTRL => byte.is_ascii_control(),
+        WCTYPE_DIGIT => byte.is_ascii_digit(),
+        WCTYPE_GRAPH => byte.is_ascii_graphic(),
+        WCTYPE_LOWER => byte.is_ascii_lowercase(),
+        WCTYPE_PRINT => byte.is_ascii_graphic() || byte == b' ',
+        WCTYPE_PUNCT => byte.is_ascii_punctuation(),
+        WCTYPE_SPACE => byte.is_ascii_whitespace(),
+        WCTYPE_UPPER => byte.is_ascii_uppercase(),
+        WCTYPE_XDIGIT => byte.is_ascii_hexdigit(),
+        _ => false,
+    }
 }
 
 fn strlen<M: Memory>(memory: &mut M, ptr: u32) -> Result<u32, HleError> {
@@ -2665,6 +2886,78 @@ mod tests {
         let new_ptr = cpu.reg(0);
         assert_ne!(new_ptr, old_ptr);
         assert_eq!(memory.load_bytes_for_test(new_ptr, 4), b"rust");
+    }
+
+    #[test]
+    fn dispatches_ascii_wide_char_locale_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1100, b"space\0").unwrap();
+        memory.load_bytes(0x1120, b"Az\0").unwrap();
+        memory.store32(0x1200, u32::from(b'A')).unwrap();
+        memory.store32(0x1204, u32::from(b'z')).unwrap();
+        memory.store32(0x1208, 0).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        cpu.set_reg(0, u32::from(b'A'));
+        hle.dispatch("btowc", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::from(b'A'));
+
+        cpu.set_reg(0, u32::from(b'Z'));
+        hle.dispatch("wctob", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::from(b'Z'));
+
+        cpu.set_reg(0, u32::from(b'Q'));
+        hle.dispatch("tolower", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::from(b'q'));
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("wctype", &mut cpu, &mut memory).unwrap();
+        let space_class = cpu.reg(0);
+        assert_ne!(space_class, 0);
+
+        cpu.set_reg(0, u32::from(b' '));
+        cpu.set_reg(1, space_class);
+        hle.dispatch("iswctype", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 0x1120);
+        cpu.set_reg(2, 2);
+        cpu.set_reg(3, 0);
+        hle.dispatch("mbrtowc", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load32(0x1300).unwrap(), u32::from(b'A'));
+
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 0x1120);
+        cpu.set_reg(2, 4);
+        hle.dispatch("mbstowcs", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 2);
+        assert_eq!(memory.load32(0x1300).unwrap(), u32::from(b'A'));
+        assert_eq!(memory.load32(0x1304).unwrap(), u32::from(b'z'));
+        assert_eq!(memory.load32(0x1308).unwrap(), 0);
+
+        cpu.set_reg(0, 0x1400);
+        cpu.set_reg(1, 0x1200);
+        cpu.set_reg(2, 4);
+        hle.dispatch("wcstombs", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 2);
+        assert_eq!(memory.load_bytes_for_test(0x1400, 3), b"Az\0");
+
+        cpu.set_reg(0, 0x1410);
+        cpu.set_reg(1, u32::from(b'!'));
+        cpu.set_reg(2, 0);
+        hle.dispatch("wcrtomb", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1410).unwrap(), b'!');
+
+        cpu.set_reg(0, 0x1200);
+        hle.dispatch("wcslen", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 2);
     }
 
     #[test]
