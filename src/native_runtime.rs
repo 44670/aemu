@@ -54,6 +54,13 @@ const APP_CMD_INIT_WINDOW: u32 = 1;
 const APP_CMD_GAINED_FOCUS: u32 = 6;
 const APP_CMD_START: u32 = 10;
 const APP_CMD_RESUME: u32 = 11;
+const MCPE_LIBRARY: &str = "libminecraftpe.so";
+const MCPE_GAME_RENDERER_RENDER: &str = "_ZN12GameRenderer6renderEf";
+const MCPE_ON_RESOURCES_LOADED: &str = "_ZN15MinecraftClient17onResourcesLoadedEv";
+const MCPE_GAME_RENDERER_RENDER_RESOURCE_GATE_OFFSET: u32 = 0x19e;
+const MCPE_CLIENT_RESOURCES_READY_OFFSET: u32 = 0x23e;
+const MCPE_ON_RESOURCES_LOADED_STEPS: usize = 100_000_000;
+const MCPE_ON_RESOURCES_LOADED_STEPS_ENV: &str = "AEMU_MCPE_ON_RESOURCES_LOADED_STEPS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeConfig {
@@ -91,6 +98,8 @@ pub struct NativeRuntime {
     guest_threads: VecDeque<GuestThread>,
     guest_mutexes: Vec<GuestMutex>,
     main_wait: GuestThreadWait,
+    minecraft_resource_bridge: Option<MinecraftResourceBridge>,
+    minecraft_resource_bridge_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +226,12 @@ struct GuestMutex {
     addr: u32,
     owner: Option<u32>,
     recursion: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MinecraftResourceBridge {
+    render_resource_gate_pc: u32,
+    on_resources_loaded: u32,
 }
 
 fn push_trace_tail(tail: &mut VecDeque<NativeRuntimeTraceEntry>, cpu: &Cpu, max_len: usize) {
@@ -362,6 +377,7 @@ impl NativeRuntime {
         hle.set_unwind_tables(collect_unwind_tables(&link));
 
         let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
+        let minecraft_resource_bridge = build_minecraft_resource_bridge(&link);
 
         Ok(Self {
             link,
@@ -376,6 +392,8 @@ impl NativeRuntime {
             guest_threads: VecDeque::new(),
             guest_mutexes: Vec::new(),
             main_wait: GuestThreadWait::Runnable,
+            minecraft_resource_bridge,
+            minecraft_resource_bridge_active: false,
         })
     }
 
@@ -383,6 +401,7 @@ impl NativeRuntime {
         let pc_before = self.cpu.pc();
         let isa_before = self.cpu.isa();
         let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
+        self.maybe_bridge_minecraft_resources_loaded(pc_before)?;
         if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
             self.dispatch_runtime_hle(trap)?;
             return Ok(NativeRuntimeStep::HleCall {
@@ -432,6 +451,63 @@ impl NativeRuntime {
                 source: err,
             }),
         }
+    }
+
+    fn maybe_bridge_minecraft_resources_loaded(
+        &mut self,
+        pc: u32,
+    ) -> Result<(), NativeRuntimeError> {
+        let Some(bridge) = self.minecraft_resource_bridge else {
+            return Ok(());
+        };
+        if self.minecraft_resource_bridge_active || pc != bridge.render_resource_gate_pc {
+            return Ok(());
+        }
+        if std::env::var_os("AEMU_DISABLE_MCPE_RESOURCE_BRIDGE").is_some() {
+            return Ok(());
+        }
+
+        let client = self.cpu.reg(7);
+        if client == 0 {
+            return Ok(());
+        }
+        let ready_addr = client.wrapping_add(MCPE_CLIENT_RESOURCES_READY_OFFSET);
+        let ready = self
+            .link
+            .memory
+            .load8(ready_addr)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        if ready != 0 {
+            return Ok(());
+        }
+
+        if std::env::var_os("AEMU_TRACE_MCPE_RESOURCE_BRIDGE").is_some() {
+            eprintln!(
+                "MCPE resource bridge: calling onResourcesLoaded={:#010x} client={client:#010x} ready@{ready_addr:#010x}",
+                bridge.on_resources_loaded,
+            );
+        }
+
+        self.minecraft_resource_bridge_active = true;
+        let saved_cpu = self.cpu.clone();
+        let result = self.run_function_with_args(
+            bridge.on_resources_loaded,
+            &[client],
+            minecraft_on_resources_loaded_steps(),
+        );
+        self.cpu = saved_cpu;
+        self.minecraft_resource_bridge_active = false;
+        result?;
+
+        if std::env::var_os("AEMU_TRACE_MCPE_RESOURCE_BRIDGE").is_some() {
+            let ready_after = self
+                .link
+                .memory
+                .load8(ready_addr)
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+            eprintln!("MCPE resource bridge: ready@{ready_addr:#010x} now {ready_after:#04x}");
+        }
+        Ok(())
     }
 
     pub fn run(&mut self, max_steps: usize) -> Result<(), NativeRuntimeError> {
@@ -2025,6 +2101,46 @@ fn collect_linked_runtime_hle_traps(link: &NativeLinkReport) -> Vec<RuntimeHleTr
         .collect()
 }
 
+fn build_minecraft_resource_bridge(link: &NativeLinkReport) -> Option<MinecraftResourceBridge> {
+    let render = link_symbol_address_in_library(link, MCPE_LIBRARY, MCPE_GAME_RENDERER_RENDER)?;
+    let on_resources_loaded =
+        link_symbol_address_in_library(link, MCPE_LIBRARY, MCPE_ON_RESOURCES_LOADED)?;
+    Some(MinecraftResourceBridge {
+        render_resource_gate_pc: (render & !1)
+            .wrapping_add(MCPE_GAME_RENDERER_RENDER_RESOURCE_GATE_OFFSET),
+        on_resources_loaded,
+    })
+}
+
+fn minecraft_on_resources_loaded_steps() -> usize {
+    std::env::var(MCPE_ON_RESOURCES_LOADED_STEPS_ENV)
+        .ok()
+        .and_then(|raw| parse_nonzero_usize(&raw))
+        .unwrap_or(MCPE_ON_RESOURCES_LOADED_STEPS)
+}
+
+fn parse_nonzero_usize(raw: &str) -> Option<usize> {
+    let value = raw.trim().parse().ok()?;
+    (value != 0).then_some(value)
+}
+
+fn link_symbol_address_in_library(
+    link: &NativeLinkReport,
+    library_name: &str,
+    name: &str,
+) -> Option<u32> {
+    link.objects
+        .iter()
+        .find(|object| object.library_name == library_name)
+        .and_then(|object| {
+            object
+                .defined_symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .map(|symbol| symbol.address)
+        })
+}
+
 fn collect_unwind_tables(link: &NativeLinkReport) -> Vec<HleUnwindTable> {
     link.objects
         .iter()
@@ -2095,6 +2211,62 @@ mod tests {
         assert!(filter.matches("glDrawElements"));
         assert!(filter.matches("eglSwapBuffers"));
         assert!(!filter.matches("glBindTexture"));
+    }
+
+    #[test]
+    fn parses_nonzero_usize_env_values() {
+        assert_eq!(parse_nonzero_usize("250000000"), Some(250_000_000));
+        assert_eq!(parse_nonzero_usize("0"), None);
+        assert_eq!(parse_nonzero_usize("not-a-number"), None);
+    }
+
+    #[test]
+    fn builds_minecraft_resource_bridge_from_target_symbols() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("mcpe.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: vec![LoadedNativeObject {
+                entry_name: "lib/armeabi-v7a/libminecraftpe.so".to_string(),
+                library_name: MCPE_LIBRARY.to_string(),
+                load_bias: 0x7050_0000,
+                memory_base: 0x7050_0000,
+                memory_size: 0x200_0000,
+                entry: 0,
+                needed: Vec::new(),
+                imports: Vec::new(),
+                defined_symbols: vec![
+                    NativeSymbol {
+                        name: MCPE_GAME_RENDERER_RENDER.to_string(),
+                        address: 0x70ec_c755,
+                        library_name: MCPE_LIBRARY.to_string(),
+                    },
+                    NativeSymbol {
+                        name: MCPE_ON_RESOURCES_LOADED.to_string(),
+                        address: 0x70bb_eb1d,
+                        library_name: MCPE_LIBRARY.to_string(),
+                    },
+                ],
+                relocations: Vec::new(),
+                relocation_count: 0,
+                init: None,
+                init_array: None,
+                arm_exidx: None,
+            }],
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+
+        assert_eq!(
+            build_minecraft_resource_bridge(&report),
+            Some(MinecraftResourceBridge {
+                render_resource_gate_pc: 0x70ec_c8f2,
+                on_resources_loaded: 0x70bb_eb1d,
+            })
+        );
     }
 
     #[test]
@@ -2885,6 +3057,8 @@ mod tests {
             guest_threads: VecDeque::new(),
             guest_mutexes: Vec::new(),
             main_wait: GuestThreadWait::Runnable,
+            minecraft_resource_bridge: None,
+            minecraft_resource_bridge_active: false,
         };
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));
