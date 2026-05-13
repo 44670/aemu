@@ -9570,6 +9570,38 @@ mod tests {
     }
 
     #[test]
+    fn neon_mcpe_thumb_widen_and_saturating_shift_patterns_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(16, u64::from_le_bytes([1, 0x80, 0xff, 2, 3, 4, 5, 6]));
+        cpu.execute_thumb32(0xffc8, 0x0a30, 0, &mut mem).unwrap(); // vmovl.u8 q8, d16
+        assert_eq!(
+            cpu.dreg(16),
+            u64::from_le_bytes([1, 0, 0x80, 0, 0xff, 0, 2, 0])
+        );
+        assert_eq!(cpu.dreg(17), u64::from_le_bytes([3, 0, 4, 0, 5, 0, 6, 0]));
+
+        cpu.set_dreg(16, u64::from_le_bytes([1, 0, 0x34, 0x12, 0xff, 0xff, 0, 0]));
+        cpu.execute_thumb32(0xffd0, 0x0a30, 0, &mut mem).unwrap(); // vmovl.u16 q8, d16
+        assert_eq!(cpu.dreg(16), 0x0000_1234_0000_0001);
+        assert_eq!(cpu.dreg(17), 0x0000_0000_0000_ffff);
+
+        cpu.set_dreg(16, 0x8000_0000_0000_0001);
+        cpu.execute_thumb32(0xffff, 0xaa30, 0, &mut mem).unwrap(); // vshll.u32 q13, d16, #31
+        assert_eq!(cpu.dreg(26), 0x0000_0000_8000_0000);
+        assert_eq!(cpu.dreg(27), 0x4000_0000_0000_0000);
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(16, 0x0000_0002_0000_0001);
+        cpu.set_dreg(17, 0x8000_0000_0000_0000);
+        cpu.execute_thumb32(0xffff, 0xa770, 0, &mut mem).unwrap(); // vqshl.u32 q13, q8, #31
+        assert_eq!(cpu.dreg(26), 0xffff_ffff_8000_0000);
+        assert_eq!(cpu.dreg(27), 0xffff_ffff_0000_0000);
+        assert!(cpu.cpsr.q);
+    }
+
+    #[test]
     fn neon_core_lane_moves_and_scalar_multiply_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
