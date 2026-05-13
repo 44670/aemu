@@ -135,6 +135,8 @@ const WCTYPE_XDIGIT: u32 = 1 << 11;
 const CXX_STRING_REP_HEADER_SIZE: u32 = 12;
 const CXX_STRING_NPOS: u32 = u32::MAX;
 const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
+const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
+const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -266,6 +268,7 @@ pub struct HleRuntime {
     heap_next: u32,
     heap_end: u32,
     allocations: Vec<HleAllocation>,
+    freed: Vec<HleAllocation>,
     apk_path: Option<PathBuf>,
     assets: Vec<AndroidAsset>,
     next_gl_name: u32,
@@ -276,6 +279,7 @@ pub struct HleRuntime {
     pthread_specific: Vec<PthreadSpecific>,
     alooper_events: VecDeque<u32>,
     random_state: u32,
+    clock_ns: u64,
     fake_geometry: Option<u32>,
     fake_texture_pair: Option<u32>,
 }
@@ -284,6 +288,7 @@ pub struct HleRuntime {
 struct HleAllocation {
     ptr: u32,
     size: u32,
+    freeable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -319,6 +324,14 @@ struct PthreadSpecific {
     value: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FakeTime {
+    monotonic_secs: u64,
+    wall_secs: u64,
+    nsecs: u32,
+    usecs: u32,
+}
+
 impl HleRuntime {
     pub fn new(errno_addr: u32, heap_base: u32, heap_size: u32) -> Self {
         Self {
@@ -326,6 +339,7 @@ impl HleRuntime {
             heap_next: align_up(heap_base, 8).unwrap_or(heap_base),
             heap_end: heap_base.saturating_add(heap_size),
             allocations: Vec::new(),
+            freed: Vec::new(),
             apk_path: None,
             assets: Vec::new(),
             next_gl_name: 1,
@@ -336,6 +350,7 @@ impl HleRuntime {
             pthread_specific: Vec::new(),
             alooper_events: VecDeque::new(),
             random_state: 0x1234_5678,
+            clock_ns: 0,
             fake_geometry: None,
             fake_texture_pair: None,
         }
@@ -396,7 +411,7 @@ impl HleRuntime {
             "malloc" => self.malloc_call(cpu, memory),
             "calloc" => self.calloc(cpu, memory),
             "realloc" => self.realloc(cpu, memory),
-            "free" => Ok(self.return32(cpu, 0)),
+            "free" => self.free_call(cpu),
             "__errno" => Ok(self.return32(cpu, self.errno_addr)),
             "__aeabi_idiv" => self.aeabi_idiv(cpu),
             "__aeabi_uidiv" => self.aeabi_uidiv(cpu),
@@ -829,7 +844,7 @@ impl HleRuntime {
                 cpu.reg(14)
             );
         }
-        let ptr = self.alloc(cpu.reg(0), 8)?;
+        let ptr = self.alloc_guest(cpu.reg(0), 8)?;
         Ok(self.return32(cpu, ptr))
     }
 
@@ -839,7 +854,7 @@ impl HleRuntime {
         let Some(total) = count.checked_mul(size) else {
             return Ok(self.return32(cpu, 0));
         };
-        let ptr = self.alloc(total, 8)?;
+        let ptr = self.alloc_guest(total, 8)?;
         for idx in 0..total {
             store8(memory, ptr.wrapping_add(idx), 0)?;
         }
@@ -850,25 +865,31 @@ impl HleRuntime {
         let ptr = cpu.reg(0);
         let size = cpu.reg(1);
         if ptr == 0 {
-            let new_ptr = self.alloc(size, 8)?;
+            let new_ptr = self.alloc_guest(size, 8)?;
             Ok(self.return32(cpu, new_ptr))
         } else if size == 0 {
+            self.free_ptr(ptr);
             Ok(self.return32(cpu, 0))
         } else {
-            let new_ptr = self.alloc(size, 8)?;
-            let old_size = self
-                .allocations
-                .iter()
-                .rev()
-                .find(|allocation| allocation.ptr == ptr)
-                .map(|allocation| allocation.size)
-                .unwrap_or(0);
+            if let Some(old_size) = self.allocation_size(ptr) {
+                if size <= old_size {
+                    return Ok(self.return32(cpu, ptr));
+                }
+            }
+            let new_ptr = self.alloc_guest(size, 8)?;
+            let old_size = self.allocation_size(ptr).unwrap_or(0);
             for idx in 0..old_size.min(size) {
                 let byte = load8(memory, ptr.wrapping_add(idx))?;
                 store8(memory, new_ptr.wrapping_add(idx), byte)?;
             }
+            self.free_ptr(ptr);
             Ok(self.return32(cpu, new_ptr))
         }
+    }
+
+    fn free_call(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        self.free_ptr(cpu.reg(0));
+        Ok(self.return32(cpu, 0))
     }
 
     fn aeabi_idiv(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
@@ -911,28 +932,43 @@ impl HleRuntime {
 
     fn gettimeofday<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let tv = cpu.reg(0);
+        let now = self.advance_clock();
         if tv != 0 {
-            store32(memory, tv, 0)?;
-            store32(memory, tv.wrapping_add(4), 0)?;
+            store32(memory, tv, now.wall_secs as u32)?;
+            store32(memory, tv.wrapping_add(4), now.usecs)?;
         }
         Ok(self.return32(cpu, 0))
     }
 
     fn clock_gettime<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let ts = cpu.reg(1);
+        let now = self.advance_clock();
         if ts != 0 {
-            store32(memory, ts, 0)?;
-            store32(memory, ts.wrapping_add(4), 0)?;
+            store32(memory, ts, now.monotonic_secs as u32)?;
+            store32(memory, ts.wrapping_add(4), now.nsecs)?;
         }
         Ok(self.return32(cpu, 0))
     }
 
     fn time<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let out = cpu.reg(0);
+        let now = self.advance_clock();
         if out != 0 {
-            store32(memory, out, 0)?;
+            store32(memory, out, now.wall_secs as u32)?;
         }
-        Ok(self.return32(cpu, 0))
+        Ok(self.return32(cpu, now.wall_secs as u32))
+    }
+
+    fn advance_clock(&mut self) -> FakeTime {
+        self.clock_ns = self.clock_ns.saturating_add(FAKE_TIME_STEP_NANOS);
+        let monotonic_secs = self.clock_ns / 1_000_000_000;
+        let nsecs = (self.clock_ns % 1_000_000_000) as u32;
+        FakeTime {
+            monotonic_secs,
+            wall_secs: FAKE_TIME_BASE_SECS + monotonic_secs,
+            nsecs,
+            usecs: nsecs / 1_000,
+        }
     }
 
     fn fopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2302,6 +2338,18 @@ impl HleRuntime {
     }
 
     pub(crate) fn alloc(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
+        self.alloc_bump(size, align, false)
+    }
+
+    fn alloc_guest(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
+        let size = size.max(1);
+        if let Some(ptr) = self.alloc_freed(size, align)? {
+            return Ok(ptr);
+        }
+        self.alloc_bump(size, align, true)
+    }
+
+    fn alloc_bump(&mut self, size: u32, align: u32, freeable: bool) -> Result<u32, HleError> {
         let size = size.max(1);
         let start =
             align_up(self.heap_next, align).ok_or(HleError::HeapExhausted { requested: size })?;
@@ -2312,11 +2360,100 @@ impl HleRuntime {
             return Err(HleError::HeapExhausted { requested: size });
         }
         self.heap_next = end;
-        self.allocations.push(HleAllocation { ptr: start, size });
+        self.allocations.push(HleAllocation {
+            ptr: start,
+            size,
+            freeable,
+        });
         if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
             eprintln!("HLE alloc size={size:#x} align={align:#x} -> {start:#010x}");
         }
         Ok(start)
+    }
+
+    fn alloc_freed(&mut self, size: u32, align: u32) -> Result<Option<u32>, HleError> {
+        let Some((idx, start, end)) =
+            self.freed.iter().enumerate().find_map(|(idx, allocation)| {
+                let start = align_up(allocation.ptr, align)?;
+                let end = start.checked_add(size)?;
+                let block_end = allocation.ptr.checked_add(allocation.size)?;
+                (end <= block_end).then_some((idx, start, end))
+            })
+        else {
+            return Ok(None);
+        };
+        let allocation = self.freed.remove(idx);
+        let block_end = allocation
+            .ptr
+            .checked_add(allocation.size)
+            .ok_or(HleError::HeapExhausted { requested: size })?;
+        if allocation.ptr < start {
+            self.insert_free_block(HleAllocation {
+                ptr: allocation.ptr,
+                size: start - allocation.ptr,
+                freeable: true,
+            });
+        }
+        if end < block_end {
+            self.insert_free_block(HleAllocation {
+                ptr: end,
+                size: block_end - end,
+                freeable: true,
+            });
+        }
+        self.allocations.push(HleAllocation {
+            ptr: start,
+            size,
+            freeable: true,
+        });
+        if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
+            eprintln!("HLE alloc reused size={size:#x} align={align:#x} -> {start:#010x}");
+        }
+        Ok(Some(start))
+    }
+
+    fn free_ptr(&mut self, ptr: u32) {
+        if ptr == 0 {
+            return;
+        }
+        if let Some(idx) = self
+            .allocations
+            .iter()
+            .rposition(|allocation| allocation.ptr == ptr && allocation.freeable)
+        {
+            let allocation = self.allocations.remove(idx);
+            self.insert_free_block(allocation);
+        }
+    }
+
+    fn allocation_size(&self, ptr: u32) -> Option<u32> {
+        self.allocations
+            .iter()
+            .rev()
+            .find(|allocation| allocation.ptr == ptr && allocation.freeable)
+            .map(|allocation| allocation.size)
+    }
+
+    fn insert_free_block(&mut self, allocation: HleAllocation) {
+        if allocation.size == 0 {
+            return;
+        }
+        self.freed.push(allocation);
+        self.freed.sort_by_key(|allocation| allocation.ptr);
+
+        let mut coalesced: Vec<HleAllocation> = Vec::with_capacity(self.freed.len());
+        for block in self.freed.drain(..) {
+            if let Some(last) = coalesced.last_mut() {
+                let last_end = last.ptr.saturating_add(last.size);
+                if last_end >= block.ptr {
+                    let block_end = block.ptr.saturating_add(block.size);
+                    last.size = block_end.saturating_sub(last.ptr).max(last.size);
+                    continue;
+                }
+            }
+            coalesced.push(block);
+        }
+        self.freed = coalesced;
     }
 
     fn alloc_c_string<M: Memory>(&mut self, memory: &mut M, value: &str) -> Result<u32, HleError> {
@@ -4035,6 +4172,45 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_advancing_time_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("clock_gettime", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1100).unwrap(), 0);
+        assert_eq!(memory.load32(0x1104).unwrap(), FAKE_TIME_STEP_NANOS as u32);
+
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 0x1110);
+        hle.dispatch("clock_gettime", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(
+            memory.load32(0x1114).unwrap(),
+            (FAKE_TIME_STEP_NANOS * 2) as u32
+        );
+
+        cpu.set_reg(0, 0x1120);
+        hle.dispatch("gettimeofday", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load32(0x1120).unwrap(), FAKE_TIME_BASE_SECS as u32);
+        assert_eq!(
+            memory.load32(0x1124).unwrap(),
+            ((FAKE_TIME_STEP_NANOS * 3) / 1_000) as u32
+        );
+
+        cpu.set_reg(0, 0x1130);
+        hle.dispatch("time", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), FAKE_TIME_BASE_SECS as u32);
+        assert_eq!(memory.load32(0x1130).unwrap(), FAKE_TIME_BASE_SECS as u32);
+    }
+
+    #[test]
     fn dispatches_pthread_identity_and_specific_data() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
@@ -4188,6 +4364,34 @@ mod tests {
         let new_ptr = cpu.reg(0);
         assert_ne!(new_ptr, old_ptr);
         assert_eq!(memory.load_bytes_for_test(new_ptr, 4), b"rust");
+
+        cpu.set_reg(0, 4);
+        hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), old_ptr);
+
+        cpu.set_reg(0, new_ptr);
+        hle.dispatch("free", &mut cpu, &mut memory).unwrap();
+        cpu.set_reg(0, 8);
+        hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), new_ptr);
+    }
+
+    #[test]
+    fn guest_free_does_not_recycle_pinned_runtime_allocations() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        let pinned = hle.alloc(4, 4).unwrap();
+        cpu.set_reg(0, pinned);
+        hle.dispatch("free", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(0, 4);
+        hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
+        assert_ne!(cpu.reg(0), pinned);
     }
 
     #[test]

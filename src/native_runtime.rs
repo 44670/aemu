@@ -11,7 +11,7 @@ pub const DEFAULT_STACK_SIZE: usize = 0x0200_0000;
 pub const DEFAULT_TLS_BASE: u32 = 0x6e00_0000;
 pub const DEFAULT_TLS_SIZE: usize = 0x0001_0000;
 pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
-pub const DEFAULT_HEAP_SIZE: usize = 0x0400_0000;
+pub const DEFAULT_HEAP_SIZE: usize = 0x0800_0000;
 const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
@@ -1185,7 +1185,9 @@ mod tests {
     use crate::armv6::Memory;
     use crate::guest_memory::MappedMemory;
     use crate::hle_imports::{HleCallBehavior, HleSymbolKind, HleSymbolShape};
-    use crate::native_loader::{HleSymbol, LoadedNativeObject, NativeLinkReport, NativeSymbol};
+    use crate::native_loader::{
+        DEFAULT_HLE_BASE, HleSymbol, LoadedNativeObject, NativeLinkReport, NativeSymbol,
+    };
 
     use super::*;
 
@@ -1499,12 +1501,26 @@ mod tests {
     }
 
     #[test]
-    fn default_runtime_stack_has_room_below_tls() {
+    fn default_runtime_regions_do_not_overlap() {
+        assert_eq!(DEFAULT_HEAP_SIZE, 0x0800_0000);
         assert_eq!(DEFAULT_STACK_SIZE, 0x0200_0000);
+
+        let heap_end = DEFAULT_HEAP_BASE
+            .checked_add(DEFAULT_HEAP_SIZE as u32)
+            .unwrap();
+        assert!(heap_end <= DEFAULT_STACK_BASE);
+
+        let stack_end = DEFAULT_STACK_BASE
+            .checked_add(DEFAULT_STACK_SIZE as u32)
+            .unwrap();
+        assert!(stack_end <= DEFAULT_TLS_BASE);
+
+        let tls_end = DEFAULT_TLS_BASE
+            .checked_add(DEFAULT_TLS_SIZE as u32)
+            .unwrap();
         assert!(
-            DEFAULT_STACK_BASE
-                .checked_add(DEFAULT_STACK_SIZE as u32)
-                .is_some_and(|end| end <= DEFAULT_TLS_BASE)
+            tls_end <= DEFAULT_HLE_BASE,
+            "TLS must stay below linked HLE trap symbols"
         );
     }
 
