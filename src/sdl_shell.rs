@@ -1,3 +1,4 @@
+use crate::hle_imports::GlesEvent;
 use crate::host::{
     HostBackend, HostConfig, HostError, HostEvent, HostKey, HostResult, PointerPhase,
 };
@@ -14,6 +15,19 @@ pub struct Sdl2Host {
     window: sdl2::video::Window,
     _gl_context: sdl2::video::GLContext,
     event_pump: sdl2::EventPump,
+    gl: SdlGl,
+}
+
+type GlClear = unsafe extern "C" fn(u32);
+type GlClearColor = unsafe extern "C" fn(f32, f32, f32, f32);
+type GlClearDepthf = unsafe extern "C" fn(f32);
+type GlViewport = unsafe extern "C" fn(i32, i32, i32, i32);
+
+struct SdlGl {
+    clear: GlClear,
+    clear_color: GlClearColor,
+    clear_depthf: Option<GlClearDepthf>,
+    viewport: GlViewport,
 }
 
 impl Sdl2Host {
@@ -40,6 +54,7 @@ impl Sdl2Host {
             .gl_make_current(&gl_context)
             .map_err(HostError::new)?;
         video.gl_set_swap_interval(1).map_err(HostError::new)?;
+        let gl = SdlGl::load(&video)?;
         let event_pump = sdl.event_pump().map_err(HostError::new)?;
 
         Ok(Self {
@@ -48,7 +63,32 @@ impl Sdl2Host {
             window,
             _gl_context: gl_context,
             event_pump,
+            gl,
         })
+    }
+}
+
+impl SdlGl {
+    fn load(video: &sdl2::VideoSubsystem) -> HostResult<Self> {
+        Ok(Self {
+            clear: load_required_gl(video, "glClear")?,
+            clear_color: load_required_gl(video, "glClearColor")?,
+            clear_depthf: load_optional_gl(video, "glClearDepthf"),
+            viewport: load_required_gl(video, "glViewport")?,
+        })
+    }
+}
+
+fn load_required_gl<T: Copy>(video: &sdl2::VideoSubsystem, name: &str) -> HostResult<T> {
+    load_optional_gl(video, name).ok_or_else(|| HostError::new(format!("missing GL symbol {name}")))
+}
+
+fn load_optional_gl<T: Copy>(video: &sdl2::VideoSubsystem, name: &str) -> Option<T> {
+    let ptr = video.gl_get_proc_address(name) as *const ();
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute_copy(&ptr) })
     }
 }
 
@@ -151,6 +191,47 @@ impl HostBackend for Sdl2Host {
         }
 
         Ok(events)
+    }
+
+    fn replay_gles_events(&mut self, events: &[GlesEvent]) -> HostResult<()> {
+        for event in events {
+            match *event {
+                GlesEvent::ClearColor {
+                    red,
+                    green,
+                    blue,
+                    alpha,
+                } => unsafe {
+                    (self.gl.clear_color)(
+                        f32::from_bits(red),
+                        f32::from_bits(green),
+                        f32::from_bits(blue),
+                        f32::from_bits(alpha),
+                    );
+                },
+                GlesEvent::ClearDepthf { depth } => {
+                    if let Some(clear_depthf) = self.gl.clear_depthf {
+                        unsafe {
+                            clear_depthf(f32::from_bits(depth));
+                        }
+                    }
+                }
+                GlesEvent::Clear { mask } => unsafe {
+                    (self.gl.clear)(mask);
+                },
+                GlesEvent::Viewport {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => unsafe {
+                    (self.gl.viewport)(x, y, width, height);
+                },
+                GlesEvent::SwapBuffers { .. } => self.swap_buffers()?,
+                GlesEvent::DrawArrays { .. } | GlesEvent::DrawElements { .. } => {}
+            }
+        }
+        Ok(())
     }
 
     fn swap_buffers(&mut self) -> HostResult<()> {

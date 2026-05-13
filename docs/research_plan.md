@@ -120,7 +120,8 @@ useful, but it does not replace the browser WebGL backend.
    Current status: initial host abstraction exists, with a feature-gated SDL2
    GLES2 debug shell and WebGL 1/WebGL 2 context-selection scaffolding. GLES
    HLE now records clear, viewport, draw, and swap events into a bounded command
-   queue for future SDL2/WebGL replay.
+   queue. The SDL2 host can replay the clear/viewport/swap subset; draw replay
+   and WebGL replay are still pending.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach

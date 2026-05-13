@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::hle_imports::GlesEvent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsApi {
     Gles2,
@@ -104,6 +106,9 @@ pub type HostResult<T> = Result<T, HostError>;
 
 pub trait HostBackend {
     fn poll_events(&mut self) -> HostResult<Vec<HostEvent>>;
+    fn replay_gles_events(&mut self, _events: &[GlesEvent]) -> HostResult<()> {
+        Ok(())
+    }
     fn swap_buffers(&mut self) -> HostResult<()>;
 }
 

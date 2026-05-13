@@ -102,7 +102,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--sdl2]"
                     );
                     std::process::exit(2);
                 }
@@ -122,7 +122,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--sdl2]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -509,6 +509,8 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
 struct RunApkNativeOptions {
     launch: bool,
     until_swap: bool,
+    sdl2: bool,
+    sdl2_hold_ms: u64,
 }
 
 fn parse_run_apk_native_args(
@@ -532,6 +534,8 @@ fn parse_run_apk_native_args(
     let mut options = RunApkNativeOptions {
         launch: false,
         until_swap: false,
+        sdl2: false,
+        sdl2_hold_ms: 1000,
     };
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -553,6 +557,19 @@ fn parse_run_apk_native_args(
                 options.launch = true;
                 options.until_swap = true;
             }
+            "--sdl2" => {
+                options.launch = true;
+                options.until_swap = true;
+                options.sdl2 = true;
+            }
+            "--sdl2-hold-ms" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--sdl2-hold-ms needs a numeric value".to_string())?;
+                options.sdl2_hold_ms = value
+                    .parse()
+                    .map_err(|_| format!("invalid --sdl2-hold-ms value: {value}"))?;
+            }
             _ => return Err(format!("unknown run-apk-native argument: {arg}")),
         }
     }
@@ -566,6 +583,11 @@ fn run_apk_native(
     max_steps: usize,
     options: RunApkNativeOptions,
 ) -> Result<(), String> {
+    #[cfg(not(feature = "sdl2"))]
+    if options.sdl2 {
+        return Err("--sdl2 requires rebuilding with --features sdl2".to_string());
+    }
+
     let report = aemu::native_loader::load_apk_native_libraries_with_config(path, config)
         .map_err(|err| format!("link failed: {err}"))?;
     if !report.is_linked() {
@@ -604,7 +626,56 @@ fn run_apk_native(
     if options.launch {
         run_native_activity_launch(&mut runtime, max_steps, options.until_swap)?;
     }
+    if options.sdl2 {
+        replay_sdl2_gles_events(&mut runtime, options.sdl2_hold_ms)?;
+    }
     Ok(())
+}
+
+#[cfg(feature = "sdl2")]
+fn replay_sdl2_gles_events(
+    runtime: &mut aemu::native_runtime::NativeRuntime,
+    hold_ms: u64,
+) -> Result<(), String> {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use aemu::host::{HostBackend, HostConfig, HostEvent, HostKey};
+
+    let mut host = aemu::sdl_shell::Sdl2Host::new(&HostConfig::default())
+        .map_err(|err| format!("SDL2 setup failed: {err}"))?;
+    let events = runtime.hle.take_gles_events();
+    println!("sdl2: replaying {} GLES events", events.len());
+    host.replay_gles_events(&events)
+        .map_err(|err| format!("SDL2 GLES replay failed: {err}"))?;
+
+    let deadline = Instant::now() + Duration::from_millis(hold_ms);
+    while Instant::now() < deadline {
+        for event in host
+            .poll_events()
+            .map_err(|err| format!("SDL2 event poll failed: {err}"))?
+        {
+            match event {
+                HostEvent::Quit
+                | HostEvent::Key {
+                    key: HostKey::Escape,
+                    pressed: true,
+                    ..
+                } => return Ok(()),
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(16));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "sdl2"))]
+fn replay_sdl2_gles_events(
+    _runtime: &mut aemu::native_runtime::NativeRuntime,
+    _hold_ms: u64,
+) -> Result<(), String> {
+    Err("--sdl2 requires rebuilding with --features sdl2".to_string())
 }
 
 fn run_native_activity_launch(

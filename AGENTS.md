@@ -186,10 +186,14 @@ The native desktop debug shell is feature-gated behind SDL2:
 ```sh
 cargo run --features sdl2 -- sdl2-shell
 cargo run --features sdl2 -- sdl2-shell --frames 120
+cargo run --features sdl2 -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --sdl2
 ```
 
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.
+`run-apk-native --sdl2` implies `--until-swap` for now and replays the recorded
+clear/viewport/swap GLES event subset into the SDL2 context after the first
+guest `eglSwapBuffers`.
 Browser/WebGL scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains the
 default target for GLES2 guest rendering.
 
