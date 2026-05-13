@@ -5,6 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aemu::armv6::{Cpu, Memory, VecMemory};
 
 fn run_arm_linux_exit(asm: &str) -> Option<i32> {
+    run_arm_linux_exit_with_clang_args(asm, &["-march=armv6"])
+}
+
+fn run_armv7_neon_linux_exit(asm: &str) -> Option<i32> {
+    run_arm_linux_exit_with_clang_args(asm, &["-march=armv7-a", "-mfpu=neon", "-mfloat-abi=softfp"])
+}
+
+fn run_arm_linux_exit_with_clang_args(asm: &str, extra_clang_args: &[&str]) -> Option<i32> {
     if Command::new("clang").arg("--version").output().is_err()
         || Command::new("qemu-arm").arg("--version").output().is_err()
     {
@@ -25,7 +33,7 @@ fn run_arm_linux_exit(asm: &str) -> Option<i32> {
 
     let clang = Command::new("clang")
         .arg("--target=arm-linux-gnueabi")
-        .arg("-march=armv6")
+        .args(extra_clang_args)
         .arg("-nostdlib")
         .arg("-static")
         .arg("-fuse-ld=lld")
@@ -51,6 +59,21 @@ fn oracle_program(body: &str) -> String {
     format!(
         ".syntax unified\n\
          .arch armv6\n\
+         .text\n\
+         .global _start\n\
+         _start:\n\
+         {body}\n\
+         and r0, r0, #255\n\
+         mov r7, #1\n\
+         svc #0\n"
+    )
+}
+
+fn neon_oracle_program(body: &str) -> String {
+    format!(
+        ".syntax unified\n\
+         .arch armv7-a\n\
+         .fpu neon\n\
          .text\n\
          .global _start\n\
          _start:\n\
@@ -170,6 +193,30 @@ fn arm_long_multiply_instr(
 
 fn arm_umaal_instr(rd_lo: usize, rd_hi: usize, rn: usize, rm: usize) -> u32 {
     0xe040_0090 | ((rd_hi as u32) << 16) | ((rd_lo as u32) << 12) | ((rm as u32) << 8) | rn as u32
+}
+
+fn neon_3same_instr(
+    u: bool,
+    size: u32,
+    vn: usize,
+    vd: usize,
+    opcode: u32,
+    q: bool,
+    op: bool,
+    vm: usize,
+) -> u32 {
+    0xf200_0000
+        | (u32::from(u) << 24)
+        | (((vd >> 4) as u32 & 1) << 22)
+        | ((size & 0x3) << 20)
+        | (((vn & 0xf) as u32) << 16)
+        | (((vd & 0xf) as u32) << 12)
+        | ((opcode & 0xf) << 8)
+        | (((vn >> 4) as u32 & 1) << 7)
+        | (u32::from(q) << 6)
+        | (((vm >> 4) as u32 & 1) << 5)
+        | (u32::from(op) << 4)
+        | ((vm & 0xf) as u32)
 }
 
 fn arm_branch_instr(cond: u32, link: bool, pc: u32, target: u32) -> u32 {
@@ -5079,6 +5126,70 @@ fn qemu_oracle_sel_uses_parallel_ge_flags_matches_interpreter() {
     cpu.set_reg(0, folded);
 
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_neon_register_shift_counts_use_low_byte() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_vshl\n\
+         vld1.16 {d2}, [r5]\n\
+         ldr r5, =shifts_vshl\n\
+         vld1.16 {d3}, [r5]\n\
+         vshl.s16 d4, d2, d3\n\
+         ldr r5, =out_neon_shift\n\
+         vst1.16 {d4}, [r5]\n\
+         ldr r0, [r5]\n\
+         ldr r1, [r5, #4]\n\
+         eor r0, r0, r1\n\
+         ldr r5, =values_qshl\n\
+         vld1.16 {d6}, [r5]\n\
+         ldr r5, =shifts_qshl\n\
+         vld1.16 {d7}, [r5]\n\
+         vqshl.u16 d5, d6, d7\n\
+         ldr r5, =out_neon_shift\n\
+         vst1.16 {d5}, [r5]\n\
+         ldr r1, [r5]\n\
+         ldr r2, [r5, #4]\n\
+         eor r1, r1, r2\n\
+         eor r0, r0, r1\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_vshl: .hword 0x0001, 0x8000, 0x4000, 0x00ff\n\
+         shifts_vshl: .hword 0x0101, 0x01ff, 0xff01, 0x0000\n\
+         values_qshl: .hword 0x4000, 0x0001, 0xffff, 0x8000\n\
+         shifts_qshl: .hword 0x0002, 0x0101, 0x00ff, 0x7f01\n\
+         out_neon_shift: .space 8\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(2, u64::from_le_bytes([1, 0, 0, 0x80, 0, 0x40, 0xff, 0]));
+    cpu.set_dreg(3, u64::from_le_bytes([1, 1, 0xff, 1, 1, 0xff, 0, 0]));
+    cpu.execute_arm(
+        neon_3same_instr(false, 1, 3, 4, 4, false, false, 2),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vshl.s16 d4, d2, d3
+
+    cpu.set_dreg(6, u64::from_le_bytes([0, 0x40, 1, 0, 0xff, 0xff, 0, 0x80]));
+    cpu.set_dreg(7, u64::from_le_bytes([2, 0, 1, 1, 0xff, 0, 1, 0x7f]));
+    cpu.execute_arm(
+        neon_3same_instr(true, 1, 7, 5, 4, false, true, 6),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vqshl.u16 d5, d6, d7
+
+    let folded = (cpu.dreg(4) as u32)
+        ^ ((cpu.dreg(4) >> 32) as u32)
+        ^ (cpu.dreg(5) as u32)
+        ^ ((cpu.dreg(5) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
 }
 
 #[test]

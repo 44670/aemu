@@ -1904,7 +1904,7 @@ impl Cpu {
 
         for lane in 0..lanes {
             let value = neon_read_elem(&values, lane, size);
-            let shift = neon_sign_extend(neon_read_elem(&shifts, lane, size), size);
+            let shift = (neon_read_elem(&shifts, lane, size) as u8) as i8 as i64;
             let result = self.neon_variable_shift(value, shift, size, signed, saturating, rounding);
             neon_write_elem(&mut out, lane, size, result);
         }
@@ -9368,6 +9368,34 @@ mod tests {
         assert_eq!(
             cpu.dreg(5),
             u64::from_le_bytes([0x7f, 0x7f, 0x80, 0, 0x7f, 1, 0, 4])
+        );
+        assert!(cpu.cpsr.q);
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(2, u64::from_le_bytes([1, 0, 0, 0x80, 0, 0x40, 0xff, 0]));
+        cpu.set_dreg(3, u64::from_le_bytes([1, 1, 0xff, 1, 1, 0xff, 0, 0]));
+        cpu.execute_arm(
+            enc_neon_3same(false, 1, 3, 6, 4, false, false, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vshl.s16 d6, d2, d3
+        assert_eq!(
+            cpu.dreg(6),
+            u64::from_le_bytes([2, 0, 0, 0xc0, 0, 0x80, 0xff, 0])
+        );
+
+        cpu.set_dreg(6, u64::from_le_bytes([0, 0x40, 1, 0, 0xff, 0xff, 0, 0x80]));
+        cpu.set_dreg(7, u64::from_le_bytes([2, 0, 1, 1, 0xff, 0, 1, 0x7f]));
+        cpu.execute_arm(
+            enc_neon_3same(true, 1, 7, 8, 4, false, true, 6),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqshl.u16 d8, d6, d7
+        assert_eq!(
+            cpu.dreg(8),
+            u64::from_le_bytes([0xff, 0xff, 2, 0, 0xff, 0x7f, 0xff, 0xff])
         );
         assert!(cpu.cpsr.q);
     }
