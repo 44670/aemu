@@ -27,10 +27,11 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | APK native load/link | `cargo run -- link-apk ... --abi armeabi-v7a` reports loaded and relocated. | Satisfied for local ARMv7 research APK |
 | System import HLE | `src/hle_imports.rs`; local MCPE probe resolves 906 imports with zero unresolved. | Initial coverage |
 | HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address. | Initial coverage |
-| Constructor runner | `src/native_runtime.rs`; `run-apk-native` enumerates 1,604 constructors on local APK. | Initial coverage |
+| Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
+| ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, and the configured step cap without an undefined NEON trap. | Initial coverage |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
-| Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked |
+| Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked for ARMv6 |
 
 ## Current Blocking Evidence
 
@@ -55,29 +56,36 @@ Result:
 native run failed: link failed: no native libraries found for ABI armeabi; available ABIs: armeabi-v7a
 ```
 
-Forced ARMv7 research probe:
+Forced ARMv7/NEON research probe:
 
 ```sh
-cargo run -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 1000
+timeout 180s cargo run --release -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 50000000 --launch
 ```
 
 Result:
 
 ```text
 constructors: 1604
-libfmod.so constructor 0x70015e30 failed: undefined ARM instruction 0xe30260ab at 0x70015e50
+native constructors completed
+launch: libfmod.so JNI_OnLoad 0x700ccb68 java_vm 0x600466ec
+launch: libminecraftpe.so JNI_OnLoad 0x7128d499 java_vm 0x600466ec
+launch: nativeRegisterThis 0x7128d571 env 0x60046668
+launch: ANativeActivity_onCreate 0x71294589 activity 0x60046744
+launch: android_main 0x7128eef5 android_app 0x60046af0
+native run failed: android_main failed: step limit reached
 ```
 
-This is expected: the local APK is ARMv7/Thumb-2/VFPv3/NEON, while the runtime
-target is ARMv6/Thumb-1/VFPv2.
+The latest forced ARMv7 run does not stop on an undefined NEON opcode. It now
+reaches the 50M-step cap in `libgnustl_shared.so` RTTI/dynamic-cast traversal,
+so the current MCPE blocker is runtime/C++ object-model behavior rather than
+vector instruction decode.
 
 ## Latest Verification
 
 - `cargo fmt --check`
-- `git diff --check`
-- `cargo check --features sdl2`
-- `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
-- `cargo test` with 77 unit/integration-facing tests and 95 QEMU oracle tests
+- `cargo test neon` with 14 focused unit-level tests and 10 QEMU-oracle NEON
+  tests
+- `cargo test` with 115 unit/integration-facing tests and 108 QEMU oracle tests
 
 ## Required Next Input
 
@@ -87,4 +95,5 @@ Provide an older Minecraft PE APK or extracted native library containing:
 lib/armeabi/libminecraftpe.so
 ```
 
-Alternatively, explicitly change the target from ARMv6 to ARMv7/Thumb-2/NEON.
+The local `armeabi-v7a` APK remains useful as the active ARMv7/Thumb-2/NEON
+research target.

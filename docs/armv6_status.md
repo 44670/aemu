@@ -181,12 +181,13 @@ It contains only `lib/armeabi-v7a/*.so`. Its `libminecraftpe.so` probes as ARM
 v7, Thumb-2, VFPv3, and NEON, so it is outside the original ARMv6/`armeabi`
 baseline but is now the active ARMv7/NEON research target.
 
-The native launch probe currently reaches `ANativeActivity_onCreate`,
-`android_main`, Android lifecycle polling, and the first EGL window setup calls
-after completing the earlier `libfmod.so`, `libgnustl_shared.so`, and
-`libminecraftpe.so` constructors. The current blocker is an abort through
-`libgnustl_shared.so` immediately after `ANativeWindow_setBuffersGeometry`; the
-latest trace does not show an undefined NEON opcode.
+The native launch probe currently completes `libfmod.so`,
+`libgnustl_shared.so`, and `libminecraftpe.so` constructors, calls
+`JNI_OnLoad` for FMOD and Minecraft, invokes `nativeRegisterThis`,
+`ANativeActivity_onCreate`, and `android_main`, then reaches the configured
+50M-step limit in `libgnustl_shared.so` RTTI/dynamic-cast traversal. The
+latest trace does not show an undefined NEON opcode; the remaining blocker is
+runtime/C++ object-model behavior rather than vector instruction decode.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.

@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::armv6::{Cpu, Memory};
+use crate::zip_probe::read_zip_entry;
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 
@@ -96,6 +98,7 @@ const EGL_OPENGL_ES_BIT: u32 = 0x0001;
 const EGL_OPENGL_ES2_BIT: u32 = 0x0004;
 const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
 const ACONFIGURATION_SIZE: u32 = 8;
+const AASSET_HANDLE_SIZE: u32 = 0x10;
 const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
 const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
 const GL_VENDOR: u32 = 0x1f00;
@@ -229,6 +232,8 @@ pub struct HleRuntime {
     heap_next: u32,
     heap_end: u32,
     allocations: Vec<HleAllocation>,
+    apk_path: Option<PathBuf>,
+    assets: Vec<AndroidAsset>,
     next_gl_name: u32,
     next_fd: u32,
     next_pthread_key: u32,
@@ -241,6 +246,14 @@ pub struct HleRuntime {
 struct HleAllocation {
     ptr: u32,
     size: u32,
+}
+
+#[derive(Debug, Clone)]
+struct AndroidAsset {
+    handle: u32,
+    buffer: u32,
+    len: u32,
+    closed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -256,6 +269,8 @@ impl HleRuntime {
             heap_next: align_up(heap_base, 8).unwrap_or(heap_base),
             heap_end: heap_base.saturating_add(heap_size),
             allocations: Vec::new(),
+            apk_path: None,
+            assets: Vec::new(),
             next_gl_name: 1,
             next_fd: FIRST_FAKE_FD,
             next_pthread_key: 0,
@@ -263,6 +278,10 @@ impl HleRuntime {
             alooper_events: VecDeque::new(),
             random_state: 0x1234_5678,
         }
+    }
+
+    pub fn set_apk_path(&mut self, apk_path: PathBuf) {
+        self.apk_path = Some(apk_path);
     }
 
     pub fn queue_alooper_event(&mut self, source: u32) {
@@ -339,6 +358,7 @@ impl HleRuntime {
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
             }
+            name if name.starts_with("AAsset") => self.android_asset(name, cpu, memory),
             name if name.starts_with("gl") => self.gles(name, cpu, memory),
             name if name.starts_with("egl") => self.egl(name, cpu, memory),
             _ => self.dispatch_stub(name, descriptor.behavior, cpu, memory),
@@ -1025,6 +1045,93 @@ impl HleRuntime {
         }
     }
 
+    fn android_asset<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        match name {
+            "AAssetManager_open" => {
+                let path = load_c_string(memory, cpu.reg(1), 1024)?;
+                let Some(apk_path) = self.apk_path.as_ref() else {
+                    trace_android_asset(format_args!(
+                        "AAssetManager_open path={path:?} failed: no APK path"
+                    ));
+                    return Ok(self.return32(cpu, 0));
+                };
+                let mut last_err = None;
+                let mut loaded = None;
+                for entry_name in android_asset_entry_candidates(&path) {
+                    match read_zip_entry(apk_path, &entry_name) {
+                        Ok(bytes) => {
+                            loaded = Some((entry_name, bytes));
+                            break;
+                        }
+                        Err(err) => last_err = Some(err.to_string()),
+                    }
+                }
+                let Some((entry_name, bytes)) = loaded else {
+                    trace_android_asset(format_args!(
+                        "AAssetManager_open path={path:?} failed: {}",
+                        last_err.unwrap_or_else(|| "empty asset path".to_string())
+                    ));
+                    return Ok(self.return32(cpu, 0));
+                };
+                let len = u32::try_from(bytes.len()).map_err(|_| HleError::HeapExhausted {
+                    requested: u32::MAX,
+                })?;
+                let buffer = self.alloc(len.max(1), 1)?;
+                for (idx, byte) in bytes.into_iter().enumerate() {
+                    store8(memory, buffer.wrapping_add(idx as u32), byte)?;
+                }
+                let handle = self.alloc(AASSET_HANDLE_SIZE, 4)?;
+                for offset in 0..AASSET_HANDLE_SIZE {
+                    store8(memory, handle.wrapping_add(offset), 0)?;
+                }
+                store32(memory, handle, buffer)?;
+                store32(memory, handle.wrapping_add(4), len)?;
+                self.assets.push(AndroidAsset {
+                    handle,
+                    buffer,
+                    len,
+                    closed: false,
+                });
+                trace_android_asset(format_args!(
+                    "AAssetManager_open path={path:?} entry={entry_name:?} len={len} handle={handle:#010x} buffer={buffer:#010x}"
+                ));
+                Ok(self.return32(cpu, handle))
+            }
+            "AAsset_getLength" => {
+                let len = self
+                    .assets
+                    .iter()
+                    .find(|asset| asset.handle == cpu.reg(0) && !asset.closed)
+                    .map_or(0, |asset| asset.len);
+                Ok(self.return32(cpu, len))
+            }
+            "AAsset_getBuffer" => {
+                let buffer = self
+                    .assets
+                    .iter()
+                    .find(|asset| asset.handle == cpu.reg(0) && !asset.closed)
+                    .map_or(0, |asset| asset.buffer);
+                Ok(self.return32(cpu, buffer))
+            }
+            "AAsset_close" => {
+                if let Some(asset) = self
+                    .assets
+                    .iter_mut()
+                    .find(|asset| asset.handle == cpu.reg(0))
+                {
+                    asset.closed = true;
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            _ => self.dispatch_stub(name, HleCallBehavior::ReturnZero, cpu, memory),
+        }
+    }
+
     fn egl<M: Memory>(
         &mut self,
         name: &str,
@@ -1329,6 +1436,15 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "ALooper_removeFd"
                 | "ALooper_wake"
                 | "ALooper_release"
+                | "AAssetManager_open"
+                | "AAsset_getLength"
+                | "AAsset_getBuffer"
+                | "AAsset_close"
+                | "AConfiguration_new"
+                | "AConfiguration_fromAssetManager"
+                | "AConfiguration_getLanguage"
+                | "AConfiguration_getCountry"
+                | "AConfiguration_delete"
                 | "fopen"
                 | "fdopen"
                 | "fclose"
@@ -1764,14 +1880,18 @@ fn is_libstdcxx_symbol(name: &str) -> bool {
 }
 
 fn init_ctype<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Result<(), HleError> {
+    let table = address.wrapping_add(4);
+    store32(memory, address, table)?;
     for value in 0..=255u32 {
         let flags = ctype_flags(value as u8, upper);
-        store16(memory, address.wrapping_add((value + 1) * 2), flags)?;
+        store8(memory, table.wrapping_add(value + 1), flags as u8)?;
     }
     Ok(())
 }
 
 fn init_case_table<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Result<(), HleError> {
+    let table = address.wrapping_add(4);
+    store32(memory, address, table)?;
     for value in 0..=255u32 {
         let byte = value as u8;
         let mapped = if upper {
@@ -1779,10 +1899,10 @@ fn init_case_table<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Resu
         } else {
             byte.to_ascii_lowercase()
         };
-        store32(
+        store16(
             memory,
-            address.wrapping_add((value + 1) * 4),
-            u32::from(mapped),
+            table.wrapping_add((value + 1) * 2),
+            u16::from(mapped),
         )?;
     }
     Ok(())
@@ -1837,6 +1957,39 @@ fn load_c_string<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> Result<St
         bytes.push(byte);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn android_asset_entry_candidates(path: &str) -> Vec<String> {
+    let mut clean = path.trim_start_matches('/');
+    while let Some(stripped) = clean.strip_prefix("./") {
+        clean = stripped.trim_start_matches('/');
+    }
+    if clean.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    push_unique_string(&mut candidates, clean.to_string());
+    if let Some(stripped) = clean.strip_prefix("assets/") {
+        if !stripped.is_empty() {
+            push_unique_string(&mut candidates, stripped.to_string());
+        }
+    } else {
+        push_unique_string(&mut candidates, format!("assets/{clean}"));
+    }
+    candidates
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn trace_android_asset(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_HLE_ASSET").is_some() {
+        eprintln!("HLE asset {args}");
+    }
 }
 
 fn is_random_device_path(path: &str) -> bool {
@@ -1988,6 +2141,9 @@ fn gl_query_string(name: u32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use crate::armv6::Isa;
     use crate::guest_memory::MappedMemory;
 
@@ -2024,6 +2180,74 @@ mod tests {
         let guard = describe_hle_import("__stack_chk_guard").unwrap();
         initialize_hle_symbol(&mut memory, guard, 0x1100).unwrap();
         assert_eq!(memory.load32(0x1100).unwrap(), 0x00c0_ffee);
+    }
+
+    #[test]
+    fn initializes_ctype_as_pointer_backed_byte_table() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let ctype = describe_hle_import("_ctype_").unwrap();
+        initialize_hle_symbol(&mut memory, ctype, 0x1200).unwrap();
+
+        let table = memory.load32(0x1200).unwrap();
+        assert_eq!(table, 0x1204);
+        assert_eq!(
+            memory.load8(table + u32::from(b'A') + 1).unwrap(),
+            ctype_flags(b'A', false) as u8
+        );
+        assert_eq!(
+            memory.load8(table + u32::from(b'a') + 1).unwrap(),
+            ctype_flags(b'a', false) as u8
+        );
+        assert_eq!(
+            memory.load8(table + u32::from(b'0') + 1).unwrap(),
+            ctype_flags(b'0', false) as u8
+        );
+        assert_eq!(
+            memory.load8(table + u32::from(b' ') + 1).unwrap(),
+            ctype_flags(b' ', false) as u8
+        );
+    }
+
+    #[test]
+    fn initializes_case_maps_as_pointer_backed_halfword_tables() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let tolower = describe_hle_import("_tolower_tab_").unwrap();
+        initialize_hle_symbol(&mut memory, tolower, 0x1200).unwrap();
+        let lower_table = memory.load32(0x1200).unwrap();
+        assert_eq!(lower_table, 0x1204);
+        assert_eq!(
+            memory
+                .load16(lower_table + (u32::from(b'A') + 1) * 2)
+                .unwrap(),
+            u16::from(b'a')
+        );
+        assert_eq!(
+            memory
+                .load16(lower_table + (u32::from(b'z') + 1) * 2)
+                .unwrap(),
+            u16::from(b'z')
+        );
+
+        let toupper = describe_hle_import("_toupper_tab_").unwrap();
+        initialize_hle_symbol(&mut memory, toupper, 0x1600).unwrap();
+        let upper_table = memory.load32(0x1600).unwrap();
+        assert_eq!(upper_table, 0x1604);
+        assert_eq!(
+            memory
+                .load16(upper_table + (u32::from(b'a') + 1) * 2)
+                .unwrap(),
+            u16::from(b'A')
+        );
+        assert_eq!(
+            memory
+                .load16(upper_table + (u32::from(b'Z') + 1) * 2)
+                .unwrap(),
+            u16::from(b'Z')
+        );
     }
 
     #[test]
@@ -2204,6 +2428,68 @@ mod tests {
         hle.dispatch("AConfiguration_delete", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.pc(), 0x2010);
+    }
+
+    #[test]
+    fn dispatches_android_asset_manager_reads_apk_entries() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("aemu-assets-{stamp}.apk"));
+        fs::write(
+            &path,
+            stored_zip_with_one_file("assets/loc/languages.json", br#"{"en_US":"English"}"#),
+        )
+        .unwrap();
+
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        memory.load_bytes(0x1100, b"loc/languages.json\0").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+        hle.set_apk_path(path.clone());
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 3);
+        hle.dispatch("AAssetManager_open", &mut cpu, &mut memory)
+            .unwrap();
+        let asset = cpu.reg(0);
+        assert_ne!(asset, 0);
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, asset);
+        hle.dispatch("AAsset_getLength", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 19);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, asset);
+        hle.dispatch("AAsset_getBuffer", &mut cpu, &mut memory)
+            .unwrap();
+        let buffer = cpu.reg(0);
+        let mut loaded = Vec::new();
+        for idx in 0..19 {
+            loaded.push(memory.load8(buffer + idx).unwrap());
+        }
+        assert_eq!(loaded, br#"{"en_US":"English"}"#);
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, asset);
+        hle.dispatch("AAsset_close", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.pc(), 0x200c);
+
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, asset);
+        hle.dispatch("AAsset_getBuffer", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -2501,5 +2787,63 @@ mod tests {
                 .map(|idx| self.load8(addr.wrapping_add(idx as u32)).unwrap())
                 .collect()
         }
+    }
+
+    fn stored_zip_with_one_file(name: &str, contents: &[u8]) -> Vec<u8> {
+        let name = name.as_bytes();
+        let mut bytes = Vec::new();
+        let local_offset = bytes.len() as u32;
+        push_u32(&mut bytes, 0x0403_4b50);
+        push_u16(&mut bytes, 20);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u16(&mut bytes, name.len() as u16);
+        push_u16(&mut bytes, 0);
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(contents);
+
+        let central_offset = bytes.len() as u32;
+        push_u32(&mut bytes, 0x0201_4b50);
+        push_u16(&mut bytes, 20);
+        push_u16(&mut bytes, 20);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u16(&mut bytes, name.len() as u16);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, local_offset);
+        bytes.extend_from_slice(name);
+
+        let central_size = bytes.len() as u32 - central_offset;
+        push_u32(&mut bytes, 0x0605_4b50);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 1);
+        push_u16(&mut bytes, 1);
+        push_u32(&mut bytes, central_size);
+        push_u32(&mut bytes, central_offset);
+        push_u16(&mut bytes, 0);
+        bytes
+    }
+
+    fn push_u16(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
     }
 }

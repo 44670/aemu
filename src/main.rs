@@ -597,14 +597,26 @@ fn run_native_activity_launch(
         .prepare_native_activity()
         .map_err(|err| format!("native activity harness setup failed: {err}"))?;
 
-    if let Some(jni_on_load) = runtime.symbol_address_in_library(ACTIVITY_LIBRARY, "JNI_OnLoad") {
+    let jni_on_loads: Vec<(String, u32)> = runtime
+        .link
+        .objects
+        .iter()
+        .filter_map(|object| {
+            object
+                .defined_symbols
+                .iter()
+                .find(|symbol| symbol.name == "JNI_OnLoad")
+                .map(|symbol| (object.library_name.clone(), symbol.address))
+        })
+        .collect();
+    for (library_name, jni_on_load) in jni_on_loads {
         println!(
-            "launch: JNI_OnLoad {jni_on_load:#010x} java_vm {:#010x}",
+            "launch: {library_name} JNI_OnLoad {jni_on_load:#010x} java_vm {:#010x}",
             harness.java_vm
         );
         runtime
             .run_function_with_args(jni_on_load, &[harness.java_vm, 0], max_steps)
-            .map_err(|err| format!("JNI_OnLoad failed: {err}"))?;
+            .map_err(|err| format!("{library_name} JNI_OnLoad failed: {err}"))?;
     }
 
     if let Some(native_register_this) = runtime.symbol_address_in_library(

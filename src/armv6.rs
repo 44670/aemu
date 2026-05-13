@@ -382,6 +382,11 @@ impl Cpu {
             return Ok(true);
         }
 
+        let barrier_kind = (instr >> 4) & 0xf;
+        if (instr & 0xffff_ff00) == 0xf57f_f000 && matches!(barrier_kind, 4..=6) {
+            return Ok(true);
+        }
+
         if (instr & 0xffff_fdff) == 0xf101_0000 {
             if instr & (1 << 9) != 0 {
                 return Err(Trap::Unpredictable("SETEND big-endian mode unsupported"));
@@ -4398,14 +4403,7 @@ impl Cpu {
             }
         }
 
-        if (first & 0xfff0) == 0xfab0 && (second & 0xf0f0) == 0xf080 {
-            let rn = usize::from(first & 0xf);
-            let rd = usize::from((second >> 8) & 0xf);
-            let rm = usize::from(second & 0xf);
-            if rn != rm || rd == 15 || rm == 15 {
-                return Err(Trap::UndefinedThumb { pc, instr: first });
-            }
-            self.regs[rd] = self.regs[rm].leading_zeros();
+        if self.exec_thumb32_misc_unary(first, second, pc)? {
             return Ok(());
         }
 
@@ -4456,6 +4454,37 @@ impl Cpu {
         }
 
         Err(Trap::UndefinedThumb { pc, instr: first })
+    }
+
+    fn exec_thumb32_misc_unary(&mut self, first: u16, second: u16, pc: u32) -> Result<bool> {
+        let class = first & 0xfff0;
+        let opcode = (second >> 4) & 0xf;
+        let recognized = matches!(
+            (class, opcode),
+            (0xfa90, 8) | (0xfa90, 9) | (0xfa90, 11) | (0xfab0, 8)
+        );
+        if !recognized || (second & 0xf0c0) != 0xf080 {
+            return Ok(false);
+        }
+
+        let rn = usize::from(first & 0xf);
+        let rd = usize::from((second >> 8) & 0xf);
+        let rm = usize::from(second & 0xf);
+        if rn != rm || rd == 15 || rm == 15 {
+            return Err(Trap::UndefinedThumb { pc, instr: first });
+        }
+        let value = self.regs[rm];
+        self.regs[rd] = match (class, opcode) {
+            (0xfa90, 8) => value.swap_bytes(),
+            (0xfa90, 9) => ((value & 0x00ff_00ff) << 8) | ((value & 0xff00_ff00) >> 8),
+            (0xfa90, 11) => {
+                let half = ((value & 0xff) << 8) | ((value >> 8) & 0xff);
+                sign_extend(half, 16) as u32
+            }
+            (0xfab0, 8) => value.leading_zeros(),
+            _ => unreachable!(),
+        };
+        Ok(true)
     }
 
     fn exec_thumb32_hint(&mut self, first: u16, second: u16) -> Result<bool> {
@@ -9160,6 +9189,9 @@ mod tests {
         cpu.execute_arm(0xf101_0000, 0, &mut mem).unwrap(); // setend le
         cpu.execute_arm(0xe320_f001, 0, &mut mem).unwrap(); // yield hint
         cpu.execute_arm(0xf320_f001, 0, &mut mem).unwrap(); // unconditional yield hint
+        cpu.execute_arm(0xf57f_f04f, 0, &mut mem).unwrap(); // dsb sy
+        cpu.execute_arm(0xf57f_f05f, 0, &mut mem).unwrap(); // dmb sy
+        cpu.execute_arm(0xf57f_f06f, 0, &mut mem).unwrap(); // isb sy
 
         let err = cpu.execute_arm(0xf101_0200, 0, &mut mem).unwrap_err(); // setend be
         assert!(matches!(err, Trap::Unpredictable(_)));
@@ -10767,6 +10799,18 @@ mod tests {
         cpu.step(&mut mem).unwrap(); // clz r3, r0
         assert_eq!(cpu.reg(3), 24);
         assert_eq!(cpu.pc(), 0x4b6a6);
+
+        cpu.set_reg(2, 0x1234_5678);
+        cpu.execute_thumb32(0xfa92, 0xfe82, 0, &mut mem).unwrap(); // rev.w lr, r2
+        assert_eq!(cpu.reg(14), 0x7856_3412);
+
+        cpu.set_reg(5, 0x1122_3344);
+        cpu.execute_thumb32(0xfa95, 0xf495, 0, &mut mem).unwrap(); // rev16.w r4, r5
+        assert_eq!(cpu.reg(4), 0x2211_4433);
+
+        cpu.set_reg(7, 0x0000_0080);
+        cpu.execute_thumb32(0xfa97, 0xf6b7, 0, &mut mem).unwrap(); // revsh.w r6, r7
+        assert_eq!(cpu.reg(6), 0xffff_8000);
 
         cpu.set_pc(0x4b6a6);
         cpu.set_reg(8, 1);

@@ -7,7 +7,7 @@ use crate::hle_imports::{HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
 use crate::native_loader::NativeLinkReport;
 
 pub const DEFAULT_STACK_BASE: u32 = 0x6d00_0000;
-pub const DEFAULT_STACK_SIZE: usize = 0x0010_0000;
+pub const DEFAULT_STACK_SIZE: usize = 0x0040_0000;
 pub const DEFAULT_TLS_BASE: u32 = 0x6e00_0000;
 pub const DEFAULT_TLS_SIZE: usize = 0x0001_0000;
 pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
@@ -58,6 +58,9 @@ pub struct NativeRuntime {
     pub link: NativeLinkReport,
     pub cpu: Cpu,
     pub hle: HleRuntime,
+    runtime_hle_traps: Vec<RuntimeHleTrap>,
+    jni_methods: Vec<JniMethod>,
+    jni_java_vm: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +104,48 @@ pub struct NativeRuntimeTraceEntry {
     pub pc: u32,
     pub isa: Isa,
     pub regs: [u32; 16],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeHleTrap {
+    address: u32,
+    name: &'static str,
+    kind: RuntimeHleTrapKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeHleTrapKind {
+    Jni(JniFunction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JniFunction {
+    FindClass,
+    RefIdentity,
+    GetObjectClass,
+    GetMethodId,
+    GetStaticMethodId,
+    GetFieldId,
+    CallObjectMethod,
+    CallStaticObjectMethod,
+    CallIntMethod,
+    CallStaticIntMethod,
+    CallBooleanMethod,
+    CallStaticBooleanMethod,
+    CallVoidMethod,
+    NewStringUtf,
+    GetStringUtfLength,
+    GetStringUtfChars,
+    ReleaseStringUtfChars,
+    GetJavaVm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniMethod {
+    id: u32,
+    name: String,
+    sig: String,
+    is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,9 +255,17 @@ impl NativeRuntime {
             .tls_base
             .checked_add(ERRNO_OFFSET)
             .ok_or(NativeRuntimeError::AddressOverflow)?;
-        let hle = HleRuntime::new(errno_addr, config.heap_base, config.heap_size as u32);
+        let mut hle = HleRuntime::new(errno_addr, config.heap_base, config.heap_size as u32);
+        hle.set_apk_path(link.apk_path.clone());
 
-        Ok(Self { link, cpu, hle })
+        Ok(Self {
+            link,
+            cpu,
+            hle,
+            runtime_hle_traps: Vec::new(),
+            jni_methods: Vec::new(),
+            jni_java_vm: 0,
+        })
     }
 
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
@@ -221,17 +274,29 @@ impl NativeRuntime {
         match self.cpu.step(&mut self.link.memory) {
             Ok(()) => Ok(NativeRuntimeStep::GuestInstruction),
             Err(Trap::UndefinedArm { pc, instr }) if instr == HLE_TRAP_ARM_INSTR => {
-                let Some(symbol) = self.link.hle_symbol_by_address(pc) else {
-                    return Err(NativeRuntimeError::UnknownHleTrap { pc });
-                };
-                let name = symbol.name.clone();
-                self.hle
-                    .dispatch(&name, &mut self.cpu, &mut self.link.memory)
-                    .map_err(|source| NativeRuntimeError::Hle {
-                        name: name.clone(),
-                        source,
-                    })?;
-                Ok(NativeRuntimeStep::HleCall { name, address: pc })
+                if let Some(symbol) = self.link.hle_symbol_by_address(pc) {
+                    let name = symbol.name.clone();
+                    self.hle
+                        .dispatch(&name, &mut self.cpu, &mut self.link.memory)
+                        .map_err(|source| NativeRuntimeError::Hle {
+                            name: name.clone(),
+                            source,
+                        })?;
+                    return Ok(NativeRuntimeStep::HleCall { name, address: pc });
+                }
+                if let Some(trap) = self
+                    .runtime_hle_traps
+                    .iter()
+                    .find(|trap| trap.address == pc)
+                    .copied()
+                {
+                    self.dispatch_runtime_hle(trap)?;
+                    return Ok(NativeRuntimeStep::HleCall {
+                        name: trap.name.to_string(),
+                        address: pc,
+                    });
+                }
+                Err(NativeRuntimeError::UnknownHleTrap { pc })
             }
             Err(Trap::Memory(err)) => Err(NativeRuntimeError::Memory(format!(
                 "{err} while executing {isa_before:?} at {pc_before:#010x}"
@@ -434,8 +499,43 @@ impl NativeRuntime {
 
     fn prepare_jni_tables(&mut self) -> Result<(u32, u32), NativeRuntimeError> {
         let return_zero = self.write_guest_words(&[0xe3a0_0000, 0xe12f_ff1e])?;
-        let return_arg1 = self.write_guest_words(&[0xe1a0_0001, 0xe12f_ff1e])?;
-        let return_arg2 = self.write_guest_words(&[0xe1a0_0002, 0xe12f_ff1e])?;
+        let find_class = self.write_runtime_trap("JNI FindClass", JniFunction::FindClass)?;
+        let ref_identity = self.write_runtime_trap("JNI ref identity", JniFunction::RefIdentity)?;
+        let get_object_class =
+            self.write_runtime_trap("JNI GetObjectClass", JniFunction::GetObjectClass)?;
+        let get_method_id = self.write_runtime_trap("JNI GetMethodID", JniFunction::GetMethodId)?;
+        let get_static_method_id =
+            self.write_runtime_trap("JNI GetStaticMethodID", JniFunction::GetStaticMethodId)?;
+        let get_field_id = self.write_runtime_trap("JNI GetFieldID", JniFunction::GetFieldId)?;
+        let call_object_method =
+            self.write_runtime_trap("JNI CallObjectMethod", JniFunction::CallObjectMethod)?;
+        let call_static_object_method = self.write_runtime_trap(
+            "JNI CallStaticObjectMethod",
+            JniFunction::CallStaticObjectMethod,
+        )?;
+        let call_int_method =
+            self.write_runtime_trap("JNI CallIntMethod", JniFunction::CallIntMethod)?;
+        let call_static_int_method =
+            self.write_runtime_trap("JNI CallStaticIntMethod", JniFunction::CallStaticIntMethod)?;
+        let call_boolean_method =
+            self.write_runtime_trap("JNI CallBooleanMethod", JniFunction::CallBooleanMethod)?;
+        let call_static_boolean_method = self.write_runtime_trap(
+            "JNI CallStaticBooleanMethod",
+            JniFunction::CallStaticBooleanMethod,
+        )?;
+        let call_void_method =
+            self.write_runtime_trap("JNI CallVoidMethod", JniFunction::CallVoidMethod)?;
+        let new_string_utf =
+            self.write_runtime_trap("JNI NewStringUTF", JniFunction::NewStringUtf)?;
+        let get_string_utf_length =
+            self.write_runtime_trap("JNI GetStringUTFLength", JniFunction::GetStringUtfLength)?;
+        let get_string_utf_chars =
+            self.write_runtime_trap("JNI GetStringUTFChars", JniFunction::GetStringUtfChars)?;
+        let release_string_utf_chars = self.write_runtime_trap(
+            "JNI ReleaseStringUTFChars",
+            JniFunction::ReleaseStringUtfChars,
+        )?;
+        let get_java_vm = self.write_runtime_trap("JNI GetJavaVM", JniFunction::GetJavaVm)?;
 
         let env_vtable = self.alloc_guest_zeroed(0x400, 4)?;
         for offset in (0..0x400).step_by(4) {
@@ -450,23 +550,51 @@ impl NativeRuntime {
         }
         let java_vm = self.alloc_guest_zeroed(4, 4)?;
         self.store_runtime32(java_vm, vm_vtable)?;
+        self.jni_java_vm = java_vm;
 
         let store_env =
             self.write_guest_words(&[0xe59f_3008, 0xe581_3000, 0xe3a0_0000, 0xe12f_ff1e, jni_env])?;
-        let store_java_vm =
-            self.write_guest_words(&[0xe59f_3008, 0xe581_3000, 0xe3a0_0000, 0xe12f_ff1e, java_vm])?;
 
-        self.store_runtime32(env_vtable.wrapping_add(0x18), return_arg1)?; // FindClass
-        self.store_runtime32(env_vtable.wrapping_add(0x54), return_arg1)?; // NewGlobalRef
-        self.store_runtime32(env_vtable.wrapping_add(0x64), return_arg1)?; // NewLocalRef
-        self.store_runtime32(env_vtable.wrapping_add(0x7c), return_arg1)?; // GetObjectClass
-        self.store_runtime32(env_vtable.wrapping_add(0x84), return_arg2)?; // GetMethodID
-        self.store_runtime32(env_vtable.wrapping_add(0x178), return_arg2)?; // GetFieldID
-        self.store_runtime32(env_vtable.wrapping_add(0x1c4), return_arg2)?; // GetStaticMethodID
-        self.store_runtime32(env_vtable.wrapping_add(0x240), return_arg2)?; // GetStaticFieldID
-        self.store_runtime32(env_vtable.wrapping_add(0x29c), return_arg1)?; // NewStringUTF
-        self.store_runtime32(env_vtable.wrapping_add(0x2a4), return_arg1)?; // GetStringUTFChars
-        self.store_runtime32(env_vtable.wrapping_add(0x36c), store_java_vm)?; // GetJavaVM
+        self.store_runtime32(env_vtable.wrapping_add(0x18), find_class)?; // FindClass
+        self.store_runtime32(env_vtable.wrapping_add(0x54), ref_identity)?; // NewGlobalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x58), return_zero)?; // DeleteGlobalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x5c), return_zero)?; // DeleteLocalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x64), ref_identity)?; // NewLocalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x68), return_zero)?; // EnsureLocalCapacity
+        self.store_runtime32(env_vtable.wrapping_add(0x7c), get_object_class)?; // GetObjectClass
+        self.store_runtime32(env_vtable.wrapping_add(0x84), get_method_id)?; // GetMethodID
+        self.store_runtime32(env_vtable.wrapping_add(0x88), call_object_method)?; // CallObjectMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x8c), call_object_method)?; // CallObjectMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x90), call_object_method)?; // CallObjectMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x94), call_boolean_method)?; // CallBooleanMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x98), call_boolean_method)?; // CallBooleanMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x9c), call_boolean_method)?; // CallBooleanMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0xc4), call_int_method)?; // CallIntMethod
+        self.store_runtime32(env_vtable.wrapping_add(0xc8), call_int_method)?; // CallIntMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0xcc), call_int_method)?; // CallIntMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0xf4), call_void_method)?; // CallVoidMethod
+        self.store_runtime32(env_vtable.wrapping_add(0xf8), call_void_method)?; // CallVoidMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0xfc), call_void_method)?; // CallVoidMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x178), get_field_id)?; // GetFieldID
+        self.store_runtime32(env_vtable.wrapping_add(0x1c4), get_static_method_id)?; // GetStaticMethodID
+        self.store_runtime32(env_vtable.wrapping_add(0x1c8), call_static_object_method)?; // CallStaticObjectMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x1cc), call_static_object_method)?; // CallStaticObjectMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x1d0), call_static_object_method)?; // CallStaticObjectMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x1d4), call_static_boolean_method)?; // CallStaticBooleanMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x1d8), call_static_boolean_method)?; // CallStaticBooleanMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x1dc), call_static_boolean_method)?; // CallStaticBooleanMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x204), call_static_int_method)?; // CallStaticIntMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x208), call_static_int_method)?; // CallStaticIntMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x20c), call_static_int_method)?; // CallStaticIntMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x234), call_void_method)?; // CallStaticVoidMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x238), call_void_method)?; // CallStaticVoidMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x23c), call_void_method)?; // CallStaticVoidMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x240), get_field_id)?; // GetStaticFieldID
+        self.store_runtime32(env_vtable.wrapping_add(0x29c), new_string_utf)?; // NewStringUTF
+        self.store_runtime32(env_vtable.wrapping_add(0x2a0), get_string_utf_length)?; // GetStringUTFLength
+        self.store_runtime32(env_vtable.wrapping_add(0x2a4), get_string_utf_chars)?; // GetStringUTFChars
+        self.store_runtime32(env_vtable.wrapping_add(0x2a8), release_string_utf_chars)?; // ReleaseStringUTFChars
+        self.store_runtime32(env_vtable.wrapping_add(0x36c), get_java_vm)?; // GetJavaVM
 
         self.store_runtime32(vm_vtable.wrapping_add(0x10), store_env)?; // AttachCurrentThread
         self.store_runtime32(vm_vtable.wrapping_add(0x18), store_env)?; // GetEnv
@@ -652,6 +780,159 @@ impl NativeRuntime {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
         self.write_guest_bytes(&bytes)
+    }
+
+    fn write_runtime_trap(
+        &mut self,
+        name: &'static str,
+        function: JniFunction,
+    ) -> Result<u32, NativeRuntimeError> {
+        let address = self.write_guest_words(&[HLE_TRAP_ARM_INSTR])?;
+        self.runtime_hle_traps.push(RuntimeHleTrap {
+            address,
+            name,
+            kind: RuntimeHleTrapKind::Jni(function),
+        });
+        Ok(address)
+    }
+
+    fn dispatch_runtime_hle(&mut self, trap: RuntimeHleTrap) -> Result<(), NativeRuntimeError> {
+        match trap.kind {
+            RuntimeHleTrapKind::Jni(function) => self.dispatch_jni(function),
+        }
+    }
+
+    fn dispatch_jni(&mut self, function: JniFunction) -> Result<(), NativeRuntimeError> {
+        let value = match function {
+            JniFunction::FindClass => self.cpu.reg(1).max(1),
+            JniFunction::RefIdentity | JniFunction::GetObjectClass => self.cpu.reg(1).max(1),
+            JniFunction::GetMethodId => self.register_jni_method(false)?,
+            JniFunction::GetStaticMethodId | JniFunction::GetFieldId => {
+                self.register_jni_method(true)?
+            }
+            JniFunction::CallObjectMethod | JniFunction::CallStaticObjectMethod => {
+                self.call_jni_object_method()?
+            }
+            JniFunction::CallIntMethod | JniFunction::CallStaticIntMethod => {
+                self.call_jni_int_method()
+            }
+            JniFunction::CallBooleanMethod | JniFunction::CallStaticBooleanMethod => {
+                self.call_jni_boolean_method()
+            }
+            JniFunction::CallVoidMethod | JniFunction::ReleaseStringUtfChars => 0,
+            JniFunction::NewStringUtf => self.cpu.reg(1),
+            JniFunction::GetStringUtfLength => {
+                self.load_guest_c_string(self.cpu.reg(1), 4096)?.len() as u32
+            }
+            JniFunction::GetStringUtfChars => {
+                if self.cpu.reg(2) != 0 {
+                    self.link
+                        .memory
+                        .store8(self.cpu.reg(2), 0)
+                        .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+                }
+                self.cpu.reg(1)
+            }
+            JniFunction::GetJavaVm => {
+                let out = self.cpu.reg(1);
+                if out != 0 {
+                    self.store_runtime32(out, self.jni_java_vm)?;
+                }
+                0
+            }
+        };
+        self.cpu.set_reg(0, value);
+        self.cpu.branch_exchange(self.cpu.reg(14));
+        Ok(())
+    }
+
+    fn register_jni_method(&mut self, is_static: bool) -> Result<u32, NativeRuntimeError> {
+        let name = self.load_guest_c_string(self.cpu.reg(2), 256)?;
+        let sig = self.load_guest_c_string(self.cpu.reg(3), 256)?;
+        if let Some(method) = self.jni_methods.iter().find(|method| {
+            method.name == name && method.sig == sig && method.is_static == is_static
+        }) {
+            return Ok(method.id);
+        }
+        let id = self.alloc_guest_zeroed(8, 4)?;
+        self.store_runtime32(id, self.cpu.reg(2))?;
+        self.store_runtime32(id.wrapping_add(4), self.cpu.reg(3))?;
+        self.jni_methods.push(JniMethod {
+            id,
+            name,
+            sig,
+            is_static,
+        });
+        Ok(id)
+    }
+
+    fn call_jni_object_method(&mut self) -> Result<u32, NativeRuntimeError> {
+        let Some(method) = self.jni_method(self.cpu.reg(2)) else {
+            return Ok(0);
+        };
+        let value = match method.name.as_str() {
+            "getLocale" => "en_US",
+            "getDeviceModel" | "getDeviceModelName" => "AEMU",
+            "getAndroidVersion" => "19",
+            "getExternalStoragePath" => "/sdcard",
+            "getPackageName" => "com.mojang.minecraftpe",
+            "getFilesDir" | "getAbsolutePath" => "/data/data/com.mojang.minecraftpe/files",
+            "getCacheDir" => "/data/data/com.mojang.minecraftpe/cache",
+            "getUserInputString" => "",
+            "getDeviceId" | "createUUID" => "00000000-0000-0000-0000-000000000000",
+            _ if method.sig.ends_with("Ljava/lang/String;") => "",
+            _ => return Ok(0),
+        };
+        self.write_guest_c_string(value)
+    }
+
+    fn call_jni_int_method(&self) -> u32 {
+        let Some(method) = self.jni_method(self.cpu.reg(2)) else {
+            return 0;
+        };
+        match method.name.as_str() {
+            "getScreenWidth" | "_getScreenWidth" => 854,
+            "getScreenHeight" | "_getScreenHeight" => 480,
+            "getAndroidVersion" => 19,
+            _ => 0,
+        }
+    }
+
+    fn call_jni_boolean_method(&self) -> u32 {
+        let Some(method) = self.jni_method(self.cpu.reg(2)) else {
+            return 0;
+        };
+        match method.name.as_str() {
+            "isTouchscreenAvailable" => 1,
+            _ => 0,
+        }
+    }
+
+    fn jni_method(&self, id: u32) -> Option<&JniMethod> {
+        self.jni_methods.iter().find(|method| method.id == id)
+    }
+
+    fn load_guest_c_string(
+        &mut self,
+        ptr: u32,
+        max_len: u32,
+    ) -> Result<String, NativeRuntimeError> {
+        if ptr == 0 {
+            return Ok(String::new());
+        }
+        let mut bytes = Vec::new();
+        for idx in 0..max_len {
+            let byte = self
+                .link
+                .memory
+                .load8(ptr.wrapping_add(idx))
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+            if byte == 0 {
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            bytes.push(byte);
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -874,15 +1155,84 @@ mod tests {
         assert_eq!(runtime.cpu.reg(0), harness.activity_class);
 
         let method_name = runtime.write_guest_c_string("method").unwrap();
+        let method_sig = runtime
+            .write_guest_c_string("()Ljava/lang/String;")
+            .unwrap();
         let get_method_id = runtime.link.memory.load32(env_vtable + 0x84).unwrap();
         runtime
             .run_function_with_args(
                 get_method_id,
-                &[harness.jni_env, harness.activity_class, method_name, 0],
+                &[
+                    harness.jni_env,
+                    harness.activity_class,
+                    method_name,
+                    method_sig,
+                ],
                 16,
             )
             .unwrap();
-        assert_eq!(runtime.cpu.reg(0), method_name);
+        let method_id = runtime.cpu.reg(0);
+        assert_ne!(method_id, 0);
+
+        let locale_name = runtime.write_guest_c_string("getLocale").unwrap();
+        let get_locale_id = runtime.link.memory.load32(env_vtable + 0x84).unwrap();
+        runtime
+            .run_function_with_args(
+                get_locale_id,
+                &[
+                    harness.jni_env,
+                    harness.activity_class,
+                    locale_name,
+                    method_sig,
+                ],
+                16,
+            )
+            .unwrap();
+        let get_locale_id = runtime.cpu.reg(0);
+
+        let call_object_method = runtime.link.memory.load32(env_vtable + 0x88).unwrap();
+        runtime
+            .run_function_with_args(
+                call_object_method,
+                &[harness.jni_env, harness.activity_class, get_locale_id],
+                16,
+            )
+            .unwrap();
+        let locale_string = runtime.cpu.reg(0);
+        assert_ne!(locale_string, 0);
+
+        let get_string_utf_chars = runtime.link.memory.load32(env_vtable + 0x2a4).unwrap();
+        runtime
+            .run_function_with_args(
+                get_string_utf_chars,
+                &[harness.jni_env, locale_string, 0],
+                16,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.load_guest_c_string(runtime.cpu.reg(0), 16).unwrap(),
+            "en_US"
+        );
+
+        let width_name = runtime.write_guest_c_string("getScreenWidth").unwrap();
+        let int_sig = runtime.write_guest_c_string("()I").unwrap();
+        runtime
+            .run_function_with_args(
+                get_method_id,
+                &[harness.jni_env, harness.activity_class, width_name, int_sig],
+                16,
+            )
+            .unwrap();
+        let width_id = runtime.cpu.reg(0);
+        let call_int_method = runtime.link.memory.load32(env_vtable + 0xc4).unwrap();
+        runtime
+            .run_function_with_args(
+                call_int_method,
+                &[harness.jni_env, harness.activity_class, width_id],
+                16,
+            )
+            .unwrap();
+        assert_eq!(runtime.cpu.reg(0), 854);
 
         let java_vm_out = runtime.alloc_guest_zeroed(4, 4).unwrap();
         let get_java_vm = runtime.link.memory.load32(env_vtable + 0x36c).unwrap();
@@ -1005,6 +1355,9 @@ mod tests {
             link: report,
             cpu: Cpu::new(),
             hle: HleRuntime::new(0, 0x6000_0000, 0x1000),
+            runtime_hle_traps: Vec::new(),
+            jni_methods: Vec::new(),
+            jni_java_vm: 0,
         };
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));
