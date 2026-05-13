@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::armv6::{Cpu, Memory};
 use crate::zip_probe::read_zip_entry;
@@ -165,6 +166,7 @@ const WCTYPE_XDIGIT: u32 = 1 << 11;
 const CXX_STRING_REP_HEADER_SIZE: u32 = 12;
 const CXX_STRING_NPOS: u32 = u32::MAX;
 const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
+static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
 
@@ -496,6 +498,21 @@ impl HleRuntime {
             "strcat" => self.strcat(cpu, memory),
             "strchr" => self.strchr(cpu, memory),
             "strrchr" => self.strrchr(cpu, memory),
+            "strstr" => self.strstr(cpu, memory),
+            "strspn" => self.strspn(cpu, memory),
+            "strcspn" => self.strcspn(cpu, memory),
+            "strpbrk" => self.strpbrk(cpu, memory),
+            "strdup" => self.strdup(cpu, memory),
+            "strcasecmp" => self.strcasecmp(cpu, memory),
+            "strncasecmp" => self.strncasecmp(cpu, memory),
+            "strtod" => self.strtod(cpu, memory),
+            "strtof" => self.strtof(cpu, memory),
+            "atof" => self.atof(cpu, memory),
+            "strtol" => self.strtol(cpu, memory),
+            "strtoul" => self.strtoul(cpu, memory),
+            "strtoull" => self.strtoull(cpu, memory),
+            "atoi" => self.atoi(cpu, memory),
+            "sscanf" => self.sscanf(cpu, memory),
             "isalnum" => Ok(self.return32(cpu, u32::from(ascii_isalnum(cpu.reg(0))))),
             "isspace" => Ok(self.return32(cpu, u32::from(ascii_isspace(cpu.reg(0))))),
             "isupper" => Ok(self.return32(cpu, u32::from(ascii_isupper(cpu.reg(0))))),
@@ -949,6 +966,156 @@ impl HleRuntime {
             off += 1;
         }
         Ok(self.return32(cpu, found))
+    }
+
+    fn strstr<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let haystack_ptr = cpu.reg(0);
+        let needle_ptr = cpu.reg(1);
+        let haystack_len = strlen(memory, haystack_ptr)?;
+        let needle_len = strlen(memory, needle_ptr)?;
+        if needle_len == 0 {
+            return Ok(self.return32(cpu, haystack_ptr));
+        }
+        if needle_len > haystack_len {
+            return Ok(self.return32(cpu, 0));
+        }
+        let haystack = load_bytes(memory, haystack_ptr, haystack_len)?;
+        let needle = load_bytes(memory, needle_ptr, needle_len)?;
+        let found = haystack
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .map_or(0, |idx| haystack_ptr.wrapping_add(idx as u32));
+        Ok(self.return32(cpu, found))
+    }
+
+    fn strspn<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let accept = c_string_byte_set(memory, cpu.reg(1))?;
+        let mut off = 0u32;
+        loop {
+            let byte = load8(memory, ptr.wrapping_add(off))?;
+            if byte == 0 || !accept[byte as usize] {
+                return Ok(self.return32(cpu, off));
+            }
+            off = off.wrapping_add(1);
+        }
+    }
+
+    fn strcspn<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let reject = c_string_byte_set(memory, cpu.reg(1))?;
+        let mut off = 0u32;
+        loop {
+            let byte = load8(memory, ptr.wrapping_add(off))?;
+            if byte == 0 || reject[byte as usize] {
+                return Ok(self.return32(cpu, off));
+            }
+            off = off.wrapping_add(1);
+        }
+    }
+
+    fn strpbrk<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let accept = c_string_byte_set(memory, cpu.reg(1))?;
+        let mut off = 0u32;
+        loop {
+            let byte = load8(memory, ptr.wrapping_add(off))?;
+            if byte == 0 {
+                return Ok(self.return32(cpu, 0));
+            }
+            if accept[byte as usize] {
+                return Ok(self.return32(cpu, ptr.wrapping_add(off)));
+            }
+            off = off.wrapping_add(1);
+        }
+    }
+
+    fn strdup<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let src = cpu.reg(0);
+        let len = strlen(memory, src)?;
+        let dst = self.alloc_guest(len.wrapping_add(1), 1)?;
+        for idx in 0..=len {
+            let byte = load8(memory, src.wrapping_add(idx))?;
+            store8(memory, dst.wrapping_add(idx), byte)?;
+        }
+        Ok(self.return32(cpu, dst))
+    }
+
+    fn strcasecmp<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let result = ascii_strcasecmp(memory, cpu.reg(0), cpu.reg(1), u32::MAX)?;
+        Ok(self.return32(cpu, i32_to_u32(result)))
+    }
+
+    fn strncasecmp<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let result = ascii_strcasecmp(memory, cpu.reg(0), cpu.reg(1), cpu.reg(2))?;
+        Ok(self.return32(cpu, i32_to_u32(result)))
+    }
+
+    fn strtod<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let endptr = cpu.reg(1);
+        let parsed = parse_c_float(memory, ptr)?;
+        if endptr != 0 {
+            store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
+        }
+        Ok(self.return_f64(cpu, parsed.value))
+    }
+
+    fn strtof<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let endptr = cpu.reg(1);
+        let parsed = parse_c_float(memory, ptr)?;
+        if endptr != 0 {
+            store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
+        }
+        Ok(self.return_f32(cpu, parsed.value as f32))
+    }
+
+    fn atof<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let parsed = parse_c_float(memory, cpu.reg(0))?;
+        Ok(self.return_f64(cpu, parsed.value))
+    }
+
+    fn strtol<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let endptr = cpu.reg(1);
+        let parsed = parse_c_integer(memory, ptr, cpu.reg(2))?;
+        if endptr != 0 {
+            store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
+        }
+        Ok(self.return32(cpu, parsed.as_i32() as u32))
+    }
+
+    fn strtoul<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let endptr = cpu.reg(1);
+        let parsed = parse_c_integer(memory, ptr, cpu.reg(2))?;
+        if endptr != 0 {
+            store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
+        }
+        Ok(self.return32(cpu, parsed.as_u32()))
+    }
+
+    fn strtoull<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let endptr = cpu.reg(1);
+        let parsed = parse_c_integer(memory, ptr, cpu.reg(2))?;
+        if endptr != 0 {
+            store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
+        }
+        Ok(self.return_u64(cpu, parsed.as_u64()))
+    }
+
+    fn atoi<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let parsed = parse_c_integer(memory, cpu.reg(0), 10)?;
+        Ok(self.return32(cpu, parsed.as_i32() as u32))
+    }
+
+    fn sscanf<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let input = load_c_string_bytes(memory, cpu.reg(0), 4096)?;
+        let format = load_c_string_bytes(memory, cpu.reg(1), 512)?;
+        let assigned = scan_input(memory, cpu, &input, &format)?;
+        Ok(self.return32(cpu, assigned))
     }
 
     fn wctype<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -1843,10 +2010,14 @@ impl HleRuntime {
         cpu: &mut Cpu,
         memory: &mut M,
     ) -> Result<(), HleError> {
+        let lhs_ptr = cpu.reg(0);
+        let rhs_ptr = cpu.reg(1);
         let lhs = load_cxx_string_bytes(memory, cpu.reg(0))?;
         let rhs_len = strlen(memory, cpu.reg(1))?;
         let rhs = load_bytes(memory, cpu.reg(1), rhs_len)?;
-        Ok(self.return32(cpu, i32_to_u32(compare_bytes(&lhs, &rhs))))
+        let result = compare_bytes(&lhs, &rhs);
+        trace_hle_string_compare("_ZNKSs7compareEPKc", lhs_ptr, rhs_ptr, &lhs, &rhs, result);
+        Ok(self.return32(cpu, i32_to_u32(result)))
     }
 
     fn libstdcxx_string_compare_string<M: Memory>(
@@ -1854,9 +2025,13 @@ impl HleRuntime {
         cpu: &mut Cpu,
         memory: &mut M,
     ) -> Result<(), HleError> {
+        let lhs_ptr = cpu.reg(0);
+        let rhs_ptr = cpu.reg(1);
         let lhs = load_cxx_string_bytes(memory, cpu.reg(0))?;
         let rhs = load_cxx_string_bytes(memory, cpu.reg(1))?;
-        Ok(self.return32(cpu, i32_to_u32(compare_bytes(&lhs, &rhs))))
+        let result = compare_bytes(&lhs, &rhs);
+        trace_hle_string_compare("_ZNKSs7compareERKSs", lhs_ptr, rhs_ptr, &lhs, &rhs, result);
+        Ok(self.return32(cpu, i32_to_u32(result)))
     }
 
     fn libstdcxx_string_find_cstr_len<M: Memory>(
@@ -3067,6 +3242,11 @@ impl HleRuntime {
         cpu.set_reg(1, (bits >> 32) as u32);
         self.return32(cpu, bits as u32);
     }
+
+    fn return_u64(&mut self, cpu: &mut Cpu, value: u64) {
+        cpu.set_reg(1, (value >> 32) as u32);
+        self.return32(cpu, value as u32);
+    }
 }
 
 pub fn describe_hle_import(name: &str) -> Option<HleImportDescriptor> {
@@ -3220,6 +3400,21 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "strcat"
                 | "strchr"
                 | "strrchr"
+                | "strstr"
+                | "strspn"
+                | "strcspn"
+                | "strpbrk"
+                | "strdup"
+                | "strcasecmp"
+                | "strncasecmp"
+                | "strtod"
+                | "strtof"
+                | "atof"
+                | "strtol"
+                | "strtoul"
+                | "strtoull"
+                | "atoi"
+                | "sscanf"
                 | "isalnum"
                 | "isspace"
                 | "isupper"
@@ -4007,6 +4202,22 @@ fn strlen<M: Memory>(memory: &mut M, ptr: u32) -> Result<u32, HleError> {
     }
 }
 
+fn load_c_string_bytes<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    max_len: u32,
+) -> Result<Vec<u8>, HleError> {
+    let mut bytes = Vec::new();
+    for idx in 0..max_len {
+        let byte = load8(memory, ptr.wrapping_add(idx))?;
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    Ok(bytes)
+}
+
 fn load_c_string<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> Result<String, HleError> {
     let mut bytes = Vec::new();
     for idx in 0..max_len {
@@ -4017,6 +4228,19 @@ fn load_c_string<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> Result<St
         bytes.push(byte);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn c_string_byte_set<M: Memory>(memory: &mut M, ptr: u32) -> Result<[bool; 256], HleError> {
+    let mut set = [false; 256];
+    let mut off = 0u32;
+    loop {
+        let byte = load8(memory, ptr.wrapping_add(off))?;
+        if byte == 0 {
+            return Ok(set);
+        }
+        set[byte as usize] = true;
+        off = off.wrapping_add(1);
+    }
 }
 
 fn load_bytes<M: Memory>(memory: &mut M, ptr: u32, len: u32) -> Result<Vec<u8>, HleError> {
@@ -4063,6 +4287,594 @@ fn compare_bytes(lhs: &[u8], rhs: &[u8]) -> i32 {
         }
     }
     lhs.len().cmp(&rhs.len()) as i32
+}
+
+fn ascii_strcasecmp<M: Memory>(
+    memory: &mut M,
+    a: u32,
+    b: u32,
+    max_len: u32,
+) -> Result<i32, HleError> {
+    for idx in 0..max_len {
+        let av = load8(memory, a.wrapping_add(idx))?;
+        let bv = load8(memory, b.wrapping_add(idx))?;
+        let al = av.to_ascii_lowercase();
+        let bl = bv.to_ascii_lowercase();
+        if al != bl || av == 0 || bv == 0 {
+            return Ok(i32::from(al) - i32::from(bl));
+        }
+    }
+    Ok(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ParsedFloat {
+    value: f64,
+    consumed: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedInteger {
+    negative: bool,
+    magnitude: u128,
+    consumed: u32,
+}
+
+impl ParsedInteger {
+    fn as_i32(self) -> i32 {
+        if self.negative {
+            let magnitude = self.magnitude.min(2_147_483_648);
+            if magnitude == 2_147_483_648 {
+                i32::MIN
+            } else {
+                -(magnitude as i32)
+            }
+        } else {
+            self.magnitude.min(i32::MAX as u128) as i32
+        }
+    }
+
+    fn as_i64(self) -> i64 {
+        if self.negative {
+            let magnitude = self.magnitude.min(9_223_372_036_854_775_808);
+            if magnitude == 9_223_372_036_854_775_808 {
+                i64::MIN
+            } else {
+                -(magnitude as i64)
+            }
+        } else {
+            self.magnitude.min(i64::MAX as u128) as i64
+        }
+    }
+
+    fn as_u32(self) -> u32 {
+        if self.magnitude > u32::MAX as u128 {
+            return u32::MAX;
+        }
+        let magnitude = self.magnitude as u32;
+        if self.negative {
+            0u32.wrapping_sub(magnitude)
+        } else {
+            magnitude
+        }
+    }
+
+    fn as_u64(self) -> u64 {
+        if self.magnitude > u64::MAX as u128 {
+            return u64::MAX;
+        }
+        let magnitude = self.magnitude as u64;
+        if self.negative {
+            0u64.wrapping_sub(magnitude)
+        } else {
+            magnitude
+        }
+    }
+}
+
+fn parse_c_float<M: Memory>(memory: &mut M, ptr: u32) -> Result<ParsedFloat, HleError> {
+    let bytes = load_c_string_bytes(memory, ptr, 4096)?;
+    Ok(parse_c_float_bytes(&bytes))
+}
+
+fn parse_c_float_bytes(bytes: &[u8]) -> ParsedFloat {
+    let mut idx = skip_ascii_space(bytes, 0);
+    let start = idx;
+    let mut sign = 1.0;
+    if bytes
+        .get(idx)
+        .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+    {
+        if bytes[idx] == b'-' {
+            sign = -1.0;
+        }
+        idx += 1;
+    }
+
+    if ascii_starts_with_ignore_case(&bytes[idx..], b"infinity") {
+        return ParsedFloat {
+            value: sign * f64::INFINITY,
+            consumed: (idx + 8) as u32,
+        };
+    }
+    if ascii_starts_with_ignore_case(&bytes[idx..], b"inf") {
+        return ParsedFloat {
+            value: sign * f64::INFINITY,
+            consumed: (idx + 3) as u32,
+        };
+    }
+    if ascii_starts_with_ignore_case(&bytes[idx..], b"nan") {
+        return ParsedFloat {
+            value: f64::NAN,
+            consumed: (idx + 3) as u32,
+        };
+    }
+
+    let number_start = start;
+    let mut digits = 0usize;
+    while bytes.get(idx).is_some_and(u8::is_ascii_digit) {
+        idx += 1;
+        digits += 1;
+    }
+    if bytes.get(idx) == Some(&b'.') {
+        idx += 1;
+        while bytes.get(idx).is_some_and(u8::is_ascii_digit) {
+            idx += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return ParsedFloat {
+            value: 0.0,
+            consumed: 0,
+        };
+    }
+    if bytes
+        .get(idx)
+        .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+    {
+        let exp_marker = idx;
+        idx += 1;
+        if bytes
+            .get(idx)
+            .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+        {
+            idx += 1;
+        }
+        let exp_digits_start = idx;
+        while bytes.get(idx).is_some_and(u8::is_ascii_digit) {
+            idx += 1;
+        }
+        if idx == exp_digits_start {
+            idx = exp_marker;
+        }
+    }
+
+    let value = std::str::from_utf8(&bytes[number_start..idx])
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    ParsedFloat {
+        value,
+        consumed: idx as u32,
+    }
+}
+
+fn parse_c_integer<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    base: u32,
+) -> Result<ParsedInteger, HleError> {
+    let bytes = load_c_string_bytes(memory, ptr, 4096)?;
+    Ok(parse_c_integer_bytes(&bytes, base))
+}
+
+fn parse_c_integer_bytes(bytes: &[u8], base: u32) -> ParsedInteger {
+    let mut idx = skip_ascii_space(bytes, 0);
+    let mut negative = false;
+    if bytes
+        .get(idx)
+        .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+    {
+        negative = bytes[idx] == b'-';
+        idx += 1;
+    }
+
+    let mut radix = base;
+    if radix != 0 && !(2..=36).contains(&radix) {
+        return ParsedInteger {
+            negative,
+            magnitude: 0,
+            consumed: 0,
+        };
+    }
+
+    if radix == 0 {
+        if bytes.get(idx) == Some(&b'0')
+            && matches!(bytes.get(idx + 1), Some(b'x' | b'X'))
+            && bytes
+                .get(idx + 2)
+                .and_then(|byte| ascii_digit_value(*byte))
+                .is_some_and(|digit| digit < 16)
+        {
+            radix = 16;
+            idx += 2;
+        } else if bytes.get(idx) == Some(&b'0') {
+            radix = 8;
+        } else {
+            radix = 10;
+        }
+    } else if radix == 16
+        && bytes.get(idx) == Some(&b'0')
+        && matches!(bytes.get(idx + 1), Some(b'x' | b'X'))
+        && bytes
+            .get(idx + 2)
+            .and_then(|byte| ascii_digit_value(*byte))
+            .is_some_and(|digit| digit < 16)
+    {
+        idx += 2;
+    }
+
+    let digits_start = idx;
+    let mut magnitude = 0u128;
+    while let Some(digit) = bytes
+        .get(idx)
+        .and_then(|byte| ascii_digit_value(*byte))
+        .filter(|digit| *digit < radix)
+    {
+        magnitude = magnitude
+            .saturating_mul(radix as u128)
+            .saturating_add(digit as u128);
+        idx += 1;
+    }
+    if idx == digits_start {
+        return ParsedInteger {
+            negative,
+            magnitude: 0,
+            consumed: 0,
+        };
+    }
+    ParsedInteger {
+        negative,
+        magnitude,
+        consumed: idx as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanfLength {
+    None,
+    Char,
+    Short,
+    Long,
+    LongLong,
+}
+
+fn scan_input<M: Memory>(
+    memory: &mut M,
+    cpu: &Cpu,
+    input: &[u8],
+    format: &[u8],
+) -> Result<u32, HleError> {
+    let mut fmt_idx = 0usize;
+    let mut input_idx = 0usize;
+    let mut arg_idx = 0usize;
+    let mut assigned = 0u32;
+
+    while fmt_idx < format.len() {
+        let fmt = format[fmt_idx];
+        if fmt.is_ascii_whitespace() {
+            fmt_idx = skip_ascii_space(format, fmt_idx);
+            input_idx = skip_ascii_space(input, input_idx);
+            continue;
+        }
+        if fmt != b'%' {
+            if input.get(input_idx) != Some(&fmt) {
+                break;
+            }
+            fmt_idx += 1;
+            input_idx += 1;
+            continue;
+        }
+
+        fmt_idx += 1;
+        if format.get(fmt_idx) == Some(&b'%') {
+            if input.get(input_idx) != Some(&b'%') {
+                break;
+            }
+            fmt_idx += 1;
+            input_idx += 1;
+            continue;
+        }
+
+        let suppress = format.get(fmt_idx) == Some(&b'*');
+        if suppress {
+            fmt_idx += 1;
+        }
+        let (width, next_fmt) = scan_decimal_width(format, fmt_idx);
+        fmt_idx = next_fmt;
+        let (length, next_fmt) = scan_length_modifier(format, fmt_idx);
+        fmt_idx = next_fmt;
+        let Some(specifier) = format.get(fmt_idx).copied() else {
+            break;
+        };
+        fmt_idx += 1;
+
+        if !matches!(specifier, b'c' | b'[' | b'n') {
+            input_idx = skip_ascii_space(input, input_idx);
+        }
+
+        match specifier {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' | b'p' => {
+                let base = match specifier {
+                    b'i' => 0,
+                    b'o' => 8,
+                    b'x' | b'X' | b'p' => 16,
+                    _ => 10,
+                };
+                let scan = limited_scan_slice(input, input_idx, width);
+                let parsed = parse_c_integer_bytes(scan, base);
+                if parsed.consumed == 0 {
+                    break;
+                }
+                input_idx += parsed.consumed as usize;
+                if !suppress {
+                    let ptr = scan_vararg(cpu, memory, arg_idx)?;
+                    store_scan_integer(memory, ptr, length, specifier, parsed)?;
+                    assigned = assigned.wrapping_add(1);
+                    arg_idx += 1;
+                }
+            }
+            b'a' | b'A' | b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
+                let scan = limited_scan_slice(input, input_idx, width);
+                let parsed = parse_c_float_bytes(scan);
+                if parsed.consumed == 0 {
+                    break;
+                }
+                input_idx += parsed.consumed as usize;
+                if !suppress {
+                    let ptr = scan_vararg(cpu, memory, arg_idx)?;
+                    match length {
+                        ScanfLength::Long | ScanfLength::LongLong => {
+                            store_f64(memory, ptr, parsed.value)?;
+                        }
+                        _ => store32(memory, ptr, (parsed.value as f32).to_bits())?,
+                    }
+                    assigned = assigned.wrapping_add(1);
+                    arg_idx += 1;
+                }
+            }
+            b's' => {
+                let start = input_idx;
+                let max_len = width.unwrap_or(usize::MAX);
+                while input_idx < input.len()
+                    && input_idx - start < max_len
+                    && !input[input_idx].is_ascii_whitespace()
+                {
+                    input_idx += 1;
+                }
+                if input_idx == start {
+                    break;
+                }
+                if !suppress {
+                    let ptr = scan_vararg(cpu, memory, arg_idx)?;
+                    for (idx, byte) in input[start..input_idx].iter().copied().enumerate() {
+                        store8(memory, ptr.wrapping_add(idx as u32), byte)?;
+                    }
+                    store8(memory, ptr.wrapping_add((input_idx - start) as u32), 0)?;
+                    assigned = assigned.wrapping_add(1);
+                    arg_idx += 1;
+                }
+            }
+            b'c' => {
+                let count = width.unwrap_or(1);
+                if input.len().saturating_sub(input_idx) < count {
+                    break;
+                }
+                if !suppress {
+                    let ptr = scan_vararg(cpu, memory, arg_idx)?;
+                    for idx in 0..count {
+                        store8(memory, ptr.wrapping_add(idx as u32), input[input_idx + idx])?;
+                    }
+                    assigned = assigned.wrapping_add(1);
+                    arg_idx += 1;
+                }
+                input_idx += count;
+            }
+            b'n' => {
+                if !suppress {
+                    let ptr = scan_vararg(cpu, memory, arg_idx)?;
+                    store_scan_count(memory, ptr, length, input_idx as u32)?;
+                    arg_idx += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Ok(assigned)
+}
+
+fn scan_decimal_width(bytes: &[u8], mut idx: usize) -> (Option<usize>, usize) {
+    let start = idx;
+    let mut value = 0usize;
+    while let Some(byte) = bytes.get(idx).filter(|byte| byte.is_ascii_digit()) {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(usize::from(*byte - b'0'));
+        idx += 1;
+    }
+    if idx == start {
+        (None, idx)
+    } else {
+        (Some(value), idx)
+    }
+}
+
+fn scan_length_modifier(bytes: &[u8], idx: usize) -> (ScanfLength, usize) {
+    match bytes.get(idx).copied() {
+        Some(b'h') if bytes.get(idx + 1) == Some(&b'h') => (ScanfLength::Char, idx + 2),
+        Some(b'h') => (ScanfLength::Short, idx + 1),
+        Some(b'l') if bytes.get(idx + 1) == Some(&b'l') => (ScanfLength::LongLong, idx + 2),
+        Some(b'l') | Some(b'L') => (ScanfLength::Long, idx + 1),
+        _ => (ScanfLength::None, idx),
+    }
+}
+
+fn limited_scan_slice(bytes: &[u8], start: usize, width: Option<usize>) -> &[u8] {
+    let end = width
+        .and_then(|width| start.checked_add(width))
+        .map_or(bytes.len(), |end| end.min(bytes.len()));
+    &bytes[start..end]
+}
+
+fn scan_vararg<M: Memory>(cpu: &Cpu, memory: &mut M, idx: usize) -> Result<u32, HleError> {
+    match idx {
+        0 => Ok(cpu.reg(2)),
+        1 => Ok(cpu.reg(3)),
+        _ => load32(memory, cpu.reg(13).wrapping_add(((idx - 2) * 4) as u32)),
+    }
+}
+
+fn store_scan_integer<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    length: ScanfLength,
+    specifier: u8,
+    parsed: ParsedInteger,
+) -> Result<(), HleError> {
+    let unsigned = matches!(specifier, b'u' | b'o' | b'x' | b'X' | b'p');
+    match length {
+        ScanfLength::Char => store8(
+            memory,
+            ptr,
+            if unsigned {
+                parsed.as_u32() as u8
+            } else {
+                parsed.as_i32() as u8
+            },
+        ),
+        ScanfLength::Short => store16(
+            memory,
+            ptr,
+            if unsigned {
+                parsed.as_u32() as u16
+            } else {
+                parsed.as_i32() as u16
+            },
+        ),
+        ScanfLength::LongLong => {
+            let value = if unsigned {
+                parsed.as_u64()
+            } else {
+                parsed.as_i64() as u64
+            };
+            store64(memory, ptr, value)
+        }
+        ScanfLength::None | ScanfLength::Long => store32(
+            memory,
+            ptr,
+            if unsigned {
+                parsed.as_u32()
+            } else {
+                parsed.as_i32() as u32
+            },
+        ),
+    }
+}
+
+fn store_scan_count<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    length: ScanfLength,
+    count: u32,
+) -> Result<(), HleError> {
+    match length {
+        ScanfLength::Char => store8(memory, ptr, count as u8),
+        ScanfLength::Short => store16(memory, ptr, count as u16),
+        ScanfLength::LongLong => store64(memory, ptr, u64::from(count)),
+        ScanfLength::None | ScanfLength::Long => store32(memory, ptr, count),
+    }
+}
+
+fn skip_ascii_space(bytes: &[u8], mut idx: usize) -> usize {
+    while bytes.get(idx).is_some_and(u8::is_ascii_whitespace) {
+        idx += 1;
+    }
+    idx
+}
+
+fn ascii_digit_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some(u32::from(byte - b'0')),
+        b'a'..=b'z' => Some(u32::from(byte - b'a') + 10),
+        b'A'..=b'Z' => Some(u32::from(byte - b'A') + 10),
+        _ => None,
+    }
+}
+
+fn ascii_starts_with_ignore_case(bytes: &[u8], needle: &[u8]) -> bool {
+    bytes.len() >= needle.len()
+        && bytes
+            .iter()
+            .zip(needle.iter())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+fn trace_hle_string_compare(
+    name: &str,
+    lhs_ptr: u32,
+    rhs_ptr: u32,
+    lhs: &[u8],
+    rhs: &[u8],
+    result: i32,
+) {
+    if std::env::var_os("AEMU_TRACE_HLE_STRING").is_none() {
+        return;
+    }
+    if let Some(needle) = std::env::var("AEMU_TRACE_HLE_STRING_CONTAINS")
+        .ok()
+        .filter(|needle| !needle.is_empty())
+    {
+        let needle = needle.as_bytes();
+        if !bytes_contain(lhs, needle) && !bytes_contain(rhs, needle) {
+            return;
+        }
+    }
+    let count = HLE_STRING_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let limit = std::env::var("AEMU_TRACE_HLE_STRING_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok());
+    if limit.is_some_and(|limit| count >= limit) {
+        return;
+    }
+    eprintln!(
+        "HLE_STRING_COMPARE name={name} lhs_ptr={lhs_ptr:#010x} rhs_ptr={rhs_ptr:#010x} lhs={} rhs={} result={result}",
+        format_trace_bytes(lhs),
+        format_trace_bytes(rhs),
+    );
+}
+
+fn format_trace_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    out.push('"');
+    for byte in bytes.iter().copied().take(96) {
+        for escaped in std::ascii::escape_default(byte) {
+            out.push(char::from(escaped));
+        }
+    }
+    if bytes.len() > 96 {
+        out.push_str("...");
+    }
+    out.push('"');
+    out
+}
+
+fn bytes_contain(bytes: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    bytes.windows(needle.len()).any(|window| window == needle)
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8], pos: u32) -> u32 {
@@ -4310,6 +5122,15 @@ fn store32<M: Memory>(memory: &mut M, addr: u32, value: u32) -> Result<(), HleEr
     memory
         .store32(addr, value)
         .map_err(|err| HleError::Memory(err.to_string()))
+}
+
+fn store64<M: Memory>(memory: &mut M, addr: u32, value: u64) -> Result<(), HleError> {
+    store32(memory, addr, value as u32)?;
+    store32(memory, addr.wrapping_add(4), (value >> 32) as u32)
+}
+
+fn store_f64<M: Memory>(memory: &mut M, addr: u32, value: f64) -> Result<(), HleError> {
+    store64(memory, addr, value.to_bits())
 }
 
 fn store_json_null<M: Memory>(memory: &mut M, addr: u32) -> Result<(), HleError> {
@@ -5825,6 +6646,121 @@ mod tests {
         cpu.set_reg(0, 8);
         hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), new_ptr);
+    }
+
+    #[test]
+    fn dispatches_numeric_and_extended_string_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1100, b"58 ], trailing\0").unwrap();
+        memory.load_bytes(0x1120, b"  -0.25e2,\0").unwrap();
+        memory.load_bytes(0x1140, b"x\0").unwrap();
+        memory.load_bytes(0x1160, b"-14px\0").unwrap();
+        memory.load_bytes(0x1180, b"0xff]\0").unwrap();
+        memory
+            .load_bytes(0x11a0, b"18446744073709551615!\0")
+            .unwrap();
+        memory.load_bytes(0x11c0, b"AlphaBeta\0").unwrap();
+        memory.load_bytes(0x11e0, b"alphabet\0").unwrap();
+        memory.load_bytes(0x1200, b"0123456789\0").unwrap();
+        memory.load_bytes(0x1220, b"pB\0").unwrap();
+        memory.load_bytes(0x1240, b"%lf\0").unwrap();
+        memory.load_bytes(0x1260, b"%d %x\0").unwrap();
+        memory.load_bytes(0x1280, b"-14 0xff\0").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x2800, 0x600);
+
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 0x1300);
+        hle.dispatch("strtod", &mut cpu, &mut memory).unwrap();
+        let double_bits = (u64::from(cpu.reg(1)) << 32) | u64::from(cpu.reg(0));
+        assert_eq!(f64::from_bits(double_bits), 58.0);
+        assert_eq!(memory.load32(0x1300).unwrap(), 0x1102);
+
+        cpu.set_reg(0, 0x1120);
+        cpu.set_reg(1, 0x1304);
+        hle.dispatch("strtof", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), -25.0);
+        assert_eq!(memory.load32(0x1304).unwrap(), 0x1129);
+
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 0x1308);
+        hle.dispatch("strtod", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load32(0x1308).unwrap(), 0x1140);
+
+        cpu.set_reg(0, 0x1160);
+        cpu.set_reg(1, 0x130c);
+        cpu.set_reg(2, 10);
+        hle.dispatch("strtol", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0) as i32, -14);
+        assert_eq!(memory.load32(0x130c).unwrap(), 0x1163);
+
+        cpu.set_reg(0, 0x1180);
+        cpu.set_reg(1, 0x1310);
+        cpu.set_reg(2, 0);
+        hle.dispatch("strtoul", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 255);
+        assert_eq!(memory.load32(0x1310).unwrap(), 0x1184);
+
+        cpu.set_reg(0, 0x11a0);
+        cpu.set_reg(1, 0x1314);
+        cpu.set_reg(2, 10);
+        hle.dispatch("strtoull", &mut cpu, &mut memory).unwrap();
+        assert_eq!(
+            (u64::from(cpu.reg(1)) << 32) | u64::from(cpu.reg(0)),
+            u64::MAX
+        );
+        assert_eq!(memory.load32(0x1314).unwrap(), 0x11b4);
+
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 0x1240);
+        cpu.set_reg(2, 0x1320);
+        hle.dispatch("sscanf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(
+            f64::from_bits(
+                u64::from(memory.load32(0x1320).unwrap())
+                    | (u64::from(memory.load32(0x1324).unwrap()) << 32)
+            ),
+            58.0
+        );
+
+        cpu.set_reg(0, 0x1280);
+        cpu.set_reg(1, 0x1260);
+        cpu.set_reg(2, 0x1328);
+        cpu.set_reg(3, 0x132c);
+        hle.dispatch("sscanf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 2);
+        assert_eq!(memory.load32(0x1328).unwrap() as i32, -14);
+        assert_eq!(memory.load32(0x132c).unwrap(), 255);
+
+        cpu.set_reg(0, 0x11c0);
+        cpu.set_reg(1, 0x11e0);
+        hle.dispatch("strcasecmp", &mut cpu, &mut memory).unwrap();
+        assert!(cpu.reg(0) as i32 > 0);
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0x1160);
+        hle.dispatch("strspn", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x11c0);
+        cpu.set_reg(1, 0x1220);
+        hle.dispatch("strpbrk", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0x11c2);
+
+        cpu.set_reg(0, 0x11c0);
+        cpu.set_reg(1, 0x11c5);
+        hle.dispatch("strstr", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0x11c5);
+
+        cpu.set_reg(0, 0x11c0);
+        hle.dispatch("strdup", &mut cpu, &mut memory).unwrap();
+        let dup = cpu.reg(0);
+        assert_ne!(dup, 0);
+        assert_eq!(load_c_string(&mut memory, dup, 16).unwrap(), "AlphaBeta");
     }
 
     #[test]

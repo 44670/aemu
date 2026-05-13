@@ -787,13 +787,16 @@ impl NativeRuntime {
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         let trace_ranges = parse_trace_pc_ranges();
         let trace_mem32 = parse_trace_mem32_specs();
+        let trace_cxx_strings = parse_trace_cxx_string_specs();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
+        let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
         let trace_hle_limit = parse_trace_limit("AEMU_TRACE_HLE_LIMIT");
         let mut trace_pc_count = 0usize;
         let mut trace_mem32_count = 0usize;
+        let mut trace_cxx_string_count = 0usize;
         let mut trace_hle_count = 0usize;
         for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
@@ -854,6 +857,16 @@ impl NativeRuntime {
                     }
                     trace_mem32_count += 1;
                     self.trace_mem32(step_idx, spec);
+                }
+            }
+            if !trace_cxx_strings.is_empty() {
+                let pc = self.cpu.pc();
+                for spec in trace_cxx_strings.iter().filter(|spec| spec.pc == pc) {
+                    if trace_cxx_string_limit.is_some_and(|limit| trace_cxx_string_count >= limit) {
+                        break;
+                    }
+                    trace_cxx_string_count += 1;
+                    self.trace_cxx_string(step_idx, spec);
                 }
             }
             tail.push_back(NativeRuntimeTraceEntry {
@@ -1723,6 +1736,51 @@ impl NativeRuntime {
         }
         eprintln!();
     }
+
+    fn trace_cxx_string(&mut self, step_idx: usize, spec: &TraceCxxStringSpec) {
+        let string = spec.base.value(&self.cpu).wrapping_add(spec.offset);
+        let base_label = spec.base.label();
+        match self.link.memory.load32(string) {
+            Ok(data) if data != 0 => {
+                let len = self
+                    .link
+                    .memory
+                    .load32(data.wrapping_sub(12))
+                    .unwrap_or(u32::MAX);
+                let mut bytes = Vec::new();
+                for idx in 0..len.min(spec.max_len) {
+                    match self.link.memory.load8(data.wrapping_add(idx)) {
+                        Ok(byte) => bytes.push(byte),
+                        Err(err) => {
+                            eprintln!(" data={data:#010x} len={len} bytes=<{}>", err);
+                            return;
+                        }
+                    }
+                }
+                if !trace_bytes_match_env("AEMU_TRACE_CXX_STRING_CONTAINS", &bytes) {
+                    return;
+                }
+                eprintln!(
+                    "CXX_STRING step={step_idx} pc={:#010x} {base_label}+{:#x}={string:#010x} data={data:#010x} len={len} bytes={}",
+                    spec.pc,
+                    spec.offset,
+                    format_trace_bytes(&bytes)
+                );
+            }
+            Ok(data) => {
+                if trace_bytes_match_env("AEMU_TRACE_CXX_STRING_CONTAINS", &[]) {
+                    eprintln!(
+                        "CXX_STRING step={step_idx} pc={:#010x} {base_label}+{:#x}={string:#010x} data={data:#010x} len=0 bytes=\"\"",
+                        spec.pc, spec.offset,
+                    );
+                }
+            }
+            Err(err) => eprintln!(
+                "CXX_STRING step={step_idx} pc={:#010x} {base_label}+{:#x}={string:#010x} data=<{}>",
+                spec.pc, spec.offset, err
+            ),
+        }
+    }
 }
 
 fn parse_trace_pc_ranges() -> Vec<(u32, u32)> {
@@ -1758,6 +1816,14 @@ struct TraceMem32Spec {
     offsets: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceCxxStringSpec {
+    pc: u32,
+    base: TraceMemBase,
+    offset: u32,
+    max_len: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceMemBase {
     Reg(usize),
@@ -1788,6 +1854,38 @@ fn parse_trace_mem32_specs() -> Vec<TraceMem32Spec> {
         return Vec::new();
     };
     parse_trace_mem32_specs_raw(&raw)
+}
+
+fn parse_trace_cxx_string_specs() -> Vec<TraceCxxStringSpec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_CXX_STRING").ok() else {
+        return Vec::new();
+    };
+    parse_trace_cxx_string_specs_raw(&raw)
+}
+
+fn parse_trace_cxx_string_specs_raw(raw: &str) -> Vec<TraceCxxStringSpec> {
+    raw.split(';')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (pc, fields) = entry.split_once(':')?;
+            let pc = parse_u32_env(pc)?;
+            let mut fields = fields
+                .split(',')
+                .map(str::trim)
+                .filter(|field| !field.is_empty());
+            let (base, offset) = parse_trace_mem32_base(fields.next()?)?;
+            let max_len = fields.next().and_then(parse_u32_env).unwrap_or(96);
+            Some(TraceCxxStringSpec {
+                pc,
+                base,
+                offset,
+                max_len,
+            })
+        })
+        .collect()
 }
 
 fn parse_trace_mem32_specs_raw(raw: &str) -> Vec<TraceMem32Spec> {
@@ -1842,6 +1940,27 @@ fn parse_trace_mem32_base_value(raw: &str) -> Option<TraceMemBase> {
 
 fn parse_trace_mem32_offset(raw: &str) -> Option<u32> {
     parse_u32_env(raw.trim().trim_start_matches('+'))
+}
+
+fn format_trace_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    out.push('"');
+    for byte in bytes.iter().copied() {
+        for escaped in std::ascii::escape_default(byte) {
+            out.push(char::from(escaped));
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn trace_bytes_match_env(name: &str, bytes: &[u8]) -> bool {
+    let Some(needle) = std::env::var(name).ok().filter(|needle| !needle.is_empty()) else {
+        return true;
+    };
+    bytes
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
