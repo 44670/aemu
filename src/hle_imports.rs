@@ -99,6 +99,7 @@ const EGL_OPENGL_ES2_BIT: u32 = 0x0004;
 const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
 const ACONFIGURATION_SIZE: u32 = 8;
 const AASSET_HANDLE_SIZE: u32 = 0x10;
+const FAKE_GEOMETRY_SIZE: u32 = 0x20;
 const FAKE_TEXTURE_PAIR_SIZE: u32 = 0x44;
 const FAKE_TEXTURE_SIDE: u32 = 256;
 const FAKE_TEXTURE_BYTES: u32 = FAKE_TEXTURE_SIDE * FAKE_TEXTURE_SIDE * 4;
@@ -275,6 +276,7 @@ pub struct HleRuntime {
     pthread_specific: Vec<PthreadSpecific>,
     alooper_events: VecDeque<u32>,
     random_state: u32,
+    fake_geometry: Option<u32>,
     fake_texture_pair: Option<u32>,
 }
 
@@ -334,6 +336,7 @@ impl HleRuntime {
             pthread_specific: Vec::new(),
             alooper_events: VecDeque::new(),
             random_state: 0x1234_5678,
+            fake_geometry: None,
             fake_texture_pair: None,
         }
     }
@@ -361,7 +364,8 @@ impl HleRuntime {
         match name {
             "memcpy" | "__aeabi_memcpy" => self.memcpy(cpu, memory),
             "memmove" | "__aeabi_memmove" => self.memmove(cpu, memory),
-            "memset" | "__aeabi_memset" => self.memset(cpu, memory),
+            "memset" => self.memset(cpu, memory),
+            "__aeabi_memset" => self.aeabi_memset(cpu, memory),
             "memcmp" => self.memcmp(cpu, memory),
             "memchr" => self.memchr(cpu, memory),
             "strlen" => self.strlen(cpu, memory),
@@ -485,6 +489,11 @@ impl HleRuntime {
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
                 self.minecraft_texture_group_get_texture_pair(cpu, memory)
             }
+            "_ZN13GeometryGroup11getGeometryERKSs" | "_ZN13GeometryGroup14tryGetGeometryERKSs" => {
+                self.minecraft_geometry_group_get_geometry(cpu, memory)
+            }
+            "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
+            | "_ZN9UIControl18_resolvePostCreateEv" => self.minecraft_ui_control_resolve_noop(cpu),
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
             }
@@ -577,6 +586,16 @@ impl HleRuntime {
         let dst = cpu.reg(0);
         let value = cpu.reg(1) as u8;
         let len = cpu.reg(2);
+        for idx in 0..len {
+            store8(memory, dst.wrapping_add(idx), value)?;
+        }
+        Ok(self.return32(cpu, dst))
+    }
+
+    fn aeabi_memset<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let len = cpu.reg(1);
+        let value = cpu.reg(2) as u8;
         for idx in 0..len {
             store8(memory, dst.wrapping_add(idx), value)?;
         }
@@ -1804,6 +1823,33 @@ impl HleRuntime {
         Ok(self.return32(cpu, pair))
     }
 
+    fn minecraft_geometry_group_get_geometry<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let out = cpu.reg(0);
+        let geometry = match self.fake_geometry {
+            Some(geometry) => geometry,
+            None => {
+                let geometry = self.alloc(FAKE_GEOMETRY_SIZE, 4)?;
+                for offset in 0..FAKE_GEOMETRY_SIZE {
+                    store8(memory, geometry.wrapping_add(offset), 0)?;
+                }
+                self.fake_geometry = Some(geometry);
+                geometry
+            }
+        };
+
+        store32(memory, out, 0)?;
+        store32(memory, out.wrapping_add(4), geometry)?;
+        Ok(self.return32(cpu, out))
+    }
+
+    fn minecraft_ui_control_resolve_noop(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return32(cpu, 0))
+    }
+
     fn store_empty_webtoken<M: Memory>(
         &mut self,
         memory: &mut M,
@@ -2616,6 +2662,10 @@ fn is_target_symbol(name: &str) -> bool {
         "_ZN8WebTokenC1ERKS_"
             | "_ZN8WebTokenC2ERKS_"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
+            | "_ZN13GeometryGroup11getGeometryERKSs"
+            | "_ZN13GeometryGroup14tryGetGeometryERKSs"
+            | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
+            | "_ZN9UIControl18_resolvePostCreateEv"
     )
 }
 
@@ -3557,6 +3607,10 @@ mod tests {
             "_ZNSs14_M_replace_auxEjjjc",
             "_ZN8WebTokenC2ERKS_",
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            "_ZN13GeometryGroup11getGeometryERKSs",
+            "_ZN13GeometryGroup14tryGetGeometryERKSs",
+            "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
+            "_ZN9UIControl18_resolvePostCreateEv",
         ] {
             assert!(describe_hle_import(name).is_some(), "{name}");
         }
@@ -4110,6 +4164,19 @@ mod tests {
         hle.dispatch("memcpy", &mut cpu, &mut memory).unwrap();
         assert_eq!(memory.load_bytes_for_test(0x1200, 4), b"abc\0");
 
+        cpu.set_reg(0, 0x1204);
+        cpu.set_reg(1, 0xee);
+        cpu.set_reg(2, 3);
+        hle.dispatch("memset", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load_bytes_for_test(0x1204, 3), &[0xee; 3]);
+
+        cpu.set_reg(0, 0x1208);
+        cpu.set_reg(1, 3);
+        cpu.set_reg(2, 0x44);
+        hle.dispatch("__aeabi_memset", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load_bytes_for_test(0x1208, 3), &[0x44; 3]);
+
         cpu.set_reg(0, 4);
         hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
         let old_ptr = cpu.reg(0);
@@ -4387,6 +4454,78 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cpu.reg(0), pair);
+        assert_eq!(cpu.pc(), 0x2004);
+    }
+
+    #[test]
+    fn dispatches_minecraft_geometry_group_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x5000).unwrap();
+
+        let out = 0x1200;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, out);
+        cpu.set_reg(1, 0x1300);
+        cpu.set_reg(2, 0x1400);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x2000);
+
+        hle.dispatch(
+            "_ZN13GeometryGroup11getGeometryERKSs",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        let geometry = memory.load32(out + 4).unwrap();
+        assert_eq!(memory.load32(out).unwrap(), 0);
+        assert_ne!(geometry, 0);
+        assert_eq!(memory.load32(geometry + 0x14).unwrap(), 0);
+        assert_eq!(cpu.reg(0), out);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, out + 8);
+        hle.dispatch(
+            "_ZN13GeometryGroup14tryGetGeometryERKSs",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(memory.load32(out + 12).unwrap(), geometry);
+        assert_eq!(cpu.pc(), 0x2004);
+    }
+
+    #[test]
+    fn dispatches_minecraft_ui_control_resolve_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0x1200);
+        hle.dispatch(
+            "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 0);
+        hle.dispatch("_ZN9UIControl18_resolvePostCreateEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
         assert_eq!(cpu.pc(), 0x2004);
     }
 
