@@ -154,6 +154,7 @@ pub struct Cpu {
     pub cpsr: Cpsr,
     thumb_bl_prefix: Option<u32>,
     thumb_it: Option<ThumbItState>,
+    thumb_in_it: bool,
     exclusive_reservation: Option<ExclusiveReservation>,
 }
 
@@ -175,6 +176,7 @@ impl Cpu {
             cpsr: Cpsr::default(),
             thumb_bl_prefix: None,
             thumb_it: None,
+            thumb_in_it: false,
             exclusive_reservation: None,
         }
     }
@@ -187,6 +189,7 @@ impl Cpu {
         self.cpsr.t = isa == Isa::Thumb;
         if isa == Isa::Arm {
             self.thumb_it = None;
+            self.thumb_in_it = false;
         }
     }
 
@@ -226,6 +229,7 @@ impl Cpu {
         self.cpsr.t = target & 1 != 0;
         if !self.cpsr.t {
             self.thumb_it = None;
+            self.thumb_in_it = false;
         }
         self.regs[15] = target & !1;
     }
@@ -238,21 +242,29 @@ impl Cpu {
                 let second = mem.load16(pc.wrapping_add(2))?;
                 self.regs[15] = pc.wrapping_add(4);
                 if let Some(cond) = self.consume_thumb_it_condition() {
+                    self.thumb_in_it = true;
                     if !condition_passed(cond, self.cpsr) {
+                        self.thumb_in_it = false;
                         return Ok(());
                     }
                 }
-                self.execute_thumb32(instr, second, pc, mem)
+                let result = self.execute_thumb32(instr, second, pc, mem);
+                self.thumb_in_it = false;
+                result
             } else {
                 self.regs[15] = pc.wrapping_add(2);
                 if (instr & 0xff00) != 0xbf00 {
                     if let Some(cond) = self.consume_thumb_it_condition() {
+                        self.thumb_in_it = true;
                         if !condition_passed(cond, self.cpsr) {
+                            self.thumb_in_it = false;
                             return Ok(());
                         }
                     }
                 }
-                self.execute_thumb(instr, pc, mem)
+                let result = self.execute_thumb(instr, pc, mem);
+                self.thumb_in_it = false;
+                result
             }
         } else {
             let instr = mem.load32(pc)?;
@@ -5534,7 +5546,9 @@ impl Cpu {
                 add_with_flags(self.regs[rs], rhs)
             };
             self.regs[rd] = value;
-            self.cpsr.set_nzcv(value, carry, overflow);
+            if self.thumb_sets_flags() {
+                self.cpsr.set_nzcv(value, carry, overflow);
+            }
             return Ok(());
         }
 
@@ -5549,7 +5563,9 @@ impl Cpu {
             _ => return Err(Trap::UndefinedThumb { pc, instr }),
         };
         self.regs[rd] = shifted.value;
-        self.cpsr.set_nzc(shifted.value, shifted.carry);
+        if self.thumb_sets_flags() {
+            self.cpsr.set_nzc(shifted.value, shifted.carry);
+        }
         Ok(())
     }
 
@@ -5560,7 +5576,9 @@ impl Cpu {
         match op {
             0 => {
                 self.regs[rd] = imm;
-                self.cpsr.set_nz(imm);
+                if self.thumb_sets_flags() {
+                    self.cpsr.set_nz(imm);
+                }
             }
             1 => {
                 let (value, carry, overflow) = sub_with_flags(self.regs[rd], imm);
@@ -5569,12 +5587,16 @@ impl Cpu {
             2 => {
                 let (value, carry, overflow) = add_with_flags(self.regs[rd], imm);
                 self.regs[rd] = value;
-                self.cpsr.set_nzcv(value, carry, overflow);
+                if self.thumb_sets_flags() {
+                    self.cpsr.set_nzcv(value, carry, overflow);
+                }
             }
             3 => {
                 let (value, carry, overflow) = sub_with_flags(self.regs[rd], imm);
                 self.regs[rd] = value;
-                self.cpsr.set_nzcv(value, carry, overflow);
+                if self.thumb_sets_flags() {
+                    self.cpsr.set_nzcv(value, carry, overflow);
+                }
             }
             _ => unreachable!(),
         }
@@ -5603,41 +5625,57 @@ impl Cpu {
             match op {
                 0x0 => {
                     self.regs[rd] &= rhs;
-                    self.cpsr.set_nz(self.regs[rd]);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nz(self.regs[rd]);
+                    }
                 }
                 0x1 => {
                     self.regs[rd] ^= rhs;
-                    self.cpsr.set_nz(self.regs[rd]);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nz(self.regs[rd]);
+                    }
                 }
                 0x2 => {
                     let s = shift_operand(lhs, Shift::Lsl, rhs & 0xff, self.cpsr.c, false);
                     self.regs[rd] = s.value;
-                    self.cpsr.set_nzc(s.value, s.carry);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzc(s.value, s.carry);
+                    }
                 }
                 0x3 => {
                     let s = shift_operand(lhs, Shift::Lsr, rhs & 0xff, self.cpsr.c, false);
                     self.regs[rd] = s.value;
-                    self.cpsr.set_nzc(s.value, s.carry);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzc(s.value, s.carry);
+                    }
                 }
                 0x4 => {
                     let s = shift_operand(lhs, Shift::Asr, rhs & 0xff, self.cpsr.c, false);
                     self.regs[rd] = s.value;
-                    self.cpsr.set_nzc(s.value, s.carry);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzc(s.value, s.carry);
+                    }
                 }
                 0x5 => {
                     let (value, carry, overflow) = add_with_carry(lhs, rhs, self.cpsr.c);
                     self.regs[rd] = value;
-                    self.cpsr.set_nzcv(value, carry, overflow);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzcv(value, carry, overflow);
+                    }
                 }
                 0x6 => {
                     let (value, carry, overflow) = add_with_carry(lhs, !rhs, self.cpsr.c);
                     self.regs[rd] = value;
-                    self.cpsr.set_nzcv(value, carry, overflow);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzcv(value, carry, overflow);
+                    }
                 }
                 0x7 => {
                     let s = shift_operand(lhs, Shift::Ror, rhs & 0xff, self.cpsr.c, false);
                     self.regs[rd] = s.value;
-                    self.cpsr.set_nzc(s.value, s.carry);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzc(s.value, s.carry);
+                    }
                 }
                 0x8 => {
                     let value = lhs & rhs;
@@ -5646,7 +5684,9 @@ impl Cpu {
                 0x9 => {
                     let (value, carry, overflow) = sub_with_flags(0, rhs);
                     self.regs[rd] = value;
-                    self.cpsr.set_nzcv(value, carry, overflow);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nzcv(value, carry, overflow);
+                    }
                 }
                 0xa => {
                     let (value, carry, overflow) = sub_with_flags(lhs, rhs);
@@ -5658,19 +5698,27 @@ impl Cpu {
                 }
                 0xc => {
                     self.regs[rd] |= rhs;
-                    self.cpsr.set_nz(self.regs[rd]);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nz(self.regs[rd]);
+                    }
                 }
                 0xd => {
                     self.regs[rd] = lhs.wrapping_mul(rhs);
-                    self.cpsr.set_nz(self.regs[rd]);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nz(self.regs[rd]);
+                    }
                 }
                 0xe => {
                     self.regs[rd] = lhs & !rhs;
-                    self.cpsr.set_nz(self.regs[rd]);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nz(self.regs[rd]);
+                    }
                 }
                 0xf => {
                     self.regs[rd] = !rhs;
-                    self.cpsr.set_nz(self.regs[rd]);
+                    if self.thumb_sets_flags() {
+                        self.cpsr.set_nz(self.regs[rd]);
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -6385,6 +6433,10 @@ impl Cpu {
             self.thumb_it = Some(state);
         }
         Some(cond)
+    }
+
+    fn thumb_sets_flags(&self) -> bool {
+        !self.thumb_in_it
     }
 
     fn store8<M: Memory>(&mut self, mem: &mut M, addr: u32, value: u8) -> Result<()> {
@@ -10289,6 +10341,39 @@ mod tests {
             cpu.step(&mut mem).unwrap();
         }
         assert_eq!(cpu.reg(1), 4);
+    }
+
+    #[test]
+    fn thumb_it_block_suppresses_implicit_flag_writes() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0x3000, 0x100);
+        mem.load_thumb_halfwords(
+            0x3000,
+            &[
+                0xbf1f, // itttt ne
+                0x9000, // str r0, [sp]
+                0x9001, // str r0, [sp, #4]
+                0x2500, // mov r5, #0 inside IT: no implicit flags
+                0x2109, // mov r1, #9 still sees the original NE condition
+            ],
+        )
+        .unwrap();
+
+        cpu.set_isa(Isa::Thumb);
+        cpu.set_pc(0x3000);
+        cpu.set_reg(0, 0x1234);
+        cpu.set_reg(13, 0x3040);
+        cpu.cpsr.z = false;
+
+        for _ in 0..5 {
+            cpu.step(&mut mem).unwrap();
+        }
+
+        assert_eq!(mem.load32(0x3040).unwrap(), 0x1234);
+        assert_eq!(mem.load32(0x3044).unwrap(), 0x1234);
+        assert_eq!(cpu.reg(5), 0);
+        assert_eq!(cpu.reg(1), 9);
+        assert!(!cpu.cpsr.z);
     }
 
     #[test]

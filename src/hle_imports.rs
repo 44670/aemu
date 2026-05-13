@@ -9,6 +9,24 @@ const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
 const FIRST_FAKE_FD: u32 = 3;
 const AT_HWCAP: u32 = 16;
 const AT_HWCAP2: u32 = 26;
+const SC_ARG_MAX: u32 = 0;
+const SC_CHILD_MAX: u32 = 1;
+const SC_CLK_TCK: u32 = 2;
+const SC_NGROUPS_MAX: u32 = 3;
+const SC_OPEN_MAX: u32 = 4;
+const SC_JOB_CONTROL: u32 = 5;
+const SC_SAVED_IDS: u32 = 6;
+const SC_VERSION: u32 = 7;
+const SC_PAGESIZE: u32 = 8;
+const SC_NPROCESSORS_CONF: u32 = 9;
+const SC_NPROCESSORS_ONLN: u32 = 10;
+const SC_PHYS_PAGES: u32 = 11;
+const SC_AVPHYS_PAGES: u32 = 12;
+const SC_THREAD_KEYS_MAX: u32 = 38;
+const SC_THREAD_STACK_MIN: u32 = 39;
+const SC_THREAD_THREADS_MAX: u32 = 40;
+const SC_THREADS: u32 = 42;
+const SC_THREAD_SAFE_FUNCTIONS: u32 = 49;
 const HWCAP_SWP: u32 = 1 << 0;
 const HWCAP_HALF: u32 = 1 << 1;
 const HWCAP_THUMB: u32 = 1 << 2;
@@ -157,6 +175,8 @@ pub struct HleRuntime {
     allocations: Vec<HleAllocation>,
     next_gl_name: u32,
     next_fd: u32,
+    next_pthread_key: u32,
+    pthread_specific: Vec<PthreadSpecific>,
     random_state: u32,
 }
 
@@ -164,6 +184,12 @@ pub struct HleRuntime {
 struct HleAllocation {
     ptr: u32,
     size: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PthreadSpecific {
+    key: u32,
+    value: u32,
 }
 
 impl HleRuntime {
@@ -175,6 +201,8 @@ impl HleRuntime {
             allocations: Vec::new(),
             next_gl_name: 1,
             next_fd: FIRST_FAKE_FD,
+            next_pthread_key: 0,
+            pthread_specific: Vec::new(),
             random_state: 0x1234_5678,
         }
     }
@@ -219,7 +247,19 @@ impl HleRuntime {
             "gettimeofday" => self.gettimeofday(cpu, memory),
             "clock_gettime" => self.clock_gettime(cpu, memory),
             "time" => self.time(cpu, memory),
+            "sysconf" => self.sysconf(cpu, memory),
             "pthread_self" => Ok(self.return32(cpu, 1)),
+            "pthread_equal" => Ok(self.return32(cpu, u32::from(cpu.reg(0) == cpu.reg(1)))),
+            "pthread_key_create" => self.pthread_key_create(cpu, memory),
+            "pthread_key_delete" => self.pthread_key_delete(cpu),
+            "pthread_getspecific" => Ok(self.return32(cpu, self.pthread_getspecific(cpu.reg(0)))),
+            "pthread_setspecific" => self.pthread_setspecific(cpu),
+            "ALooper_pollAll" | "ALooper_pollOnce" => self.alooper_poll(cpu, memory),
+            "ALooper_prepare" | "ALooper_forThread" | "ALooper_acquire" => {
+                Ok(self.return32(cpu, 1))
+            }
+            "ALooper_addFd" => Ok(self.return32(cpu, 1)),
+            "ALooper_removeFd" | "ALooper_wake" | "ALooper_release" => Ok(self.return32(cpu, 0)),
             "fopen" => self.fopen_call(cpu, memory),
             "fdopen" => self.fdopen_call(cpu, memory),
             "fclose" | "close" => Ok(self.return32(cpu, 0)),
@@ -264,6 +304,32 @@ impl HleRuntime {
             AT_HWCAP => ARMV7_NEON_HWCAP,
             AT_HWCAP2 => 0,
             _ => 0,
+        }
+    }
+
+    fn sysconf<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let value = match cpu.reg(0) {
+            SC_ARG_MAX => Some(131_072),
+            SC_CHILD_MAX => Some(999),
+            SC_CLK_TCK => Some(100),
+            SC_NGROUPS_MAX => Some(32),
+            SC_OPEN_MAX => Some(1024),
+            SC_JOB_CONTROL | SC_SAVED_IDS => Some(1),
+            SC_VERSION | SC_THREADS | SC_THREAD_SAFE_FUNCTIONS => Some(200_809),
+            SC_PAGESIZE => Some(4096),
+            SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => Some(1),
+            SC_PHYS_PAGES => Some(256 * 1024),
+            SC_AVPHYS_PAGES => Some(128 * 1024),
+            SC_THREAD_KEYS_MAX => Some(128),
+            SC_THREAD_STACK_MIN => Some(16 * 1024),
+            SC_THREAD_THREADS_MAX => Some(64),
+            _ => None,
+        };
+        if let Some(value) = value {
+            Ok(self.return32(cpu, value))
+        } else {
+            self.set_errno(memory, 22)?;
+            Ok(self.return32(cpu, u32::MAX))
         }
     }
 
@@ -601,6 +667,66 @@ impl HleRuntime {
             store32(memory, arg.wrapping_add(0x6c), 1)?;
         }
         Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_key_create<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let key_out = cpu.reg(0);
+        if key_out == 0 {
+            return Ok(self.return32(cpu, 22));
+        }
+        let key = self.next_pthread_key;
+        self.next_pthread_key = self.next_pthread_key.wrapping_add(1);
+        store32(memory, key_out, key)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_key_delete(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let key = cpu.reg(0);
+        self.pthread_specific.retain(|entry| entry.key != key);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_getspecific(&self, key: u32) -> u32 {
+        self.pthread_specific
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.value)
+            .unwrap_or(0)
+    }
+
+    fn pthread_setspecific(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let key = cpu.reg(0);
+        let value = cpu.reg(1);
+        if let Some(entry) = self
+            .pthread_specific
+            .iter_mut()
+            .find(|entry| entry.key == key)
+        {
+            entry.value = value;
+        } else if value != 0 {
+            self.pthread_specific.push(PthreadSpecific { key, value });
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn alooper_poll<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let out_fd = cpu.reg(1);
+        let out_events = cpu.reg(2);
+        let out_data = cpu.reg(3);
+        if out_fd != 0 {
+            store32(memory, out_fd, u32::MAX)?;
+        }
+        if out_events != 0 {
+            store32(memory, out_events, 0)?;
+        }
+        if out_data != 0 {
+            store32(memory, out_data, 0)?;
+        }
+        Ok(self.return32(cpu, u32::MAX))
     }
 
     fn read_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -1023,7 +1149,22 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "gettimeofday"
                 | "clock_gettime"
                 | "time"
+                | "sysconf"
                 | "pthread_self"
+                | "pthread_equal"
+                | "pthread_getspecific"
+                | "pthread_key_create"
+                | "pthread_key_delete"
+                | "pthread_setspecific"
+                | "ALooper_pollAll"
+                | "ALooper_pollOnce"
+                | "ALooper_prepare"
+                | "ALooper_forThread"
+                | "ALooper_acquire"
+                | "ALooper_addFd"
+                | "ALooper_removeFd"
+                | "ALooper_wake"
+                | "ALooper_release"
                 | "fopen"
                 | "fdopen"
                 | "fclose"
@@ -1672,6 +1813,118 @@ mod tests {
         cpu.set_reg(0, AT_HWCAP2);
         hle.dispatch("getauxval", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn dispatches_sysconf_for_android_runtime_values() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        assert_eq!(
+            describe_hle_import("sysconf").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+
+        cpu.set_reg(0, SC_PAGESIZE);
+        hle.dispatch("sysconf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4096);
+
+        cpu.set_reg(0, SC_NPROCESSORS_ONLN);
+        hle.dispatch("sysconf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, SC_CLK_TCK);
+        hle.dispatch("sysconf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 100);
+
+        cpu.set_reg(0, 0xffff);
+        hle.dispatch("sysconf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), 22);
+    }
+
+    #[test]
+    fn dispatches_pthread_identity_and_specific_data() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        assert_eq!(
+            describe_hle_import("pthread_equal").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0);
+        hle.dispatch("pthread_equal", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 2);
+        hle.dispatch("pthread_equal", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("pthread_key_create", &mut cpu, &mut memory)
+            .unwrap();
+        let key = memory.load32(0x1100).unwrap();
+        assert_eq!(key, 0);
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, key);
+        cpu.set_reg(1, 0xfeed_beef);
+        hle.dispatch("pthread_setspecific", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, key);
+        hle.dispatch("pthread_getspecific", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0xfeed_beef);
+
+        cpu.set_reg(0, key);
+        hle.dispatch("pthread_key_delete", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(0, key);
+        hle.dispatch("pthread_getspecific", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn dispatches_alooper_poll_as_no_event() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        assert_eq!(
+            describe_hle_import("ALooper_pollAll").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 0x1104);
+        cpu.set_reg(3, 0x1108);
+        hle.dispatch("ALooper_pollAll", &mut cpu, &mut memory)
+            .unwrap();
+
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1100).unwrap(), u32::MAX);
+        assert_eq!(memory.load32(0x1104).unwrap(), 0);
+        assert_eq!(memory.load32(0x1108).unwrap(), 0);
     }
 
     #[test]
