@@ -18,6 +18,9 @@ const GL_ARRAY_BUFFER: u32 = 0x8892;
 const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const GL_STATIC_DRAW: u32 = 0x88e4;
 const GL_TEXTURE0: u32 = 0x84c0;
+const GL_RGBA: u32 = 0x1908;
+const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_NO_ERROR: u32 = 0;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
 const GL_LINK_STATUS: u32 = 0x8b82;
 const GL_INFO_LOG_LENGTH: u32 = 0x8b84;
@@ -39,6 +42,14 @@ pub struct SdlGlesReplayStats {
     pub draw_elements: usize,
     pub skipped_client_attrib_draws: usize,
     pub skipped_missing_index_draws: usize,
+    pub readback_width: u32,
+    pub readback_height: u32,
+    pub readback_nonzero_rgb_pixels: usize,
+    pub readback_nonzero_alpha_pixels: usize,
+    pub gl_error_count: usize,
+    pub first_gl_error_event_index: usize,
+    pub first_gl_error_event_kind: Option<&'static str>,
+    pub first_gl_error_code: u32,
 }
 
 type GlClear = unsafe extern "C" fn(u32);
@@ -95,6 +106,8 @@ type GlDrawArrays = unsafe extern "C" fn(u32, i32, i32);
 type GlDrawElements = unsafe extern "C" fn(u32, i32, u32, *const c_void);
 type GlFlush = unsafe extern "C" fn();
 type GlPixelStorei = unsafe extern "C" fn(u32, i32);
+type GlReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut c_void);
+type GlGetError = unsafe extern "C" fn() -> u32;
 
 struct SdlGl {
     clear: GlClear,
@@ -151,6 +164,8 @@ struct SdlGl {
     draw_elements: GlDrawElements,
     flush: GlFlush,
     pixel_storei: GlPixelStorei,
+    read_pixels: GlReadPixels,
+    get_error: GlGetError,
 }
 
 #[derive(Debug, Default)]
@@ -283,6 +298,8 @@ impl SdlGl {
             draw_elements: load_required_gl(video, "glDrawElements")?,
             flush: load_required_gl(video, "glFlush")?,
             pixel_storei: load_required_gl(video, "glPixelStorei")?,
+            read_pixels: load_required_gl(video, "glReadPixels")?,
+            get_error: load_required_gl(video, "glGetError")?,
         })
     }
 }
@@ -646,7 +663,10 @@ impl Sdl2Host {
             GlesEvent::Flush => unsafe {
                 (self.gl.flush)();
             },
-            GlesEvent::SwapBuffers { .. } => self.swap_buffers()?,
+            GlesEvent::SwapBuffers { .. } => {
+                self.capture_framebuffer_readback()?;
+                self.swap_buffers()?;
+            }
         }
         Ok(())
     }
@@ -924,11 +944,10 @@ impl Sdl2Host {
             return -1;
         }
         let guest_location = guest_location as u32;
-        self.replay
-            .programs
-            .get(&self.replay.current_program)
-            .and_then(|program| program.uniforms.get(&guest_location).copied())
-            .unwrap_or(guest_location as i32)
+        let Some(program) = self.replay.programs.get(&self.replay.current_program) else {
+            return -1;
+        };
+        program.uniforms.get(&guest_location).copied().unwrap_or(-1)
     }
 
     fn lookup_host_uniform(&self, host_program: u32, guest_name: &str) -> Option<i32> {
@@ -942,6 +961,65 @@ impl Sdl2Host {
             }
         }
         None
+    }
+
+    fn capture_framebuffer_readback(&mut self) -> HostResult<()> {
+        let (width, height) = self.window.drawable_size();
+        let Some(byte_len) = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return Err(HostError::new(format!(
+                "framebuffer readback dimensions too large: {width}x{height}"
+            )));
+        };
+        let mut pixels = vec![0_u8; byte_len];
+        unsafe {
+            (self.gl.read_pixels)(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels.as_mut_ptr().cast(),
+            );
+        }
+        let mut nonzero_rgb = 0usize;
+        let mut nonzero_alpha = 0usize;
+        for pixel in pixels.chunks_exact(4) {
+            if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                nonzero_rgb += 1;
+            }
+            if pixel[3] != 0 {
+                nonzero_alpha += 1;
+            }
+        }
+        self.replay.stats.readback_width = width;
+        self.replay.stats.readback_height = height;
+        self.replay.stats.readback_nonzero_rgb_pixels = nonzero_rgb;
+        self.replay.stats.readback_nonzero_alpha_pixels = nonzero_alpha;
+        Ok(())
+    }
+
+    fn record_gl_errors(&mut self, event_index: usize, event_kind: &'static str) {
+        loop {
+            let error = unsafe { (self.gl.get_error)() };
+            if error == GL_NO_ERROR {
+                break;
+            }
+            if self.replay.stats.gl_error_count == 0 {
+                self.replay.stats.first_gl_error_event_index = event_index;
+                self.replay.stats.first_gl_error_event_kind = Some(event_kind);
+                self.replay.stats.first_gl_error_code = error;
+            }
+            self.replay.stats.gl_error_count += 1;
+        }
     }
 
     fn shader_info_log(&self, shader: u32) -> String {
@@ -1146,8 +1224,10 @@ impl HostBackend for Sdl2Host {
             (self.gl.active_texture)(GL_TEXTURE0);
             (self.gl.pixel_storei)(GL_UNPACK_ALIGNMENT, 1);
         }
-        for event in events {
+        self.record_gl_errors(usize::MAX, "replay-init");
+        for (index, event) in events.iter().enumerate() {
             self.replay_gles_event(event)?;
+            self.record_gl_errors(index, event.kind());
         }
         Ok(())
     }

@@ -679,6 +679,25 @@ fn replay_sdl2_gles_events(
         stats.skipped_client_attrib_draws,
         stats.skipped_missing_index_draws
     );
+    println!(
+        "sdl2: readback {}x{} nonzero_rgb_pixels={} nonzero_alpha_pixels={}",
+        stats.readback_width,
+        stats.readback_height,
+        stats.readback_nonzero_rgb_pixels,
+        stats.readback_nonzero_alpha_pixels
+    );
+    println!(
+        "sdl2: gl_errors count={} first_event={} first_kind={} first_code=0x{:04x}",
+        stats.gl_error_count,
+        stats.first_gl_error_event_index,
+        stats.first_gl_error_event_kind.unwrap_or("none"),
+        stats.first_gl_error_code
+    );
+    if stats.gl_error_count > 0 {
+        if let Some(event) = events.get(stats.first_gl_error_event_index) {
+            println!("sdl2: first_gl_error_event {}", gles_event_brief(event));
+        }
+    }
 
     let deadline = Instant::now() + Duration::from_millis(hold_ms);
     while Instant::now() < deadline {
@@ -699,6 +718,76 @@ fn replay_sdl2_gles_events(
         thread::sleep(Duration::from_millis(16));
     }
     Ok(())
+}
+
+#[cfg(feature = "sdl2")]
+fn gles_event_brief(event: &aemu::hle_imports::GlesEvent) -> String {
+    use aemu::hle_imports::GlesEvent;
+
+    match event {
+        GlesEvent::BufferData {
+            target,
+            size,
+            usage,
+            payload,
+            ..
+        } => format!(
+            "BufferData target=0x{target:04x} size={size} usage=0x{usage:04x} payload_len={}",
+            payload.as_ref().map_or(0, Vec::len)
+        ),
+        GlesEvent::BufferSubData {
+            target,
+            offset,
+            size,
+            payload,
+            ..
+        } => format!(
+            "BufferSubData target=0x{target:04x} offset={offset} size={size} payload_len={}",
+            payload.as_ref().map_or(0, Vec::len)
+        ),
+        GlesEvent::TexImage2D {
+            target,
+            level,
+            internal_format,
+            width,
+            height,
+            format,
+            ty,
+            payload,
+            ..
+        } => format!(
+            "TexImage2D target=0x{target:04x} level={level} internal_format=0x{internal_format:04x} size={width}x{height} format=0x{format:04x} type=0x{ty:04x} payload_len={}",
+            payload.as_ref().map_or(0, Vec::len)
+        ),
+        GlesEvent::TexSubImage2D {
+            target,
+            level,
+            xoffset,
+            yoffset,
+            width,
+            height,
+            format,
+            ty,
+            payload,
+            ..
+        } => format!(
+            "TexSubImage2D target=0x{target:04x} level={level} offset={xoffset},{yoffset} size={width}x{height} format=0x{format:04x} type=0x{ty:04x} payload_len={}",
+            payload.as_ref().map_or(0, Vec::len)
+        ),
+        GlesEvent::DrawElements {
+            mode,
+            count,
+            ty,
+            indices,
+            index_payload,
+            client_attribs,
+        } => format!(
+            "DrawElements mode=0x{mode:04x} count={count} type=0x{ty:04x} indices=0x{indices:08x} index_payload_len={} client_attribs={}",
+            index_payload.as_ref().map_or(0, Vec::len),
+            client_attribs.len()
+        ),
+        _ => format!("{event:?}"),
+    }
 }
 
 #[cfg(not(feature = "sdl2"))]

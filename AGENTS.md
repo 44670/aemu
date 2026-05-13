@@ -192,8 +192,10 @@ cargo run --features sdl2 -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCra
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.
 `run-apk-native --sdl2` implies `--until-swap` for now and replays the recorded
-clear/viewport/swap GLES event subset into the SDL2 context after the first
-guest `eglSwapBuffers`.
+first-swap GLES event stream into the SDL2 context after the first guest
+`eglSwapBuffers`. For the local MCPE ARMv7 probe this includes shader/program
+replay, payload-backed textures/buffers/uniforms, client-side vertex attribute
+staging, and all captured indexed draw submissions.
 Browser/WebGL scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains the
 default target for GLES2 guest rendering.
 

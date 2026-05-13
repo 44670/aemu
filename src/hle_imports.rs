@@ -3216,7 +3216,7 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBufferData" => {
-                let usage = self.stack_arg(cpu, memory, 4)?;
+                let usage = cpu.reg(3);
                 let payload = gles_u32_len(cpu.reg(1))
                     .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
                 self.set_guest_buffer_data(cpu.reg(0), cpu.reg(1), payload.as_deref());
@@ -7398,11 +7398,12 @@ mod tests {
 
         let buffer_payload: Vec<u8> = (64..72).collect();
         memory.load_bytes(0x2200, &buffer_payload).unwrap();
-        memory.store32(0x1800, 0x88e4).unwrap();
+        memory.store32(0x1800, 0x0004).unwrap();
         cpu.set_reg(14, 0x2018);
         cpu.set_reg(0, 0x8892);
         cpu.set_reg(1, 8);
         cpu.set_reg(2, 0x2200);
+        cpu.set_reg(3, 0x88e4);
         hle.dispatch("glBufferData", &mut cpu, &mut memory).unwrap();
 
         let matrix_payload: Vec<u8> = (96..160).collect();

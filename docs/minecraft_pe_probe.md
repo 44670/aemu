@@ -164,9 +164,10 @@ ready byte is still unset. The bounded first-frame probe now reaches
 captured GLES events before the first swap, including 744 `glDrawElements`
 calls and 3,811,776 copied payload bytes. The SDL2 replay submits all 744
 captured indexed draws with zero skipped client-attribute or missing-index
-draws. The run does not stop on an undefined NEON opcode. An older APK with
-`lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
-Minecraft PE path.
+draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and
+reports zero host GL errors. The run does not stop on an undefined NEON opcode.
+An older APK with `lib/armeabi/libminecraftpe.so` is still required to validate
+the ARMv6 Minecraft PE path.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:

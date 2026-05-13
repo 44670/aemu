@@ -31,7 +31,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
 | Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits successfully after `native activity reached eglSwapBuffers at step 254925219`. | Satisfied for local ARMv7 research APK |
-| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` replays the first MCPE frame into an SDL2 GLES2 context and submits all 744 captured indexed draws. WebGL replay is not wired yet. | SDL2 first-frame replay satisfied; WebGL pending |
+| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` replays the first MCPE frame into an SDL2 GLES2 context, submits all 744 captured indexed draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and reports zero host GL errors. WebGL replay is not wired yet. | SDL2 first-frame visual replay satisfied; WebGL pending |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
 | Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked for ARMv6 |
@@ -148,10 +148,11 @@ exit-0 first-frame probe instead of treating the endless game loop's step cap as
 the only terminator.
 
 The current blocker is no longer instruction decode, import resolution, EGL
-startup, shader reflection, resource readiness, reaching draw/swap calls, or
-submitting the first captured MCPE draw stream through SDL2. The remaining
-graphics gap is a browser/WebGL-facing replay backend and visual validation
-beyond first-swap draw submission.
+startup, shader reflection, resource readiness, reaching draw/swap calls,
+submitting the first captured MCPE draw stream through SDL2, or producing
+nonblack first-swap host pixels. The remaining graphics gap is a
+browser/WebGL-facing replay backend and visual validation beyond first-swap
+SDL2 readback.
 
 The GLES HLE now records frame-relevant calls into a bounded `GlesEvent` queue:
 shader/program creation and linking, active/bound textures, texture upload
@@ -172,7 +173,9 @@ GLES events: 157 `CreateProgram`, 144 `ShaderSource`, 157 `LinkProgram`, 744
 `VertexAttribPointer`, 719 `Uniform1i`, 752 uniform-vector updates, and one
 swap. The same probe records 3,811,776 bytes of GLES payload data. The SDL2
 replay path submits all 744 captured indexed draws with zero skipped client
-attribute or index draws.
+attribute or index draws. Framebuffer readback after replay reports
+`854x480 nonzero_rgb_pixels=409920 nonzero_alpha_pixels=409920` and
+`gl_errors count=0`.
 
 ## Latest Verification
 
@@ -194,9 +197,9 @@ attribute or index draws.
 - `cargo check --features sdl2`
 - `cargo build --release`
 - `cargo build --release --features sdl2`
-- `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap --gles-summary --sdl2 --sdl2-hold-ms 250` exits 0 after reaching `eglSwapBuffers` at step `254925219`, summarizing 21,674 captured GLES events with 3,811,776 copied payload bytes, and reporting `sdl2: submitted draws arrays=0 elements=744 skipped_client_attrib=0 skipped_missing_indices=0`
+- `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap --gles-summary --sdl2 --sdl2-hold-ms 250` exits 0 after reaching `eglSwapBuffers` at step `254925219`, summarizing 21,674 captured GLES events with 3,811,776 copied payload bytes, reporting `sdl2: submitted draws arrays=0 elements=744 skipped_client_attrib=0 skipped_missing_indices=0`, `sdl2: readback 854x480 nonzero_rgb_pixels=409920 nonzero_alpha_pixels=409920`, and `sdl2: gl_errors count=0`
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
-  reports 579 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
+  reports 578 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
 
 ## Required Next Input
 
