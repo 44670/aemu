@@ -473,7 +473,9 @@ fn collect_hle_symbols(
         }
         for symbol in &object.defined_symbols {
             if let Some(descriptor) = describe_hle_import(&symbol.name) {
-                if descriptor.kind == HleSymbolKind::Target {
+                if descriptor.kind == HleSymbolKind::Target
+                    || is_defined_hle_override_symbol(&symbol.name)
+                {
                     by_name.entry(symbol.name.clone()).or_insert(descriptor);
                 }
             }
@@ -504,6 +506,10 @@ fn collect_hle_symbols(
         byte_off = end;
     }
     Ok(out)
+}
+
+fn is_defined_hle_override_symbol(name: &str) -> bool {
+    matches!(name, "__divsi3" | "__udivsi3" | "__modsi3" | "__umodsi3")
 }
 
 fn write_hle_symbols(
@@ -790,6 +796,52 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn hle_symbols_override_defined_compiler_integer_helpers() {
+        let helper_name = "__umodsi3";
+        let game = test_so(
+            &[],
+            &[],
+            &[(helper_name, 0x1200)],
+            &[TestRelocation {
+                offset: 0x700,
+                symbol: Some(helper_name),
+                kind: 21,
+                addend: 0,
+            }],
+        );
+        let apk = zip_with_files(&[("lib/armeabi/libgame.so", game)]);
+
+        let mut report = load_apk_native_libraries_bytes(
+            PathBuf::from("game.apk"),
+            &apk,
+            &NativeLoadConfig::default(),
+        )
+        .unwrap();
+
+        let native_addr = report
+            .global_symbols
+            .iter()
+            .find(|symbol| symbol.name == helper_name)
+            .unwrap()
+            .address;
+        let hle_addr = report
+            .hle_symbols
+            .iter()
+            .find(|symbol| symbol.name == helper_name)
+            .unwrap()
+            .address;
+        assert_ne!(hle_addr, native_addr);
+
+        let game_bias = report
+            .objects
+            .iter()
+            .find(|object| object.library_name == "libgame.so")
+            .unwrap()
+            .load_bias;
+        assert_eq!(report.memory.load32(game_bias + 0x700).unwrap(), hle_addr);
     }
 
     #[test]

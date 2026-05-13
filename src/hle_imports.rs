@@ -417,6 +417,10 @@ impl HleRuntime {
             "__aeabi_uidiv" => self.aeabi_uidiv(cpu),
             "__aeabi_idivmod" => self.aeabi_idivmod(cpu),
             "__aeabi_uidivmod" => self.aeabi_uidivmod(cpu),
+            "__divsi3" => self.aeabi_idiv(cpu),
+            "__udivsi3" => self.aeabi_uidiv(cpu),
+            "__modsi3" => self.modsi3(cpu),
+            "__umodsi3" => self.umodsi3(cpu),
             name if descriptor.kind == HleSymbolKind::Libm => self.libm(name, cpu),
             "getauxval" => Ok(self.return32(cpu, self.getauxval(cpu.reg(0)))),
             "gettimeofday" => self.gettimeofday(cpu, memory),
@@ -928,6 +932,20 @@ impl HleRuntime {
         };
         cpu.set_reg(1, r);
         Ok(self.return32(cpu, q))
+    }
+
+    fn modsi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = cpu.reg(0) as i32;
+        let rhs = cpu.reg(1) as i32;
+        let result = if rhs == 0 { 0 } else { lhs.wrapping_rem(rhs) };
+        Ok(self.return32(cpu, result as u32))
+    }
+
+    fn umodsi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = cpu.reg(0);
+        let rhs = cpu.reg(1);
+        let result = if rhs == 0 { 0 } else { lhs % rhs };
+        Ok(self.return32(cpu, result))
     }
 
     fn gettimeofday<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2665,6 +2683,10 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "__aeabi_uidiv"
                 | "__aeabi_idivmod"
                 | "__aeabi_uidivmod"
+                | "__divsi3"
+                | "__udivsi3"
+                | "__modsi3"
+                | "__umodsi3"
                 | "getauxval"
                 | "gettimeofday"
                 | "clock_gettime"
@@ -2810,15 +2832,19 @@ fn is_libc_symbol(name: &str) -> bool {
     matches!(
         name,
         "__assert2"
+            | "__divsi3"
             | "__errno"
             | "__gnu_Unwind_Find_exidx"
             | "__google_potentially_blocking_region_begin"
             | "__google_potentially_blocking_region_end"
+            | "__modsi3"
             | "__pthread_cleanup_pop"
             | "__pthread_cleanup_push"
             | "__sF"
             | "__stack_chk_fail"
             | "__stack_chk_guard"
+            | "__udivsi3"
+            | "__umodsi3"
             | "_ctype_"
             | "_tolower_tab_"
             | "_toupper_tab_"
@@ -4374,6 +4400,36 @@ mod tests {
         cpu.set_reg(0, 8);
         hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), new_ptr);
+    }
+
+    #[test]
+    fn dispatches_compiler_integer_runtime_helpers() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        cpu.set_reg(0, 43);
+        cpu.set_reg(1, 11);
+        hle.dispatch("__umodsi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 10);
+
+        cpu.set_reg(0, 43);
+        cpu.set_reg(1, 11);
+        hle.dispatch("__udivsi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 3);
+
+        cpu.set_reg(0, (-43i32) as u32);
+        cpu.set_reg(1, 11);
+        hle.dispatch("__modsi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0) as i32, -10);
+
+        cpu.set_reg(0, (-43i32) as u32);
+        cpu.set_reg(1, 11);
+        hle.dispatch("__divsi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0) as i32, -3);
     }
 
     #[test]
