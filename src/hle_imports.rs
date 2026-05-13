@@ -307,6 +307,8 @@ pub struct HleRuntime {
     next_fd: u32,
     files: Vec<FakeFile>,
     virtual_files: Vec<VirtualFile>,
+    current_pthread: u32,
+    created_pthreads: VecDeque<CreatedPthread>,
     next_pthread_key: u32,
     pthread_specific: Vec<PthreadSpecific>,
     native_activity: Option<u32>,
@@ -315,6 +317,13 @@ pub struct HleRuntime {
     clock_ns: u64,
     fake_geometry: Option<u32>,
     fake_texture_pair: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreatedPthread {
+    pub id: u32,
+    pub start: u32,
+    pub arg: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -376,6 +385,7 @@ struct VirtualFile {
 
 #[derive(Debug, Clone, Copy)]
 struct PthreadSpecific {
+    thread: u32,
     key: u32,
     value: u32,
 }
@@ -404,6 +414,8 @@ impl HleRuntime {
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
             virtual_files: Vec::new(),
+            current_pthread: 1,
+            created_pthreads: VecDeque::new(),
             next_pthread_key: 0,
             pthread_specific: Vec::new(),
             native_activity: None,
@@ -417,6 +429,22 @@ impl HleRuntime {
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
+    }
+
+    pub(crate) fn has_created_pthreads(&self) -> bool {
+        !self.created_pthreads.is_empty()
+    }
+
+    pub(crate) fn take_created_pthreads(&mut self) -> Vec<CreatedPthread> {
+        self.created_pthreads.drain(..).collect()
+    }
+
+    pub(crate) fn current_pthread(&self) -> u32 {
+        self.current_pthread
+    }
+
+    pub(crate) fn set_current_pthread(&mut self, thread: u32) {
+        self.current_pthread = thread;
     }
 
     pub fn set_native_activity(&mut self, activity: u32) {
@@ -490,7 +518,7 @@ impl HleRuntime {
             "clock_gettime" => self.clock_gettime(cpu, memory),
             "time" => self.time(cpu, memory),
             "sysconf" => self.sysconf(cpu, memory),
-            "pthread_self" => Ok(self.return32(cpu, 1)),
+            "pthread_self" => Ok(self.return32(cpu, self.current_pthread)),
             "pthread_equal" => Ok(self.return32(cpu, u32::from(cpu.reg(0) == cpu.reg(1)))),
             "pthread_key_create" => self.pthread_key_create(cpu, memory),
             "pthread_key_delete" => self.pthread_key_delete(cpu),
@@ -1231,9 +1259,11 @@ impl HleRuntime {
 
     fn pthread_create<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let thread_out = cpu.reg(0);
+        let start = cpu.reg(2);
         let arg = cpu.reg(3);
+        let id = self.alloc_fd();
         if thread_out != 0 {
-            store32(memory, thread_out, self.alloc_fd())?;
+            store32(memory, thread_out, id)?;
         }
 
         // Android's native_app_glue waits for the created thread to mark
@@ -1242,6 +1272,9 @@ impl HleRuntime {
         // structs that point back to the registered ANativeActivity.
         if arg != 0 && self.is_native_app_thread_arg(memory, arg) {
             store32(memory, arg.wrapping_add(0x6c), 1)?;
+        } else if start != 0 {
+            self.created_pthreads
+                .push_back(CreatedPthread { id, start, arg });
         }
         Ok(self.return32(cpu, 0))
     }
@@ -1277,7 +1310,7 @@ impl HleRuntime {
     fn pthread_getspecific(&self, key: u32) -> u32 {
         self.pthread_specific
             .iter()
-            .find(|entry| entry.key == key)
+            .find(|entry| entry.thread == self.current_pthread && entry.key == key)
             .map(|entry| entry.value)
             .unwrap_or(0)
     }
@@ -1288,11 +1321,15 @@ impl HleRuntime {
         if let Some(entry) = self
             .pthread_specific
             .iter_mut()
-            .find(|entry| entry.key == key)
+            .find(|entry| entry.thread == self.current_pthread && entry.key == key)
         {
             entry.value = value;
         } else if value != 0 {
-            self.pthread_specific.push(PthreadSpecific { key, value });
+            self.pthread_specific.push(PthreadSpecific {
+                thread: self.current_pthread,
+                key,
+                value,
+            });
         }
         Ok(self.return32(cpu, 0))
     }
@@ -5504,6 +5541,12 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
 
+        hle.dispatch("pthread_self", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        hle.set_current_pthread(7);
+        hle.dispatch("pthread_self", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 7);
+
         cpu.set_reg(0, 0x1100);
         hle.dispatch("pthread_key_create", &mut cpu, &mut memory)
             .unwrap();
@@ -5521,6 +5564,13 @@ mod tests {
         hle.dispatch("pthread_getspecific", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 0xfeed_beef);
+
+        hle.set_current_pthread(1);
+        cpu.set_reg(0, key);
+        hle.dispatch("pthread_getspecific", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        hle.set_current_pthread(7);
 
         cpu.set_reg(0, key);
         hle.dispatch("pthread_key_delete", &mut cpu, &mut memory)
@@ -5544,23 +5594,35 @@ mod tests {
         let app = 0x1200;
         memory.store32(app + 0x0c, 0x1100).unwrap();
         cpu.set_reg(0, 0x1300);
+        cpu.set_reg(2, 0x2201);
         cpu.set_reg(3, app);
         hle.dispatch("pthread_create", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
         assert_ne!(memory.load32(0x1300).unwrap(), 0);
         assert_eq!(memory.load32(app + 0x6c).unwrap(), 1);
+        assert!(hle.take_created_pthreads().is_empty());
 
         let worker_arg = 0x1400;
         memory.store32(worker_arg + 0x0c, 0xfeed_beef).unwrap();
         memory.store32(worker_arg + 0x6c, 0x55aa_aa55).unwrap();
         cpu.set_reg(0, 0x1310);
+        cpu.set_reg(2, 0x3301);
         cpu.set_reg(3, worker_arg);
         hle.dispatch("pthread_create", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
-        assert_ne!(memory.load32(0x1310).unwrap(), 0);
+        let worker_id = memory.load32(0x1310).unwrap();
+        assert_ne!(worker_id, 0);
         assert_eq!(memory.load32(worker_arg + 0x6c).unwrap(), 0x55aa_aa55);
+        assert_eq!(
+            hle.take_created_pthreads(),
+            vec![CreatedPthread {
+                id: worker_id,
+                start: 0x3301,
+                arg: worker_arg,
+            }]
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::armv6::{Cpu, Isa, Memory, Trap};
 use crate::guest_memory::MappedMemoryError;
-use crate::hle_imports::{HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
+use crate::hle_imports::{CreatedPthread, HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
 use crate::native_loader::NativeLinkReport;
 
 pub const DEFAULT_STACK_BASE: u32 = 0x6c00_0000;
@@ -15,7 +15,24 @@ pub const DEFAULT_HEAP_SIZE: usize = 0x0800_0000;
 const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
+const THREAD_RETURN_SENTINEL: u32 = 0xffff_fff8;
 const RUN_FUNCTION_TRACE_LEN: usize = 24;
+const GUEST_THREAD_STACK_SIZE: u32 = 0x0004_0000;
+const GUEST_THREAD_STACK_ALIGN: u32 = 8;
+const GUEST_THREAD_SLICE_STEPS: usize = 4096;
+const GUEST_THREAD_SERVICE_INTERVAL: usize = 50_000;
+const GUEST_THREAD_SERVICE_HLE: &[&str] = &[
+    "pthread_create",
+    "pthread_cond_signal",
+    "pthread_cond_broadcast",
+    "pthread_cond_wait",
+    "pthread_cond_timedwait",
+    "sched_yield",
+    "sem_post",
+    "sem_wait",
+    "usleep",
+    "nanosleep",
+];
 const ANDROID_APP_CONFIG_OFFSET: u32 = 0x10;
 const ANDROID_APP_LOOPER_OFFSET: u32 = 0x1c;
 const ANDROID_APP_INPUT_QUEUE_OFFSET: u32 = 0x20;
@@ -61,6 +78,10 @@ pub struct NativeRuntime {
     runtime_hle_traps: Vec<RuntimeHleTrap>,
     jni_methods: Vec<JniMethod>,
     jni_java_vm: u32,
+    stack_base: u32,
+    stack_size: u32,
+    next_thread_stack_top: u32,
+    guest_threads: VecDeque<GuestThread>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +176,12 @@ struct JniMethod {
     name: String,
     sig: String,
     is_static: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GuestThread {
+    id: u32,
+    cpu: Cpu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +303,10 @@ impl NativeRuntime {
             runtime_hle_traps,
             jni_methods: Vec::new(),
             jni_java_vm: 0,
+            stack_base: config.stack_base,
+            stack_size,
+            next_thread_stack_top: config.stack_base,
+            guest_threads: VecDeque::new(),
         })
     }
 
@@ -744,6 +775,9 @@ impl NativeRuntime {
                     name,
                     address: hle_address,
                 }) => {
+                    let should_service_threads = self.hle.has_created_pthreads()
+                        || (!self.guest_threads.is_empty()
+                            && GUEST_THREAD_SERVICE_HLE.contains(&name.as_str()));
                     if trace_hle
                         .as_ref()
                         .is_some_and(|filter| filter.matches(&name))
@@ -762,6 +796,9 @@ impl NativeRuntime {
                             self.cpu.reg(3),
                         );
                     }
+                    if should_service_threads {
+                        self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+                    }
                 }
                 Err(source) => {
                     return Err(NativeRuntimeError::Traced {
@@ -770,11 +807,184 @@ impl NativeRuntime {
                     });
                 }
             }
+            if !self.guest_threads.is_empty()
+                && step_idx != 0
+                && step_idx % GUEST_THREAD_SERVICE_INTERVAL == 0
+            {
+                self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+            }
         }
         Err(NativeRuntimeError::Traced {
             source: Box::new(NativeRuntimeError::Cpu(Trap::StepLimit)),
             tail: tail.into_iter().collect(),
         })
+    }
+
+    fn service_guest_threads(&mut self, slice_steps: usize) -> Result<(), NativeRuntimeError> {
+        self.drain_created_pthreads()?;
+        let runnable = self.guest_threads.len();
+        for _ in 0..runnable {
+            let Some(mut thread) = self.guest_threads.pop_front() else {
+                break;
+            };
+            let done = self.run_guest_thread_slice(&mut thread, slice_steps)?;
+            self.drain_created_pthreads()?;
+            if !done {
+                self.guest_threads.push_back(thread);
+            }
+        }
+        Ok(())
+    }
+
+    fn drain_created_pthreads(&mut self) -> Result<(), NativeRuntimeError> {
+        for created in self.hle.take_created_pthreads() {
+            if !self.should_run_created_pthread(created) {
+                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                    eprintln!(
+                        "THREAD skip id={} start={:#010x} arg={:#010x} library={}",
+                        created.id,
+                        created.start,
+                        created.arg,
+                        self.library_name_for_address(created.start & !1)
+                            .unwrap_or("<unknown>"),
+                    );
+                }
+                continue;
+            }
+            let thread = self.create_guest_thread(created)?;
+            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                let entry = self.pthread_callable_entry(created.arg).unwrap_or(0);
+                eprintln!(
+                    "THREAD create id={} start={:#010x} arg={:#010x} entry={:#010x} entry_lib={} sp={:#010x}",
+                    thread.id,
+                    thread.cpu.pc() | u32::from(thread.cpu.isa() == Isa::Thumb),
+                    thread.cpu.reg(0),
+                    entry,
+                    self.library_name_for_address(entry & !1)
+                        .unwrap_or("<unknown>"),
+                    thread.cpu.reg(13),
+                );
+            }
+            self.guest_threads.push_back(thread);
+        }
+        Ok(())
+    }
+
+    fn pthread_callable_entry(&mut self, arg: u32) -> Option<u32> {
+        let storage = self.link.memory.load32(arg).ok()?;
+        let vtable = self.link.memory.load32(storage).ok()?;
+        self.link.memory.load32(vtable.wrapping_add(8)).ok()
+    }
+
+    fn should_run_created_pthread(&self, created: CreatedPthread) -> bool {
+        if std::env::var_os("AEMU_RUN_ALL_PTHREADS").is_some() {
+            return true;
+        }
+        self.library_name_for_address(created.start & !1)
+            .map_or(true, |library| library == "libgnustl_shared.so")
+    }
+
+    fn library_name_for_address(&self, address: u32) -> Option<&str> {
+        self.link.objects.iter().find_map(|object| {
+            let end = object.memory_base.checked_add(object.memory_size)?;
+            (address >= object.memory_base && address < end).then_some(object.library_name.as_str())
+        })
+    }
+
+    fn create_guest_thread(
+        &mut self,
+        created: CreatedPthread,
+    ) -> Result<GuestThread, NativeRuntimeError> {
+        let stack_top = self.allocate_guest_thread_stack()?;
+        let mut cpu = Cpu::new();
+        cpu.cp15_tpidrurw = self.cpu.cp15_tpidrurw;
+        cpu.cp15_tpidruro = self.cpu.cp15_tpidruro;
+        cpu.fpscr = self.cpu.fpscr;
+        cpu.set_reg(0, created.arg);
+        cpu.set_reg(13, stack_top);
+        cpu.set_reg(14, THREAD_RETURN_SENTINEL);
+        cpu.branch_exchange(created.start);
+        Ok(GuestThread {
+            id: created.id,
+            cpu,
+        })
+    }
+
+    fn allocate_guest_thread_stack(&mut self) -> Result<u32, NativeRuntimeError> {
+        let stack_end = self
+            .stack_base
+            .checked_add(self.stack_size)
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        let next_top = self
+            .next_thread_stack_top
+            .checked_add(GUEST_THREAD_STACK_SIZE)
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        let main_guard = STACK_ENTRY_HEADROOM_MAX.saturating_add(GUEST_THREAD_STACK_SIZE / 4);
+        if next_top > stack_end.saturating_sub(main_guard) {
+            return Err(NativeRuntimeError::Memory(format!(
+                "guest thread stack exhausted in {:#010x}+{:#x}",
+                self.stack_base, self.stack_size
+            )));
+        }
+        self.next_thread_stack_top = next_top;
+        Ok(next_top & !(GUEST_THREAD_STACK_ALIGN - 1))
+    }
+
+    fn run_guest_thread_slice(
+        &mut self,
+        thread: &mut GuestThread,
+        max_steps: usize,
+    ) -> Result<bool, NativeRuntimeError> {
+        let main_cpu = std::mem::replace(&mut self.cpu, thread.cpu.clone());
+        let previous_thread = self.hle.current_pthread();
+        self.hle.set_current_pthread(thread.id);
+        let mut result = Ok(false);
+        for _ in 0..max_steps {
+            if self.cpu.pc() == THREAD_RETURN_SENTINEL {
+                result = Ok(true);
+                break;
+            }
+            if let Err(err) = self.step() {
+                if matches!(
+                    err,
+                    NativeRuntimeError::Hle {
+                        source: HleError::Abort(_),
+                        ..
+                    }
+                ) {
+                    if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                        eprintln!(
+                            "THREAD abort id={} pc={:#010x} {:?} r0={:#010x}",
+                            thread.id,
+                            self.cpu.pc(),
+                            self.cpu.isa(),
+                            self.cpu.reg(0),
+                        );
+                    }
+                    result = Ok(true);
+                } else {
+                    result = Err(err);
+                }
+                break;
+            }
+        }
+        if matches!(result, Ok(false)) && self.cpu.pc() == THREAD_RETURN_SENTINEL {
+            result = Ok(true);
+        }
+        thread.cpu = self.cpu.clone();
+        self.cpu = main_cpu;
+        self.hle.set_current_pthread(previous_thread);
+        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+            eprintln!(
+                "THREAD slice id={} done={} pc={:#010x} {:?} r0={:#010x}",
+                thread.id,
+                result.as_ref().is_ok_and(|done| *done),
+                thread.cpu.pc(),
+                thread.cpu.isa(),
+                thread.cpu.reg(0),
+            );
+        }
+        result
     }
 
     pub fn run_constructors(
@@ -1509,6 +1719,54 @@ mod tests {
     }
 
     #[test]
+    fn services_pthread_created_guest_thread_entry() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x4000_0000, 0x1000).unwrap();
+        // Thumb: movs r1,#42; str r1,[r0]; bx lr.
+        memory.store16(0x4000_0100, 0x212a).unwrap();
+        memory.store16(0x4000_0102, 0x6001).unwrap();
+        memory.store16(0x4000_0104, 0x4770).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_reg(14, 0);
+        runtime.cpu.set_reg(0, 0x4000_0300);
+        runtime.cpu.set_reg(2, 0x4000_0101);
+        runtime.cpu.set_reg(3, 0x4000_0200);
+
+        runtime
+            .hle
+            .dispatch("pthread_create", &mut runtime.cpu, &mut runtime.link.memory)
+            .unwrap();
+        assert_eq!(runtime.link.memory.load32(0x4000_0200).unwrap(), 0);
+
+        runtime.service_guest_threads(8).unwrap();
+
+        assert_eq!(runtime.link.memory.load32(0x4000_0200).unwrap(), 42);
+        assert!(runtime.guest_threads.is_empty());
+        assert_eq!(runtime.cpu.pc(), 0);
+    }
+
+    #[test]
     fn default_runtime_regions_do_not_overlap() {
         assert_eq!(DEFAULT_HEAP_SIZE, 0x0800_0000);
         assert_eq!(DEFAULT_STACK_SIZE, 0x0200_0000);
@@ -1657,6 +1915,10 @@ mod tests {
             runtime_hle_traps: Vec::new(),
             jni_methods: Vec::new(),
             jni_java_vm: 0,
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            next_thread_stack_top: 0x5000_1000,
+            guest_threads: VecDeque::new(),
         };
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));
