@@ -106,13 +106,28 @@ MCPE UI render setup and frame-loop bookkeeping:
 AEMU_TRACE_HLE=Draw AEMU_TRACE_HLE_LIMIT=40 AEMU_TRACE_STEPS=200000000 timeout 900s cargo run --release -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 1600000000 --launch
 ```
 
-It still reached the 1.6B-step cap before any traced `glDraw*` or
-`eglSwapBuffers` call. The final PC cluster mapped to
-`RunningAverage<double, 100>::append(double const&)`,
+It reached the 1.6B-step cap before any traced `glDraw*` or `eglSwapBuffers`
+call. The final PC cluster mapped to `RunningAverage<double, 100>::append`,
 `WorkerPool::processCoroutines(double)`, and
-`std::chrono::_V2::system_clock::now()`. The current MCPE blocker is frame
-progress/timing work from GLES state/UI setup into draw/presentation, not vector
-instruction decode or initial GL startup.
+`std::chrono::_V2::system_clock::now()`.
+
+The single-threaded HLE runtime now reserves
+`WorkerPool::processCoroutines(double)` as a narrow target facade. Android
+threads are already HLE no-ops, so bypassing this worker-pool drain removes the
+previous background-callback bottleneck. With that facade, MCPE reaches repeated
+clear/present work:
+
+```sh
+AEMU_TRACE_HLE=Swap AEMU_TRACE_HLE_LIMIT=20 AEMU_TRACE_STEPS=100000000 timeout 240s cargo run --release -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 800000000 --launch
+```
+
+This traces repeated `eglSwapInterval` and `eglSwapBuffers` calls beginning at
+about 82.33M guest steps. A companion `AEMU_TRACE_HLE=glClear` probe reaches
+repeated `glClearColor`, `glClearDepthf`, and `glClear` calls in the same
+window. A `Draw`-filtered 400M-step probe still did not observe `glDraw*`; the
+current blocker is therefore advancing from clear/swap presentation to real
+draw submission, not vector instruction decode, import resolution, EGL startup,
+or the former worker-pool coroutine loop.
 
 ## Latest Verification
 
@@ -124,14 +139,15 @@ instruction decode or initial GL startup.
 - `cargo test dispatches_profiler_facades`
 - `cargo test dispatches_no_input_facades`
 - `cargo test dispatches_no_gamepad_facades`
+- `cargo test dispatches_worker_pool_coroutine_facade`
 - `cargo test dispatches_minecraft_transform_interpolation`
 - `cargo test dispatches_minecraft_ogl_unbind_all_textures`
 - `cargo test dispatches_no_network_social_tick_facades`
-- `cargo test` with 137 unit/integration-facing tests and 108 QEMU oracle tests
+- `cargo test` with 138 unit/integration-facing tests and 108 QEMU oracle tests
 - `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
 - `cargo check --features sdl2`
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
-  reports 577 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
+  reports 578 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
 
 ## Required Next Input
 

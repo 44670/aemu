@@ -590,6 +590,7 @@ impl HleRuntime {
             "_ZN3mce16RenderContextOGL17unbindAllTexturesEv" => {
                 self.minecraft_ogl_unbind_all_textures(cpu, memory)
             }
+            "_ZN10WorkerPool17processCoroutinesEd" => Ok(self.return32(cpu, 0)),
             "_ZN12ProfilerLite4tickEbb" | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd" => {
                 Ok(self.return32(cpu, 0))
             }
@@ -3082,6 +3083,7 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN10Multitouch9isPressedEi"
             | "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f"
             | "_ZN3mce16RenderContextOGL17unbindAllTexturesEv"
+            | "_ZN10WorkerPool17processCoroutinesEd"
             | "_ZN12ProfilerLite4tickEbb"
             | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd"
             | "_ZN18MinecraftTelemetry4tickEv"
@@ -5339,6 +5341,34 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
         assert_eq!(cpu.pc(), 0x2100);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
+    fn dispatches_worker_pool_coroutine_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 0x3ff0_0000);
+        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+
+        let descriptor = describe_hle_import("_ZN10WorkerPool17processCoroutinesEd").unwrap();
+        assert_eq!(descriptor.kind, HleSymbolKind::Target);
+        assert_eq!(descriptor.behavior, HleCallBehavior::Implemented);
+
+        hle.dispatch(
+            "_ZN10WorkerPool17processCoroutinesEd",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2000);
         assert_eq!(cpu.isa(), Isa::Thumb);
     }
 

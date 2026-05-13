@@ -190,15 +190,13 @@ The native launch probe currently completes `libfmod.so`,
 `JNI_OnLoad` for FMOD and Minecraft, invokes `nativeRegisterThis`,
 `ANativeActivity_onCreate`, and `android_main`. The runtime now intercepts
 linked `__dynamic_cast` and uses a 32 MiB default guest stack below TLS, which
-gets past the earlier C++ RTTI stack crash. The latest draw-focused trace runs
-through EGL setup, texture upload, `glViewport`, `glDepthRangef`, MCPE UI
-render setup, transform interpolation, render-context texture unbind, and frame
-timing/coroutine work before reaching the configured 1.6B-step limit around
-`RunningAverage<double, 100>::append(double const&)`,
-`WorkerPool::processCoroutines(double)`, and
-`std::chrono::_V2::system_clock::now()`. It does not show an undefined NEON
-opcode; the remaining blocker is frame progress from GLES state/UI setup to
-`glDraw*` or `eglSwapBuffers` rather than vector instruction decode.
+gets past the earlier C++ RTTI stack crash. The runtime also now reserves
+`WorkerPool::processCoroutines(double)` as a narrow target HLE facade for the
+single-threaded Android HLE model. With that worker-pool drain bypassed, the
+local ARMv7 MCPE run reaches repeated `glClear*` and `eglSwapBuffers` calls at
+about 82.33M guest steps. It does not show an undefined NEON opcode; the
+remaining graphics blocker is advancing from clear/swap presentation to traced
+`glDraw*` submission rather than vector instruction decode or EGL startup.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.

@@ -106,9 +106,10 @@ libgnustl_shared.so: load_bias 0x70300000, mapped 0x70300000+0xb6000
 libminecraftpe.so: load_bias 0x70500000, mapped 0x70500000+0x1701000
 ```
 
-After adding the current system-library HLE import table, the same probe found
-53,631 APK-local dynamic exports, reserved 527 guest HLE symbols, resolved 906
-imports, and applied 119,008 relocation entries with zero unresolved imports.
+After adding the current system-library and MCPE target HLE import table, the
+same probe found 53,631 APK-local dynamic exports, reserved 578 guest HLE
+symbols, resolved 906 imports, and applied 119,008 relocation entries with zero
+unresolved imports.
 The default ARMv6 command still fails correctly with:
 
 ```text
@@ -134,12 +135,28 @@ launch: ANativeActivity_onCreate ...
 launch: android_main ...
 ```
 
-The latest draw-focused run reaches EGL/GLES setup, texture upload,
-`glViewport`, `glDepthRangef`, MCPE UI render setup, render-context texture
-unbind, and frame timing/coroutine work before the configured 1.6B-step cap. It
-does not stop on an undefined NEON opcode. An older APK with
-`lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
-Minecraft PE path.
+The runtime now reserves `WorkerPool::processCoroutines(double)` as a narrow
+target HLE facade. Android worker threads are not created in the current HLE
+model, so this bypasses the previous single-threaded background-callback drain.
+With that facade, a swap-focused launch probe reaches repeated EGL presentation:
+
+```sh
+AEMU_TRACE_HLE=Swap AEMU_TRACE_HLE_LIMIT=20 AEMU_TRACE_STEPS=100000000 timeout 240s cargo run --release -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 800000000 --launch
+```
+
+Observed at about 82.33M guest steps:
+
+```text
+eglSwapInterval
+eglSwapBuffers
+```
+
+A companion `AEMU_TRACE_HLE=glClear` probe reaches repeated `glClearColor`,
+`glClearDepthf`, and `glClear` calls in the same window. A `Draw`-filtered
+400M-step probe still did not observe `glDraw*`, so the next graphics target is
+real draw submission after clear/swap presentation. The run does not stop on an
+undefined NEON opcode. An older APK with `lib/armeabi/libminecraftpe.so` is
+still required to validate the ARMv6 Minecraft PE path.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:
