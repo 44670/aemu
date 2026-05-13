@@ -786,11 +786,14 @@ impl NativeRuntime {
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         let trace_ranges = parse_trace_pc_ranges();
+        let trace_mem32 = parse_trace_mem32_specs();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
+        let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
         let trace_hle_limit = parse_trace_limit("AEMU_TRACE_HLE_LIMIT");
         let mut trace_pc_count = 0usize;
+        let mut trace_mem32_count = 0usize;
         let mut trace_hle_count = 0usize;
         for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
@@ -841,6 +844,16 @@ impl NativeRuntime {
                         self.cpu.reg(13),
                         self.cpu.reg(14),
                     );
+                }
+            }
+            if !trace_mem32.is_empty() {
+                let pc = self.cpu.pc();
+                for spec in trace_mem32.iter().filter(|spec| spec.pc == pc) {
+                    if trace_mem32_limit.is_some_and(|limit| trace_mem32_count >= limit) {
+                        break;
+                    }
+                    trace_mem32_count += 1;
+                    self.trace_mem32(step_idx, spec);
                 }
             }
             tail.push_back(NativeRuntimeTraceEntry {
@@ -1693,6 +1706,23 @@ impl NativeRuntime {
         }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
+
+    fn trace_mem32(&mut self, step_idx: usize, spec: &TraceMem32Spec) {
+        let base = spec.base.value(&self.cpu);
+        let base_label = spec.base.label();
+        eprint!(
+            "MEM32 step={step_idx} pc={:#010x} {base_label}={base:#010x}",
+            spec.pc,
+        );
+        for &offset in &spec.offsets {
+            let addr = base.wrapping_add(offset);
+            match self.link.memory.load32(addr) {
+                Ok(value) => eprint!(" [{base_label}+{offset:#x}@{addr:#010x}]={value:#010x}"),
+                Err(err) => eprint!(" [{base_label}+{offset:#x}@{addr:#010x}]=<{err}>"),
+            }
+        }
+        eprintln!();
+    }
 }
 
 fn parse_trace_pc_ranges() -> Vec<(u32, u32)> {
@@ -1719,6 +1749,99 @@ fn parse_trace_limit(name: &str) -> Option<usize> {
     let raw = std::env::var(name).ok()?;
     let limit = raw.trim().parse().ok()?;
     (limit != 0).then_some(limit)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceMem32Spec {
+    pc: u32,
+    base: TraceMemBase,
+    offsets: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceMemBase {
+    Reg(usize),
+    Addr(u32),
+}
+
+impl TraceMemBase {
+    fn value(self, cpu: &Cpu) -> u32 {
+        match self {
+            Self::Reg(reg) => cpu.reg(reg),
+            Self::Addr(addr) => addr,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Reg(13) => "sp".to_string(),
+            Self::Reg(14) => "lr".to_string(),
+            Self::Reg(15) => "pc".to_string(),
+            Self::Reg(reg) => format!("r{reg}"),
+            Self::Addr(addr) => format!("{addr:#010x}"),
+        }
+    }
+}
+
+fn parse_trace_mem32_specs() -> Vec<TraceMem32Spec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_MEM32").ok() else {
+        return Vec::new();
+    };
+    parse_trace_mem32_specs_raw(&raw)
+}
+
+fn parse_trace_mem32_specs_raw(raw: &str) -> Vec<TraceMem32Spec> {
+    raw.split(';')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (pc, fields) = entry.split_once(':')?;
+            let pc = parse_u32_env(pc)?;
+            let mut fields = fields
+                .split(',')
+                .map(str::trim)
+                .filter(|field| !field.is_empty());
+            let first = fields.next()?;
+            let (base, first_offset) = parse_trace_mem32_base(first)?;
+            let mut offsets = vec![first_offset];
+            for offset in fields {
+                offsets.push(parse_trace_mem32_offset(offset)?);
+            }
+            Some(TraceMem32Spec { pc, base, offsets })
+        })
+        .collect()
+}
+
+fn parse_trace_mem32_base(raw: &str) -> Option<(TraceMemBase, u32)> {
+    let raw = raw.trim();
+    let (base, offset) = if let Some((base, offset)) = raw.split_once('+') {
+        (base.trim(), parse_trace_mem32_offset(offset)?)
+    } else {
+        (raw, 0)
+    };
+    Some((parse_trace_mem32_base_value(base)?, offset))
+}
+
+fn parse_trace_mem32_base_value(raw: &str) -> Option<TraceMemBase> {
+    let raw = raw.trim();
+    match raw {
+        "sp" => Some(TraceMemBase::Reg(13)),
+        "lr" => Some(TraceMemBase::Reg(14)),
+        "pc" => Some(TraceMemBase::Reg(15)),
+        _ => {
+            if let Some(reg) = raw.strip_prefix('r') {
+                let reg = reg.parse::<usize>().ok()?;
+                return (reg < 16).then_some(TraceMemBase::Reg(reg));
+            }
+            Some(TraceMemBase::Addr(parse_u32_env(raw)?))
+        }
+    }
+}
+
+fn parse_trace_mem32_offset(raw: &str) -> Option<u32> {
+    parse_u32_env(raw.trim().trim_start_matches('+'))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1804,6 +1927,32 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn parses_mem32_trace_specs() {
+        assert_eq!(
+            parse_trace_mem32_specs_raw(
+                "0x70bc79dc:r0+0x80,+0x84; 0x70bc543e:sp+16; 1234:0x60000000"
+            ),
+            vec![
+                TraceMem32Spec {
+                    pc: 0x70bc_79dc,
+                    base: TraceMemBase::Reg(0),
+                    offsets: vec![0x80, 0x84],
+                },
+                TraceMem32Spec {
+                    pc: 0x70bc_543e,
+                    base: TraceMemBase::Reg(13),
+                    offsets: vec![16],
+                },
+                TraceMem32Spec {
+                    pc: 1234,
+                    base: TraceMemBase::Addr(0x6000_0000),
+                    offsets: vec![0],
+                },
+            ]
+        );
+    }
 
     #[test]
     fn dispatches_hle_trap_by_guest_address_and_returns_through_lr() {

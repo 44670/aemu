@@ -253,6 +253,66 @@ fn neon_2reg_shift_instr(
         | ((vm & 0xf) as u32)
 }
 
+fn neon_ls_multiple_instr(
+    load: bool,
+    rn: usize,
+    vd: usize,
+    itype: u32,
+    size: u32,
+    align: u32,
+    rm: usize,
+) -> u32 {
+    0xf400_0000
+        | (((vd >> 4) as u32 & 1) << 22)
+        | (u32::from(load) << 21)
+        | ((rn as u32) << 16)
+        | (((vd & 0xf) as u32) << 12)
+        | ((itype & 0xf) << 8)
+        | ((size & 0x3) << 6)
+        | ((align & 0x3) << 4)
+        | ((rm & 0xf) as u32)
+}
+
+fn neon_ls_single_instr(
+    load: bool,
+    rn: usize,
+    vd: usize,
+    nregs: u32,
+    size: u32,
+    reg_idx: u32,
+    stride: bool,
+    align: u32,
+    rm: usize,
+) -> u32 {
+    let (form, index_bits, stride_bit, align_bits) = match size {
+        0 => (0, (reg_idx & 0x7) << 5, 0, (align & 1) << 4),
+        1 => (
+            1,
+            (reg_idx & 0x3) << 6,
+            u32::from(stride) << 5,
+            (align & 1) << 4,
+        ),
+        2 => (
+            2,
+            (reg_idx & 0x1) << 7,
+            u32::from(stride) << 6,
+            (align & 0x3) << 4,
+        ),
+        _ => unreachable!(),
+    };
+    0xf480_0000
+        | (u32::from(load) << 21)
+        | (((vd >> 4) as u32 & 1) << 22)
+        | ((rn as u32) << 16)
+        | (((vd & 0xf) as u32) << 12)
+        | ((form & 0x3) << 10)
+        | (((nregs - 1) & 0x3) << 8)
+        | index_bits
+        | stride_bit
+        | align_bits
+        | ((rm & 0xf) as u32)
+}
+
 fn neon_2reg_misc_instr(vd: usize, size: u32, opcode: u32, op2: u32, q: bool, vm: usize) -> u32 {
     0xf3b0_0000
         | (((vd >> 4) as u32 & 1) << 22)
@@ -5602,6 +5662,97 @@ fn qemu_oracle_neon_mcpe_bitwise_select_matches_interpreter() {
         ^ ((cpu.dreg(4) >> 32) as u32)
         ^ (cpu.dreg(5) as u32)
         ^ ((cpu.dreg(5) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
+fn qemu_oracle_neon_mcpe_structure_transfers_match_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_lane\n\
+         mov r6, #16\n\
+         vld2.16 {d14[2], d16[2]}, [r5:32], r6\n\
+         ldr r4, =out_lane\n\
+         vst2.16 {d14[2], d16[2]}, [r4:32]\n\
+         ldr r1, [r4]\n\
+         mov r0, r1\n\
+         ldr r7, =values_vld4\n\
+         vld4.32 {d0, d1, d2, d3}, [r7]!\n\
+         ldr r4, =out_vld4\n\
+         vst4.32 {d0, d1, d2, d3}, [r4]\n\
+         .rept 8\n\
+         ldr r1, [r4], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_lane: .hword 0x1111, 0x2222\n\
+         .align 3\n\
+         values_vld4: .word 0x01020304, 0x11121314, 0x21222324, 0x31323334\n\
+                      .word 0x05060708, 0x15161718, 0x25262728, 0x35363738\n\
+         out_lane: .space 8\n\
+         out_vld4: .space 32\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x1000, 0x400);
+    mem.store16(0x1000, 0x1111).unwrap();
+    mem.store16(0x1002, 0x2222).unwrap();
+    cpu.set_reg(5, 0x1000);
+    cpu.set_reg(6, 16);
+    cpu.execute_arm(
+        neon_ls_single_instr(true, 5, 14, 2, 1, 2, true, 1, 6),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vld2.16 {d14[2], d16[2]}, [r5:32], r6
+
+    cpu.set_reg(4, 0x1100);
+    cpu.execute_arm(
+        neon_ls_single_instr(false, 4, 14, 2, 1, 2, true, 1, 15),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vst2.16 {d14[2], d16[2]}, [r4:32]
+    assert_eq!(cpu.reg(5), 0x1010);
+
+    let vld4_words = [
+        0x0102_0304,
+        0x1112_1314,
+        0x2122_2324,
+        0x3132_3334,
+        0x0506_0708,
+        0x1516_1718,
+        0x2526_2728,
+        0x3536_3738,
+    ];
+    for (idx, word) in vld4_words.into_iter().enumerate() {
+        mem.store32(0x1020 + idx as u32 * 4, word).unwrap();
+    }
+    cpu.set_reg(7, 0x1020);
+    cpu.execute_arm(
+        neon_ls_multiple_instr(true, 7, 0, 0b0000, 2, 0, 13),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vld4.32 {d0, d1, d2, d3}, [r7]!
+    assert_eq!(cpu.reg(7), 0x1040);
+
+    cpu.set_reg(4, 0x1140);
+    cpu.execute_arm(
+        neon_ls_multiple_instr(false, 4, 0, 0b0000, 2, 0, 15),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vst4.32 {d0, d1, d2, d3}, [r4]
+
+    let mut folded = mem.load32(0x1100).unwrap();
+    for idx in 0..8 {
+        folded ^= mem.load32(0x1140 + idx * 4).unwrap();
+    }
     assert_eq!(qemu_exit as u32, folded & 0xff);
 }
 
