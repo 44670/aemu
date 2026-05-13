@@ -132,6 +132,11 @@ useful, but it does not replace the browser WebGL backend.
    `AAssetManager_open`. The initial wasm export and static harness can run
    MCPE bytes to first swap and replay the resulting GLES stream into WebGL 1;
    browser-side performance and worker/asynchronous execution are still pending.
+   SDL2 live mode now resumes guest execution after each `eglSwapBuffers`,
+   replays each frame batch into the SDL2 GLES context on `DISPLAY=:0`, and has
+   screenshot/readback evidence for nonblack MCPE frames with zero host GL
+   errors. Full playability still needs guest input/audio HLE and a fix for
+   long-run HLE heap exhaustion.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach

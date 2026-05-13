@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -512,6 +512,8 @@ struct RunApkNativeOptions {
     until_swap: bool,
     gles_summary: bool,
     sdl2: bool,
+    sdl2_live: bool,
+    sdl2_frames: Option<u64>,
     sdl2_hold_ms: u64,
 }
 
@@ -533,11 +535,14 @@ fn parse_run_apk_native_args(
 
     let mut config = aemu::native_loader::NativeLoadConfig::default();
     let mut max_steps = 100_000usize;
+    let mut max_steps_set = false;
     let mut options = RunApkNativeOptions {
         launch: false,
         until_swap: false,
         gles_summary: false,
         sdl2: false,
+        sdl2_live: false,
+        sdl2_frames: None,
         sdl2_hold_ms: 1000,
     };
     while let Some(arg) = iter.next() {
@@ -554,6 +559,7 @@ fn parse_run_apk_native_args(
                 max_steps = value
                     .parse()
                     .map_err(|_| format!("invalid --steps value: {value}"))?;
+                max_steps_set = true;
             }
             "--launch" => options.launch = true,
             "--until-swap" => {
@@ -566,6 +572,21 @@ fn parse_run_apk_native_args(
                 options.until_swap = true;
                 options.sdl2 = true;
             }
+            "--sdl2-live" => {
+                options.launch = true;
+                options.until_swap = true;
+                options.sdl2_live = true;
+            }
+            "--sdl2-frames" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--sdl2-frames needs a numeric value".to_string())?;
+                options.sdl2_frames = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid --sdl2-frames value: {value}"))?,
+                );
+            }
             "--sdl2-hold-ms" => {
                 let value = iter
                     .next()
@@ -576,6 +597,9 @@ fn parse_run_apk_native_args(
             }
             _ => return Err(format!("unknown run-apk-native argument: {arg}")),
         }
+    }
+    if !max_steps_set && options.until_swap {
+        max_steps = 300_000_000;
     }
 
     Ok((PathBuf::from(path), config, max_steps, options))
@@ -588,8 +612,8 @@ fn run_apk_native(
     options: RunApkNativeOptions,
 ) -> Result<(), String> {
     #[cfg(not(feature = "sdl2"))]
-    if options.sdl2 {
-        return Err("--sdl2 requires rebuilding with --features sdl2".to_string());
+    if options.sdl2 || options.sdl2_live {
+        return Err("--sdl2/--sdl2-live requires rebuilding with --features sdl2".to_string());
     }
 
     let report = aemu::native_loader::load_apk_native_libraries_with_config(path, config)
@@ -611,12 +635,21 @@ fn run_apk_native(
         .map_err(|err| format!("constructor scan failed: {err}"))?;
     println!("apk: {}", path.display());
     println!("abi: {}", config.abi);
-    println!("constructors: {}", constructors.len());
-    for constructor in constructors {
+    if options.sdl2_live {
         println!(
-            "  {} {:?} {:#010x}",
-            constructor.library_name, constructor.source, constructor.address
+            "constructors: {} (addresses suppressed for SDL2 live)",
+            constructors.len()
         );
+    } else {
+        println!("constructors: {}", constructors.len());
+    }
+    for constructor in constructors {
+        if !options.sdl2_live {
+            println!(
+                "  {} {:?} {:#010x}",
+                constructor.library_name, constructor.source, constructor.address
+            );
+        }
         runtime
             .run_function(constructor.address, max_steps)
             .map_err(|err| {
@@ -630,7 +663,9 @@ fn run_apk_native(
     if options.launch {
         run_native_activity_launch(&mut runtime, max_steps, options.until_swap)?;
     }
-    if options.gles_summary || options.sdl2 {
+    if options.sdl2_live {
+        replay_sdl2_live_gles_frames(&mut runtime, max_steps, options.sdl2_frames)?;
+    } else if options.gles_summary || options.sdl2 {
         let events = runtime.hle.take_gles_events();
         if options.gles_summary {
             print_gles_summary(&events);
@@ -796,6 +831,122 @@ fn replay_sdl2_gles_events(
     _hold_ms: u64,
 ) -> Result<(), String> {
     Err("--sdl2 requires rebuilding with --features sdl2".to_string())
+}
+
+#[cfg(feature = "sdl2")]
+fn replay_sdl2_live_gles_frames(
+    runtime: &mut aemu::native_runtime::NativeRuntime,
+    max_steps_per_frame: usize,
+    max_frames: Option<u64>,
+) -> Result<(), String> {
+    use aemu::hle_imports::GlesEvent;
+    use aemu::host::{HostBackend, HostConfig, HostEvent, HostKey};
+
+    let mut host = aemu::sdl_shell::Sdl2Host::new(&HostConfig::default())
+        .map_err(|err| format!("SDL2 setup failed: {err}"))?;
+    let mut frames = 0_u64;
+    let mut total_events = 0_usize;
+    let mut total_payload_bytes = 0_usize;
+
+    println!(
+        "sdl2-live: started max_frames={} max_steps_per_frame={}",
+        max_frames
+            .map(|frames| frames.to_string())
+            .unwrap_or_else(|| "unlimited".to_string()),
+        max_steps_per_frame
+    );
+
+    loop {
+        let events = runtime.hle.take_gles_events();
+        let frame_swaps = events
+            .iter()
+            .filter(|event| matches!(event, GlesEvent::SwapBuffers { .. }))
+            .count() as u64;
+        let payload_bytes = events
+            .iter()
+            .map(|event| event.payload_len())
+            .sum::<usize>();
+        total_events += events.len();
+        total_payload_bytes += payload_bytes;
+        if !events.is_empty() {
+            host.replay_gles_events(&events)
+                .map_err(|err| format!("SDL2 GLES replay failed: {err}"))?;
+        }
+        frames += frame_swaps;
+
+        if frame_swaps != 0
+            && (frames <= 5 || frames % 60 == 0 || max_frames.is_some_and(|limit| frames >= limit))
+        {
+            let stats = host.replay_stats();
+            println!(
+                "sdl2-live: frame={} events={} payload={} draws arrays={} elements={} skipped_client_attrib={} skipped_missing_indices={} readback={}x{} rgb={} alpha={} gl_errors={}",
+                frames,
+                events.len(),
+                payload_bytes,
+                stats.draw_arrays,
+                stats.draw_elements,
+                stats.skipped_client_attrib_draws,
+                stats.skipped_missing_index_draws,
+                stats.readback_width,
+                stats.readback_height,
+                stats.readback_nonzero_rgb_pixels,
+                stats.readback_nonzero_alpha_pixels,
+                stats.gl_error_count
+            );
+        }
+
+        for event in host
+            .poll_events()
+            .map_err(|err| format!("SDL2 event poll failed: {err}"))?
+        {
+            match event {
+                HostEvent::Quit
+                | HostEvent::Key {
+                    key: HostKey::Escape,
+                    pressed: true,
+                    ..
+                } => {
+                    println!(
+                        "sdl2-live: stopped by host event frames={} events={} payload={}",
+                        frames, total_events, total_payload_bytes
+                    );
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        if max_frames.is_some_and(|limit| frames >= limit) {
+            println!(
+                "sdl2-live: reached frame limit frames={} events={} payload={}",
+                frames, total_events, total_payload_bytes
+            );
+            return Ok(());
+        }
+
+        match runtime
+            .continue_until_hle(max_steps_per_frame, Some("eglSwapBuffers"))
+            .map_err(|err| format!("android_main continuation failed: {err}"))?
+        {
+            aemu::native_runtime::NativeRuntimeFunctionExit::HleCall { step, .. } => {
+                if frames < 3 || frames % 60 == 0 {
+                    println!("sdl2-live: next eglSwapBuffers after {step} guest steps");
+                }
+            }
+            aemu::native_runtime::NativeRuntimeFunctionExit::Returned => {
+                return Err("android_main returned during SDL2 live loop".to_string());
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "sdl2"))]
+fn replay_sdl2_live_gles_frames(
+    _runtime: &mut aemu::native_runtime::NativeRuntime,
+    _max_steps_per_frame: usize,
+    _max_frames: Option<u64>,
+) -> Result<(), String> {
+    Err("--sdl2-live requires rebuilding with --features sdl2".to_string())
 }
 
 fn run_native_activity_launch(

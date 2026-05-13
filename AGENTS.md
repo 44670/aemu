@@ -187,6 +187,7 @@ The native desktop debug shell is feature-gated behind SDL2:
 cargo run --features sdl2 -- sdl2-shell
 cargo run --features sdl2 -- sdl2-shell --frames 120
 cargo run --features sdl2 -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --sdl2
+DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 cargo run --release --features sdl2 -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live
 ```
 
 The shell currently creates a GLES2-style SDL2 context and normalizes
@@ -196,6 +197,12 @@ first-swap GLES event stream into the SDL2 context after the first guest
 `eglSwapBuffers`. For the local MCPE ARMv7 probe this includes shader/program
 replay, payload-backed textures/buffers/uniforms, client-side vertex attribute
 staging, and all captured indexed draw submissions.
+`run-apk-native --sdl2-live` keeps the guest in `android_main` after the first
+swap, drains and replays each frame's GLES event batch, and resumes to the next
+`eglSwapBuffers`; use `--sdl2-frames N` for bounded verification runs. On the
+local X11 display, use `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1` so SDL creates a
+GLES context through EGL. Current live rendering works, but guest input and
+audio are still stubbed and a long run can exhaust the current HLE heap.
 Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,

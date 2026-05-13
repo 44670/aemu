@@ -884,6 +884,23 @@ impl NativeRuntime {
         }
         self.cpu.branch_exchange(address);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
+        self.continue_function_until_hle(address, max_steps, stop_hle_name)
+    }
+
+    pub fn continue_until_hle(
+        &mut self,
+        max_steps: usize,
+        stop_hle_name: Option<&str>,
+    ) -> Result<NativeRuntimeFunctionExit, NativeRuntimeError> {
+        self.continue_function_until_hle(self.cpu.pc(), max_steps, stop_hle_name)
+    }
+
+    fn continue_function_until_hle(
+        &mut self,
+        address: u32,
+        max_steps: usize,
+        stop_hle_name: Option<&str>,
+    ) -> Result<NativeRuntimeFunctionExit, NativeRuntimeError> {
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         let trace_ranges = parse_trace_pc_ranges();
         let trace_mem32 = parse_trace_mem32_specs();
@@ -2398,6 +2415,78 @@ mod tests {
                 name: "eglSwapBuffers".to_string(),
                 address: hle_address,
                 args: [1, 4, 0, 0],
+                step: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn continue_until_hle_resumes_after_stopped_hle_call() {
+        let swap_address = 0x6f00_0000;
+        let flush_address = 0x6f00_0004;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(swap_address, 0x1000).unwrap();
+        memory.store32(swap_address, HLE_TRAP_ARM_INSTR).unwrap();
+        memory.store32(flush_address, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![
+                HleSymbol {
+                    name: "eglSwapBuffers".to_string(),
+                    address: swap_address,
+                    kind: HleSymbolKind::Egl,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::Implemented,
+                },
+                HleSymbol {
+                    name: "glFlush".to_string(),
+                    address: flush_address,
+                    kind: HleSymbolKind::Gles,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::Implemented,
+                },
+            ],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.cpu.set_pc(swap_address);
+        runtime.cpu.set_reg(14, flush_address);
+
+        assert_eq!(
+            runtime
+                .continue_until_hle(8, Some("eglSwapBuffers"))
+                .unwrap(),
+            NativeRuntimeFunctionExit::HleCall {
+                name: "eglSwapBuffers".to_string(),
+                address: swap_address,
+                args: [0, 0, 0, 0],
+                step: 0,
+            }
+        );
+        assert_eq!(runtime.cpu.pc(), flush_address);
+
+        assert_eq!(
+            runtime.continue_until_hle(8, Some("glFlush")).unwrap(),
+            NativeRuntimeFunctionExit::HleCall {
+                name: "glFlush".to_string(),
+                address: flush_address,
+                args: [1, 0, 0, 0],
                 step: 0,
             }
         );
