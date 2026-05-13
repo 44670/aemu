@@ -5232,6 +5232,58 @@ fn qemu_oracle_neon_unsigned_halving_subtract_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_neon_mcpe_scalar_long_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_mul_a\n\
+         vld1.32 {d28}, [r5]\n\
+         ldr r5, =values_scalar_a\n\
+         vld1.32 {d0}, [r5]\n\
+         .inst 0xf3accac0\n\
+         ldr r5, =values_mul_b\n\
+         vld1.32 {d29}, [r5]\n\
+         ldr r5, =values_scalar_b\n\
+         vld1.32 {d4}, [r5]\n\
+         .inst 0xf3adc2c4\n\
+         ldr r5, =out_scalar_long\n\
+         vst1.64 {d12, d13}, [r5]\n\
+         ldr r0, [r5]\n\
+         ldr r1, [r5, #4]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #8]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #12]\n\
+         eor r0, r0, r1\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_mul_a: .word 3, 4\n\
+         values_scalar_a: .word 5, 7\n\
+         values_mul_b: .word 2, 3\n\
+         values_scalar_b: .word 11, 13\n\
+         out_scalar_long: .space 16\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(28, 0x0000_0004_0000_0003);
+    cpu.set_dreg(0, 0x0000_0007_0000_0005);
+    cpu.execute_arm(0xf3ac_cac0, 0, &mut mem).unwrap(); // vmull.u32 q6, d28, d0[0]
+
+    cpu.set_dreg(29, 0x0000_0003_0000_0002);
+    cpu.set_dreg(4, 0x0000_000d_0000_000b);
+    cpu.execute_arm(0xf3ad_c2c4, 0, &mut mem).unwrap(); // vmlal.u32 q6, d29, d4[0]
+
+    let folded = (cpu.dreg(12) as u32)
+        ^ ((cpu.dreg(12) >> 32) as u32)
+        ^ (cpu.dreg(13) as u32)
+        ^ ((cpu.dreg(13) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_vfp_double_lane_moves_match_interpreter() {
     let asm = oracle_program(
         ".fpu vfp\n\
