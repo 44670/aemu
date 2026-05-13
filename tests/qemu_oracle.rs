@@ -253,6 +253,18 @@ fn neon_2reg_shift_instr(
         | ((vm & 0xf) as u32)
 }
 
+fn neon_2reg_misc_instr(vd: usize, size: u32, opcode: u32, op2: u32, q: bool, vm: usize) -> u32 {
+    0xf3b0_0000
+        | (((vd >> 4) as u32 & 1) << 22)
+        | ((size & 0x3) << 18)
+        | ((opcode & 0x3) << 16)
+        | (((vd & 0xf) as u32) << 12)
+        | ((op2 & 0xf) << 7)
+        | (u32::from(q) << 6)
+        | (((vm >> 4) as u32 & 1) << 5)
+        | ((vm & 0xf) as u32)
+}
+
 fn arm_branch_instr(cond: u32, link: bool, pc: u32, target: u32) -> u32 {
     let offset_words = (target as i32 - (pc as i32 + 8)) / 4;
     ((cond & 0xf) << 28)
@@ -5704,6 +5716,56 @@ fn qemu_oracle_neon_mcpe_narrow_and_estimate_matches_interpreter() {
         ^ ((cpu.dreg(1) >> 32) as u32)
         ^ (cpu.dreg(8) as u32)
         ^ ((cpu.dreg(8) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
+fn qemu_oracle_neon_reciprocal_estimate_f32_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_recip_est\n\
+         vld1.32 {d0, d1}, [r5]\n\
+         vrecpe.f32 q1, q0\n\
+         vrsqrte.f32 q2, q0\n\
+         ldr r5, =out_recip_est\n\
+         vst1.64 {d2, d3, d4, d5}, [r5]\n\
+         mov r0, #0\n\
+         .rept 8\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_recip_est: .word 0x40000000, 0x40400000, 0x40800000, 0x41100000\n\
+         out_recip_est: .space 32\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(
+        0,
+        u64::from(2.0f32.to_bits()) | (u64::from(3.0f32.to_bits()) << 32),
+    );
+    cpu.set_dreg(
+        1,
+        u64::from(4.0f32.to_bits()) | (u64::from(9.0f32.to_bits()) << 32),
+    );
+    cpu.execute_arm(neon_2reg_misc_instr(2, 2, 3, 10, true, 0), 0, &mut mem)
+        .unwrap(); // vrecpe.f32 q1, q0
+    cpu.execute_arm(neon_2reg_misc_instr(4, 2, 3, 11, true, 0), 0, &mut mem)
+        .unwrap(); // vrsqrte.f32 q2, q0
+
+    let folded = (cpu.dreg(2) as u32)
+        ^ ((cpu.dreg(2) >> 32) as u32)
+        ^ (cpu.dreg(3) as u32)
+        ^ ((cpu.dreg(3) >> 32) as u32)
+        ^ (cpu.dreg(4) as u32)
+        ^ ((cpu.dreg(4) >> 32) as u32)
+        ^ (cpu.dreg(5) as u32)
+        ^ ((cpu.dreg(5) >> 32) as u32);
     assert_eq!(qemu_exit as u32, folded & 0xff);
 }
 

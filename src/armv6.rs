@@ -1313,11 +1313,10 @@ impl Cpu {
         for lane in 0..(if q { 4 } else { 2 }) {
             let value = neon_read_elem(&src, lane, 2) as u32;
             let result = if float {
-                let value = f32::from_bits(value);
                 if rsqrt {
-                    (1.0f32 / value.sqrt()).to_bits()
+                    neon_rsqrte_f32_bits(value)
                 } else {
-                    (1.0f32 / value).to_bits()
+                    neon_recpe_f32_bits(value)
                 }
             } else if rsqrt {
                 neon_rsqrte_u32(value)
@@ -8197,6 +8196,101 @@ fn neon_rsqrte_u32(value: u32) -> u32 {
     neon_recip_sqrt_estimate((value >> 23) & 0x1ff) << 23
 }
 
+fn neon_quiet_nan_f32_bits(value: u32) -> u32 {
+    value | 0x0040_0000
+}
+
+fn neon_recpe_f32_bits(value: u32) -> u32 {
+    let sign = value & 0x8000_0000;
+    let abs = value & 0x7fff_ffff;
+
+    if abs > 0x7f80_0000 {
+        return neon_quiet_nan_f32_bits(value);
+    }
+    if abs == 0x7f80_0000 {
+        return sign;
+    }
+    if abs == 0 {
+        return sign | 0x7f80_0000;
+    }
+    if abs < (1 << 21) {
+        return sign | 0x7f80_0000;
+    }
+
+    let mut exp = ((value >> 23) & 0xff) as i32;
+    let mut frac = u64::from(value & 0x007f_ffff) << 29;
+    frac = neon_call_recip_estimate(&mut exp, 253, frac);
+
+    sign | ((exp as u32) << 23) | (((frac >> 29) as u32) & 0x007f_ffff)
+}
+
+fn neon_call_recip_estimate(exp: &mut i32, exp_off: i32, mut frac: u64) -> u64 {
+    if *exp == 0 {
+        if (frac >> 51) & 1 == 0 {
+            *exp = -1;
+            frac <<= 2;
+        } else {
+            frac <<= 1;
+        }
+    }
+
+    let scaled = (1 << 8) | ((frac >> 44) as u32 & 0xff);
+    let estimate = u64::from(neon_recip_estimate(scaled));
+    let mut result_exp = exp_off - *exp;
+    let mut result_frac = estimate << 44;
+    if result_exp == 0 {
+        result_frac = (result_frac >> 1) | (1u64 << 51);
+    } else if result_exp == -1 {
+        result_frac = (result_frac >> 2) | (1u64 << 50);
+        result_exp = 0;
+    }
+    *exp = result_exp;
+    result_frac
+}
+
+fn neon_rsqrte_f32_bits(value: u32) -> u32 {
+    let sign = value & 0x8000_0000;
+    let abs = value & 0x7fff_ffff;
+
+    if abs > 0x7f80_0000 {
+        return neon_quiet_nan_f32_bits(value);
+    }
+    if abs == 0 {
+        return sign | 0x7f80_0000;
+    }
+    if sign != 0 {
+        return 0x7fc0_0000;
+    }
+    if abs == 0x7f80_0000 {
+        return 0;
+    }
+
+    let mut exp = ((value >> 23) & 0xff) as i32;
+    let frac = u64::from(value & 0x007f_ffff) << 29;
+    let frac = neon_recip_sqrt_estimate_f64_frac(&mut exp, 380, frac);
+
+    (exp as u32) << 23 | ((((frac >> 44) as u32) & 0xff) << 15)
+}
+
+fn neon_recip_sqrt_estimate_f64_frac(exp: &mut i32, exp_off: i32, mut frac: u64) -> u64 {
+    if *exp == 0 {
+        while (frac >> 51) & 1 == 0 {
+            frac <<= 1;
+            *exp -= 1;
+        }
+        frac = (frac & ((1u64 << 51) - 1)) << 1;
+    }
+
+    let scaled = if *exp & 1 != 0 {
+        (1 << 7) | ((frac >> 45) as u32 & 0x7f)
+    } else {
+        (1 << 8) | ((frac >> 44) as u32 & 0xff)
+    };
+    let estimate = u64::from(neon_recip_sqrt_estimate(scaled));
+    *exp = (exp_off - *exp) / 2;
+    estimate << 44
+}
+
 fn thumb_is_32bit_prefix(instr: u16) -> bool {
     matches!(instr & 0xf800, 0xe800 | 0xf000 | 0xf800)
 }
@@ -9842,7 +9936,7 @@ mod tests {
             .unwrap(); // vrecpe.f32 d15, d14
         assert_eq!(
             cpu.dreg(15),
-            u64::from(0.5f32.to_bits()) | (u64::from(0.25f32.to_bits()) << 32)
+            u64::from(0x3eff_8000u32) | (u64::from(0x3e7f_8000u32) << 32)
         );
 
         cpu.set_dreg(
@@ -9853,7 +9947,7 @@ mod tests {
             .unwrap(); // vrsqrte.f32 d17, d16
         assert_eq!(
             cpu.dreg(17),
-            u64::from(0.5f32.to_bits()) | (u64::from(0.25f32.to_bits()) << 32)
+            u64::from(0x3eff_8000u32) | (u64::from(0x3e7f_8000u32) << 32)
         );
 
         cpu.set_dreg(
