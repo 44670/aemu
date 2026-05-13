@@ -3812,6 +3812,92 @@ fn qemu_oracle_thumb_alu_memory_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb32_long_multiply_register_order_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv7-a\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r2, =thumb_start + 1\n\
+         bx r2\n\
+         .thumb\n\
+         thumb_start:\n\
+         movw r4, #0xc51b\n\
+         movt r4, #0x0d20\n\
+         movw r7, #0xcccd\n\
+         movt r7, #0xcccc\n\
+         umull r0, r1, r4, r7\n\
+         lsrs r0, r1, #3\n\
+         uxtb r0, r0\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit_with_clang_args(&asm, &["-march=armv7-a"]) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_reg(4, 0x0d20_c51b);
+    cpu.set_reg(7, 0xcccc_cccd);
+    cpu.execute_thumb32(0xfba4, 0x0107, 0, &mut mem).unwrap(); // umull r0, r1, r4, r7
+    cpu.set_reg(0, cpu.reg(1) >> 3);
+
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_thumb32_table_branch_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv7-a\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r2, =thumb_start + 1\n\
+         bx r2\n\
+         .thumb\n\
+         thumb_start:\n\
+         movs r2, #3\n\
+         tbb [pc, r2]\n\
+         .byte 2, 4, 6, 8\n\
+         movs r0, #11\n\
+         b done\n\
+         movs r0, #22\n\
+         b done\n\
+         movs r0, #33\n\
+         b done\n\
+         movs r0, #44\n\
+         done:\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit_with_clang_args(&asm, &["-march=armv7-a"]) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0x1000, 0x100);
+    cpu.set_isa(aemu::armv6::Isa::Thumb);
+    cpu.set_pc(0x1000);
+    cpu.set_reg(2, 3);
+    mem.load_thumb_halfwords(0x1000, &[0xe8df, 0xf002])
+        .unwrap();
+    mem.load_bytes(0x1004, &[2, 4, 6, 8]).unwrap();
+    cpu.step(&mut mem).unwrap(); // tbb [pc, r2]
+
+    let exit = match cpu.pc() {
+        0x1008 => 11,
+        0x100c => 22,
+        0x1010 => 33,
+        0x1014 => 44,
+        _ => 0xff,
+    };
+    assert_eq!(qemu_exit as u32, exit);
+}
+
+#[test]
 fn qemu_oracle_thumb_alu_matrix_matches_interpreter() {
     let asm = ".syntax unified\n\
          .arch armv6\n\

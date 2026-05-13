@@ -263,16 +263,40 @@ impl NativeRuntime {
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         let trace_range = parse_trace_pc_range();
-        for _ in 0..max_steps {
+        let trace_step_interval = parse_trace_step_interval();
+        let trace_hle = parse_trace_hle_filter();
+        let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
+        let trace_hle_limit = parse_trace_limit("AEMU_TRACE_HLE_LIMIT");
+        let mut trace_pc_count = 0usize;
+        let mut trace_hle_count = 0usize;
+        for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
                 return Ok(());
             }
             if tail.len() == RUN_FUNCTION_TRACE_LEN {
                 tail.pop_front();
             }
+            if trace_step_interval.is_some_and(|interval| step_idx != 0 && step_idx % interval == 0)
+            {
+                let pc = self.cpu.pc();
+                eprintln!(
+                    "STEP function={address:#010x} step={step_idx}/{max_steps} {:?} pc={pc:#010x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} sp={:#010x} lr={:#010x}",
+                    self.cpu.isa(),
+                    self.cpu.reg(0),
+                    self.cpu.reg(1),
+                    self.cpu.reg(2),
+                    self.cpu.reg(3),
+                    self.cpu.reg(13),
+                    self.cpu.reg(14),
+                );
+            }
             if let Some((start, end)) = trace_range {
                 let pc = self.cpu.pc();
-                if pc >= start && pc < end {
+                if pc >= start
+                    && pc < end
+                    && trace_pc_limit.map_or(true, |limit| trace_pc_count < limit)
+                {
+                    trace_pc_count += 1;
                     let instr16 = self.link.memory.load16(pc).unwrap_or(0xffff);
                     eprintln!(
                         "TRACE {:?} pc={pc:#010x} instr16={instr16:#06x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} sp={:#010x} lr={:#010x}",
@@ -300,11 +324,37 @@ impl NativeRuntime {
                 isa: self.cpu.isa(),
                 regs: core::array::from_fn(|idx| self.cpu.reg(idx)),
             });
-            if let Err(source) = self.step() {
-                return Err(NativeRuntimeError::Traced {
-                    source: Box::new(source),
-                    tail: tail.into_iter().collect(),
-                });
+            match self.step() {
+                Ok(NativeRuntimeStep::GuestInstruction) => {}
+                Ok(NativeRuntimeStep::HleCall {
+                    name,
+                    address: hle_address,
+                }) => {
+                    if trace_hle
+                        .as_ref()
+                        .is_some_and(|filter| filter.matches(&name))
+                        && trace_hle_limit.map_or(true, |limit| trace_hle_count < limit)
+                    {
+                        trace_hle_count += 1;
+                        eprintln!(
+                            "HLE function={:#010x} step={} pc={:#010x} name={} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x}",
+                            address,
+                            step_idx,
+                            hle_address,
+                            name,
+                            self.cpu.reg(0),
+                            self.cpu.reg(1),
+                            self.cpu.reg(2),
+                            self.cpu.reg(3),
+                        );
+                    }
+                }
+                Err(source) => {
+                    return Err(NativeRuntimeError::Traced {
+                        source: Box::new(source),
+                        tail: tail.into_iter().collect(),
+                    });
+                }
             }
         }
         Err(NativeRuntimeError::Traced {
@@ -330,6 +380,45 @@ fn parse_trace_pc_range() -> Option<(u32, u32)> {
     let start = parse_u32_env(start)?;
     let end = parse_u32_env(end)?;
     (start < end).then_some((start, end))
+}
+
+fn parse_trace_step_interval() -> Option<usize> {
+    let raw = std::env::var("AEMU_TRACE_STEPS").ok()?;
+    let interval = raw.trim().parse().ok()?;
+    (interval != 0).then_some(interval)
+}
+
+fn parse_trace_limit(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let limit = raw.trim().parse().ok()?;
+    (limit != 0).then_some(limit)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HleTraceFilter {
+    All,
+    Contains(String),
+}
+
+impl HleTraceFilter {
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Contains(needle) => name.contains(needle),
+        }
+    }
+}
+
+fn parse_trace_hle_filter() -> Option<HleTraceFilter> {
+    let raw = std::env::var("AEMU_TRACE_HLE").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        None
+    } else if raw == "*" {
+        Some(HleTraceFilter::All)
+    } else {
+        Some(HleTraceFilter::Contains(raw.to_string()))
+    }
 }
 
 fn parse_u32_env(raw: &str) -> Option<u32> {

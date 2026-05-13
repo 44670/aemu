@@ -4410,6 +4410,10 @@ impl Cpu {
             return self.exec_thumb32_pop(second, pc, mem);
         }
 
+        if (first & 0xfff0) == 0xe8d0 && (second & 0xffe0) == 0xf000 {
+            return self.exec_thumb32_table_branch(first, second, pc, mem);
+        }
+
         if matches!(first & 0xffc0, 0xe880 | 0xe900) {
             return self.exec_thumb32_block_transfer(first, second, pc, mem);
         }
@@ -4688,10 +4692,12 @@ impl Cpu {
                 Ok(true)
             }
             (8 | 10 | 12 | 14, 0) => {
-                if [rd, ra, rn, rm].contains(&15) {
+                let rd_lo = ra;
+                let rd_hi = rd;
+                if [rd_lo, rd_hi, rn, rm].contains(&15) {
                     return Err(Trap::Unpredictable("Thumb multiply with PC register"));
                 }
-                if rd == ra {
+                if rd_lo == rd_hi {
                     return Err(Trap::Unpredictable(
                         "Thumb long multiply with same high/low register",
                     ));
@@ -4704,20 +4710,22 @@ impl Cpu {
                     u64::from(self.regs[rn]).wrapping_mul(u64::from(self.regs[rm]))
                 };
                 let addend = if accumulate {
-                    (u64::from(self.regs[ra]) << 32) | u64::from(self.regs[rd])
+                    (u64::from(self.regs[rd_hi]) << 32) | u64::from(self.regs[rd_lo])
                 } else {
                     0
                 };
                 let result = product.wrapping_add(addend);
-                self.regs[rd] = result as u32;
-                self.regs[ra] = (result >> 32) as u32;
+                self.regs[rd_lo] = result as u32;
+                self.regs[rd_hi] = (result >> 32) as u32;
                 Ok(true)
             }
             (12, 8..=13) | (13, 12 | 13) => {
-                if [rd, ra, rn, rm].contains(&15) {
+                let rd_lo = ra;
+                let rd_hi = rd;
+                if [rd_lo, rd_hi, rn, rm].contains(&15) {
                     return Err(Trap::Unpredictable("Thumb multiply with PC register"));
                 }
-                if rd == ra {
+                if rd_lo == rd_hi {
                     return Err(Trap::Unpredictable(
                         "Thumb long multiply with same high/low register",
                     ));
@@ -4734,27 +4742,30 @@ impl Cpu {
                         i64::from(lo) + i64::from(hi)
                     }
                 };
-                let addend = ((u64::from(self.regs[ra]) << 32) | u64::from(self.regs[rd])) as i64;
+                let addend =
+                    ((u64::from(self.regs[rd_hi]) << 32) | u64::from(self.regs[rd_lo])) as i64;
                 let result = addend.wrapping_add(product);
-                self.regs[rd] = result as u32;
-                self.regs[ra] = (result >> 32) as u32;
+                self.regs[rd_lo] = result as u32;
+                self.regs[rd_hi] = (result >> 32) as u32;
                 Ok(true)
             }
             (14, 6) => {
-                if [rd, ra, rn, rm].contains(&15) {
+                let rd_lo = ra;
+                let rd_hi = rd;
+                if [rd_lo, rd_hi, rn, rm].contains(&15) {
                     return Err(Trap::Unpredictable("Thumb multiply with PC register"));
                 }
-                if rd == ra {
+                if rd_lo == rd_hi {
                     return Err(Trap::Unpredictable(
                         "Thumb long multiply with same high/low register",
                     ));
                 }
                 let result = u64::from(self.regs[rn])
                     .wrapping_mul(u64::from(self.regs[rm]))
-                    .wrapping_add(u64::from(self.regs[ra]))
-                    .wrapping_add(u64::from(self.regs[rd]));
-                self.regs[rd] = result as u32;
-                self.regs[ra] = (result >> 32) as u32;
+                    .wrapping_add(u64::from(self.regs[rd_lo]))
+                    .wrapping_add(u64::from(self.regs[rd_hi]));
+                self.regs[rd_lo] = result as u32;
+                self.regs[rd_hi] = (result >> 32) as u32;
                 Ok(true)
             }
             (9 | 11, 15) if ra == 15 => {
@@ -5069,6 +5080,34 @@ impl Cpu {
         if reglist & (1 << 15) == 0 {
             self.regs[15] = pc.wrapping_add(4);
         }
+        Ok(())
+    }
+
+    fn exec_thumb32_table_branch<M: Memory>(
+        &mut self,
+        first: u16,
+        second: u16,
+        pc: u32,
+        mem: &mut M,
+    ) -> Result<()> {
+        let rn = usize::from(first & 0xf);
+        let rm = usize::from(second & 0xf);
+        if rm == 15 {
+            return Err(Trap::Unpredictable("Thumb table branch with PC index register"));
+        }
+
+        let base = if rn == 15 {
+            pc.wrapping_add(4)
+        } else {
+            self.regs[rn]
+        };
+        let index = self.regs[rm];
+        let table_value = if second & (1 << 4) != 0 {
+            u32::from(mem.load16(base.wrapping_add(index.wrapping_mul(2)))?)
+        } else {
+            u32::from(mem.load8(base.wrapping_add(index))?)
+        };
+        self.regs[15] = pc.wrapping_add(4).wrapping_add(table_value << 1);
         Ok(())
     }
 
@@ -10284,6 +10323,23 @@ mod tests {
             .unwrap(); // beq.w not taken
         assert_eq!(cpu.pc(), 0x7036_177a);
 
+        cpu.set_pc(0x4ba20);
+        cpu.set_reg(2, 3);
+        mem.load_thumb_halfwords(0x4ba20, &[0xe8df, 0xf002])
+            .unwrap();
+        mem.load_bytes(0x4ba24, &[2, 7, 9, 15]).unwrap();
+        cpu.step(&mut mem).unwrap(); // tbb [pc, r2]
+        assert_eq!(cpu.pc(), 0x4ba42);
+
+        cpu.set_pc(0x4ba24);
+        cpu.set_reg(1, 0x4c000);
+        cpu.set_reg(3, 2);
+        mem.load_thumb_halfwords(0x4ba24, &[0xe8d1, 0xf013])
+            .unwrap();
+        mem.store16(0x4c004, 0x12).unwrap();
+        cpu.step(&mut mem).unwrap(); // tbh [r1, r3, lsl #1]
+        assert_eq!(cpu.pc(), 0x4ba4c);
+
         mem.store32(0x4c000, 0x1111_2222).unwrap();
         cpu.set_reg(3, 0x4c000);
         cpu.set_pc(0x4b6c4);
@@ -10432,6 +10488,16 @@ mod tests {
         cpu.step(&mut mem).unwrap(); // mls r5, r2, r3, r4
         assert_eq!(cpu.reg(5), 58);
 
+        cpu.set_pc(0x4b9b4);
+        cpu.set_reg(4, 0x0d20_c51b);
+        cpu.set_reg(7, 0xcccc_cccd);
+        mem.load_thumb_halfwords(0x4b9b4, &[0xfba4, 0x0107])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // umull r0, r1, r4, r7
+        let product = 0x0d20_c51bu64 * 0xcccc_cccdu64;
+        assert_eq!(cpu.reg(0), product as u32);
+        assert_eq!(cpu.reg(1), (product >> 32) as u32);
+
         cpu.set_pc(0x4b9b2);
         cpu.set_reg(2, 0x1111_2222);
         cpu.set_reg(3, 0x3333_4444);
@@ -10519,7 +10585,7 @@ mod tests {
         cpu.set_pc(0x4ba18);
         cpu.set_reg(2, 0xffff_fffe);
         cpu.set_reg(3, 3);
-        mem.load_thumb_halfwords(0x4ba18, &[0xfb82, 0x1003])
+        mem.load_thumb_halfwords(0x4ba18, &[0xfb82, 0x0103])
             .unwrap();
         cpu.step(&mut mem).unwrap(); // smull r0, r1, r2, r3
         assert_eq!(cpu.reg(0), 0xffff_fffa);
