@@ -119,8 +119,21 @@ const GL_LINEAR: u32 = 0x2601;
 const GL_REPEAT: u32 = 0x2901;
 const GL_MAX_TEXTURE_IMAGE_UNITS: u32 = 0x8872;
 const GL_MAX_VERTEX_ATTRIBS: u32 = 0x8869;
+const GL_ALPHA: u32 = 0x1906;
+const GL_RGB: u32 = 0x1907;
+const GL_RGBA: u32 = 0x1908;
+const GL_LUMINANCE: u32 = 0x1909;
+const GL_LUMINANCE_ALPHA: u32 = 0x190a;
+const GL_DEPTH_COMPONENT: u32 = 0x1902;
+const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_UNSIGNED_SHORT: u32 = 0x1403;
+const GL_UNSIGNED_INT: u32 = 0x1405;
 const GL_FLOAT: u32 = 0x1406;
 const GL_INT: u32 = 0x1404;
+const GL_UNSIGNED_SHORT_4_4_4_4: u32 = 0x8033;
+const GL_UNSIGNED_SHORT_5_5_5_1: u32 = 0x8034;
+const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
+const GL_BGRA_EXT: u32 = 0x80e1;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
 const GL_LINK_STATUS: u32 = 0x8b82;
 const GL_INFO_LOG_LENGTH: u32 = 0x8b84;
@@ -170,6 +183,7 @@ static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
 const GLES_EVENT_LIMIT: usize = 65_536;
+const GLES_EVENT_PAYLOAD_LIMIT: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -339,7 +353,7 @@ pub struct HleUnwindTable {
     pub exidx_count: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GlesEvent {
     ActiveTexture {
         texture: u32,
@@ -353,12 +367,14 @@ pub enum GlesEvent {
         size: u32,
         data: u32,
         usage: u32,
+        payload: Option<Vec<u8>>,
     },
     BufferSubData {
         target: u32,
         offset: u32,
         size: u32,
         data: u32,
+        payload: Option<Vec<u8>>,
     },
     BindTexture {
         target: u32,
@@ -379,6 +395,7 @@ pub enum GlesEvent {
         format: u32,
         ty: u32,
         pixels: u32,
+        payload: Option<Vec<u8>>,
     },
     TexSubImage2D {
         target: u32,
@@ -390,6 +407,7 @@ pub enum GlesEvent {
         format: u32,
         ty: u32,
         pixels: u32,
+        payload: Option<Vec<u8>>,
     },
     UseProgram {
         program: u32,
@@ -404,6 +422,7 @@ pub enum GlesEvent {
         location: i32,
         count: i32,
         values: u32,
+        payload: Option<Vec<u8>>,
     },
     UniformMatrix {
         columns: u8,
@@ -411,6 +430,7 @@ pub enum GlesEvent {
         count: i32,
         transpose: bool,
         values: u32,
+        payload: Option<Vec<u8>>,
     },
     VertexAttribPointer {
         index: u32,
@@ -489,6 +509,7 @@ pub enum GlesEvent {
         count: i32,
         ty: u32,
         indices: u32,
+        index_payload: Option<Vec<u8>>,
     },
     Flush,
     SwapBuffers {
@@ -498,7 +519,7 @@ pub enum GlesEvent {
 }
 
 impl GlesEvent {
-    pub fn kind(self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::ActiveTexture { .. } => "ActiveTexture",
             Self::BindBuffer { .. } => "BindBuffer",
@@ -531,6 +552,19 @@ impl GlesEvent {
             Self::DrawElements { .. } => "DrawElements",
             Self::Flush => "Flush",
             Self::SwapBuffers { .. } => "SwapBuffers",
+        }
+    }
+
+    pub fn payload_len(&self) -> usize {
+        match self {
+            Self::BufferData { payload, .. }
+            | Self::BufferSubData { payload, .. }
+            | Self::TexImage2D { payload, .. }
+            | Self::TexSubImage2D { payload, .. }
+            | Self::UniformVector { payload, .. }
+            | Self::UniformMatrix { payload, .. } => payload.as_ref().map_or(0, Vec::len),
+            Self::DrawElements { index_payload, .. } => index_payload.as_ref().map_or(0, Vec::len),
+            _ => 0,
         }
     }
 }
@@ -3064,20 +3098,26 @@ impl HleRuntime {
             }
             "glBufferData" => {
                 let usage = self.stack_arg(cpu, memory, 4)?;
+                let payload = gles_u32_len(cpu.reg(1))
+                    .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
                 self.push_gles_event(GlesEvent::BufferData {
                     target: cpu.reg(0),
                     size: cpu.reg(1),
                     data: cpu.reg(2),
                     usage,
+                    payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
             "glBufferSubData" => {
+                let payload = gles_u32_len(cpu.reg(2))
+                    .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
                 self.push_gles_event(GlesEvent::BufferSubData {
                     target: cpu.reg(0),
                     offset: cpu.reg(1),
                     size: cpu.reg(2),
                     data: cpu.reg(3),
+                    payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
@@ -3101,16 +3141,20 @@ impl HleRuntime {
                 let format = self.stack_arg(cpu, memory, 6)?;
                 let ty = self.stack_arg(cpu, memory, 7)?;
                 let pixels = self.stack_arg(cpu, memory, 8)?;
+                let height = self.stack_arg(cpu, memory, 4)? as i32;
+                let payload = gles_image_payload_len(cpu.reg(3) as i32, height, format, ty)
+                    .and_then(|len| gles_copy_payload(memory, pixels, len));
                 self.push_gles_event(GlesEvent::TexImage2D {
                     target: cpu.reg(0),
                     level: cpu.reg(1) as i32,
                     internal_format: cpu.reg(2) as i32,
                     width: cpu.reg(3) as i32,
-                    height: self.stack_arg(cpu, memory, 4)? as i32,
+                    height,
                     border: border as i32,
                     format,
                     ty,
                     pixels,
+                    payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
@@ -3120,6 +3164,8 @@ impl HleRuntime {
                 let format = self.stack_arg(cpu, memory, 6)?;
                 let ty = self.stack_arg(cpu, memory, 7)?;
                 let pixels = self.stack_arg(cpu, memory, 8)?;
+                let payload = gles_image_payload_len(width as i32, height as i32, format, ty)
+                    .and_then(|len| gles_copy_payload(memory, pixels, len));
                 self.push_gles_event(GlesEvent::TexSubImage2D {
                     target: cpu.reg(0),
                     level: cpu.reg(1) as i32,
@@ -3130,6 +3176,7 @@ impl HleRuntime {
                     format,
                     ty,
                     pixels,
+                    payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
@@ -3148,22 +3195,30 @@ impl HleRuntime {
             }
             "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv"
             | "glUniform2iv" | "glUniform3iv" | "glUniform4iv" => {
+                let components = uniform_vector_components(name);
+                let payload = gles_uniform_vector_payload_len(components, cpu.reg(1) as i32)
+                    .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
                 self.push_gles_event(GlesEvent::UniformVector {
-                    components: uniform_vector_components(name),
+                    components,
                     integer: name.ends_with("iv"),
                     location: cpu.reg(0) as i32,
                     count: cpu.reg(1) as i32,
                     values: cpu.reg(2),
+                    payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
             "glUniformMatrix2fv" | "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
+                let columns = uniform_matrix_columns(name);
+                let payload = gles_uniform_matrix_payload_len(columns, cpu.reg(1) as i32)
+                    .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
                 self.push_gles_event(GlesEvent::UniformMatrix {
-                    columns: uniform_matrix_columns(name),
+                    columns,
                     location: cpu.reg(0) as i32,
                     count: cpu.reg(1) as i32,
                     transpose: cpu.reg(2) != 0,
                     values: cpu.reg(3),
+                    payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
@@ -3278,11 +3333,14 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glDrawElements" => {
+                let index_payload = gles_draw_index_payload_len(cpu.reg(1) as i32, cpu.reg(2))
+                    .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
                 self.push_gles_event(GlesEvent::DrawElements {
                     mode: cpu.reg(0),
                     count: cpu.reg(1) as i32,
                     ty: cpu.reg(2),
                     indices: cpu.reg(3),
+                    index_payload,
                 });
                 Ok(self.return32(cpu, 0))
             }
@@ -6098,6 +6156,72 @@ fn uniform_matrix_columns(name: &str) -> u8 {
     }
 }
 
+fn gles_copy_payload<M: Memory>(memory: &mut M, ptr: u32, bytes: usize) -> Option<Vec<u8>> {
+    if ptr == 0 || bytes > GLES_EVENT_PAYLOAD_LIMIT {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(bytes);
+    for idx in 0..bytes {
+        let byte = load8(memory, ptr.wrapping_add(idx as u32)).ok()?;
+        payload.push(byte);
+    }
+    Some(payload)
+}
+
+fn gles_u32_len(bytes: u32) -> Option<usize> {
+    usize::try_from(bytes).ok()
+}
+
+fn gles_i32_count_len(count: i32, width: usize) -> Option<usize> {
+    let count = usize::try_from(count).ok()?;
+    count.checked_mul(width)
+}
+
+fn gles_uniform_vector_payload_len(components: u8, count: i32) -> Option<usize> {
+    gles_i32_count_len(count, usize::from(components).checked_mul(4)?)
+}
+
+fn gles_uniform_matrix_payload_len(columns: u8, count: i32) -> Option<usize> {
+    let columns = usize::from(columns);
+    gles_i32_count_len(count, columns.checked_mul(columns)?.checked_mul(4)?)
+}
+
+fn gles_draw_index_payload_len(count: i32, ty: u32) -> Option<usize> {
+    let elem_size = match ty {
+        GL_UNSIGNED_BYTE => 1,
+        GL_UNSIGNED_SHORT => 2,
+        GL_UNSIGNED_INT => 4,
+        _ => return None,
+    };
+    gles_i32_count_len(count, elem_size)
+}
+
+fn gles_image_payload_len(width: i32, height: i32, format: u32, ty: u32) -> Option<usize> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let pixels = width.checked_mul(height)?;
+    if matches!(
+        ty,
+        GL_UNSIGNED_SHORT_4_4_4_4 | GL_UNSIGNED_SHORT_5_5_5_1 | GL_UNSIGNED_SHORT_5_6_5
+    ) {
+        return pixels.checked_mul(2);
+    }
+    let components = match format {
+        GL_ALPHA | GL_LUMINANCE | GL_DEPTH_COMPONENT => 1,
+        GL_LUMINANCE_ALPHA => 2,
+        GL_RGB => 3,
+        GL_RGBA | GL_BGRA_EXT => 4,
+        _ => return None,
+    };
+    let elem_size = match ty {
+        GL_UNSIGNED_BYTE => 1,
+        GL_UNSIGNED_SHORT => 2,
+        GL_UNSIGNED_INT | GL_FLOAT => 4,
+        _ => return None,
+    };
+    pixels.checked_mul(components)?.checked_mul(elem_size)
+}
+
 fn gl_integer(name: u32) -> u32 {
     match name {
         GL_MAX_TEXTURE_SIZE => 4096,
@@ -6766,7 +6890,10 @@ mod tests {
         cpu.set_reg(0, 4);
         cpu.set_reg(1, 6);
         cpu.set_reg(2, 0x1403);
-        cpu.set_reg(3, 0x6000_1000);
+        memory
+            .load_bytes(0x1400, &[0, 0, 1, 0, 2, 0, 2, 0, 3, 0, 0, 0])
+            .unwrap();
+        cpu.set_reg(3, 0x1400);
         hle.dispatch("glDrawElements", &mut cpu, &mut memory)
             .unwrap();
 
@@ -6796,7 +6923,8 @@ mod tests {
                     mode: 4,
                     count: 6,
                     ty: 0x1403,
-                    indices: 0x6000_1000,
+                    indices: 0x1400,
+                    index_payload: Some(vec![0, 0, 1, 0, 2, 0, 2, 0, 3, 0, 0, 0]),
                 },
                 GlesEvent::SwapBuffers {
                     display: EGL_DISPLAY_HANDLE,
@@ -6838,35 +6966,56 @@ mod tests {
         hle.dispatch("glTexParameteri", &mut cpu, &mut memory)
             .unwrap();
 
-        memory.store32(0x1800, 16).unwrap();
+        let tex_payload: Vec<u8> = (0..16).collect();
+        memory.load_bytes(0x2100, &tex_payload).unwrap();
+        memory.store32(0x1800, 2).unwrap();
         memory.store32(0x1804, 0).unwrap();
         memory.store32(0x1808, 0x1908).unwrap();
         memory.store32(0x180c, 0x1401).unwrap();
-        memory.store32(0x1810, 0x6000_2000).unwrap();
+        memory.store32(0x1810, 0x2100).unwrap();
         cpu.set_reg(14, 0x2010);
         cpu.set_reg(0, 0x0de1);
         cpu.set_reg(1, 0);
         cpu.set_reg(2, 0x1908);
-        cpu.set_reg(3, 16);
+        cpu.set_reg(3, 2);
         hle.dispatch("glTexImage2D", &mut cpu, &mut memory).unwrap();
+
+        let tex_sub_payload: Vec<u8> = (32..40).collect();
+        memory.load_bytes(0x2120, &tex_sub_payload).unwrap();
+        memory.store32(0x1800, 1).unwrap();
+        memory.store32(0x1804, 2).unwrap();
+        memory.store32(0x1808, 0x1908).unwrap();
+        memory.store32(0x180c, 0x1401).unwrap();
+        memory.store32(0x1810, 0x2120).unwrap();
+        cpu.set_reg(14, 0x2012);
+        cpu.set_reg(0, 0x0de1);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 1);
+        hle.dispatch("glTexSubImage2D", &mut cpu, &mut memory)
+            .unwrap();
 
         cpu.set_reg(14, 0x2014);
         cpu.set_reg(0, 0x8892);
         cpu.set_reg(1, 3);
         hle.dispatch("glBindBuffer", &mut cpu, &mut memory).unwrap();
 
+        let buffer_payload: Vec<u8> = (64..72).collect();
+        memory.load_bytes(0x2200, &buffer_payload).unwrap();
         memory.store32(0x1800, 0x88e4).unwrap();
         cpu.set_reg(14, 0x2018);
         cpu.set_reg(0, 0x8892);
-        cpu.set_reg(1, 96);
-        cpu.set_reg(2, 0x6000_3000);
+        cpu.set_reg(1, 8);
+        cpu.set_reg(2, 0x2200);
         hle.dispatch("glBufferData", &mut cpu, &mut memory).unwrap();
 
+        let matrix_payload: Vec<u8> = (96..160).collect();
+        memory.load_bytes(0x2300, &matrix_payload).unwrap();
         cpu.set_reg(14, 0x201c);
         cpu.set_reg(0, 2);
         cpu.set_reg(1, 1);
         cpu.set_reg(2, 0);
-        cpu.set_reg(3, 0x6000_4000);
+        cpu.set_reg(3, 0x2300);
         hle.dispatch("glUniformMatrix4fv", &mut cpu, &mut memory)
             .unwrap();
 
@@ -6917,12 +7066,25 @@ mod tests {
                     target: 0x0de1,
                     level: 0,
                     internal_format: 0x1908,
-                    width: 16,
-                    height: 16,
+                    width: 2,
+                    height: 2,
                     border: 0,
                     format: 0x1908,
                     ty: 0x1401,
-                    pixels: 0x6000_2000,
+                    pixels: 0x2100,
+                    payload: Some(tex_payload),
+                },
+                GlesEvent::TexSubImage2D {
+                    target: 0x0de1,
+                    level: 0,
+                    xoffset: 0,
+                    yoffset: 1,
+                    width: 1,
+                    height: 2,
+                    format: 0x1908,
+                    ty: 0x1401,
+                    pixels: 0x2120,
+                    payload: Some(tex_sub_payload),
                 },
                 GlesEvent::BindBuffer {
                     target: 0x8892,
@@ -6930,16 +7092,18 @@ mod tests {
                 },
                 GlesEvent::BufferData {
                     target: 0x8892,
-                    size: 96,
-                    data: 0x6000_3000,
+                    size: 8,
+                    data: 0x2200,
                     usage: 0x88e4,
+                    payload: Some(buffer_payload),
                 },
                 GlesEvent::UniformMatrix {
                     columns: 4,
                     location: 2,
                     count: 1,
                     transpose: false,
-                    values: 0x6000_4000,
+                    values: 0x2300,
+                    payload: Some(matrix_payload),
                 },
                 GlesEvent::VertexAttribPointer {
                     index: 4,

@@ -158,17 +158,19 @@ The GLES HLE now records frame-relevant calls into a bounded `GlesEvent` queue:
 `glDrawElements`, and `eglSwapBuffers`, plus draw-state calls for active/bound
 textures, texture upload parameters, buffer binding/upload, shader program use,
 uniform values, vertex attribute pointers/enables, blend/depth/color/scissor
-state, and flush. The SDL2 host can replay the clear, viewport, and swap subset
-into a GLES2 context through `--sdl2`; draw replay and WebGL replay remain
-pending.
+state, and flush. Buffer, texture, uniform, and client-side draw-index calls now
+include copied guest payload bytes when the pointed memory is mapped and bounded
+for capture. The SDL2 host can replay the clear, viewport, and swap subset into
+a GLES2 context through `--sdl2`; draw replay and WebGL replay remain pending.
 
 The first-frame MCPE event capture no longer saturates the command queue after
 raising the bound to 65,536 events. With `--gles-summary`, the local 0.15.0.1
 APK reaches `eglSwapBuffers` at step `254925219` and reports 20,758 captured
 GLES events: 744 `DrawElements`, 841 `TexImage2D`, 839 `TexSubImage2D`, 1,496
 `VertexAttribPointer`, 719 `Uniform1i`, 752 uniform-vector updates, and one
-swap. The immediate replay target is therefore complete buffer/texture/uniform
-payload capture plus indexed draw submission into SDL2/WebGL.
+swap. The same probe records 3,726,912 bytes of GLES payload data. The immediate
+replay target is therefore indexed draw submission into SDL2/WebGL using the
+captured payloads.
 
 ## Latest Verification
 
@@ -185,11 +187,11 @@ payload capture plus indexed draw submission into SDL2/WebGL.
 - `cargo test dispatches_minecraft_transform_interpolation`
 - `cargo test dispatches_minecraft_ogl_unbind_all_textures`
 - `cargo test dispatches_no_network_social_tick_facades`
-- `cargo test` with 154 unit/integration-facing tests and 113 QEMU oracle tests
+- `cargo test` with 154 unit/integration-facing tests and 114 QEMU oracle tests
 - `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
 - `cargo check --features sdl2`
 - `cargo build --release`
-- `AEMU_TRACE_MCPE_RESOURCE_BRIDGE=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap --gles-summary` exits 0 after setting `MinecraftClient + 0x23e` to `0x01`, reaching `eglSwapBuffers` at step `254925219`, and summarizing 20,758 captured GLES events
+- `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap --gles-summary` exits 0 after reaching `eglSwapBuffers` at step `254925219` and summarizing 20,758 captured GLES events with 3,726,912 copied payload bytes
 - `run-apk-native ... --sdl2` is feature-gated behind `cargo run --features sdl2 -- ...`; this GUI path was build-checked but not opened during the audit run
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
   reports 579 reserved HLE symbols, 906 resolved imports, and zero unresolved imports

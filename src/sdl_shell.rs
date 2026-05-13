@@ -195,7 +195,7 @@ impl HostBackend for Sdl2Host {
 
     fn replay_gles_events(&mut self, events: &[GlesEvent]) -> HostResult<()> {
         for event in events {
-            match *event {
+            match event {
                 GlesEvent::ClearColor {
                     red,
                     green,
@@ -203,21 +203,21 @@ impl HostBackend for Sdl2Host {
                     alpha,
                 } => unsafe {
                     (self.gl.clear_color)(
-                        f32::from_bits(red),
-                        f32::from_bits(green),
-                        f32::from_bits(blue),
-                        f32::from_bits(alpha),
+                        f32::from_bits(*red),
+                        f32::from_bits(*green),
+                        f32::from_bits(*blue),
+                        f32::from_bits(*alpha),
                     );
                 },
                 GlesEvent::ClearDepthf { depth } => {
                     if let Some(clear_depthf) = self.gl.clear_depthf {
                         unsafe {
-                            clear_depthf(f32::from_bits(depth));
+                            clear_depthf(f32::from_bits(*depth));
                         }
                     }
                 }
                 GlesEvent::Clear { mask } => unsafe {
-                    (self.gl.clear)(mask);
+                    (self.gl.clear)(*mask);
                 },
                 GlesEvent::Viewport {
                     x,
@@ -225,7 +225,7 @@ impl HostBackend for Sdl2Host {
                     width,
                     height,
                 } => unsafe {
-                    (self.gl.viewport)(x, y, width, height);
+                    (self.gl.viewport)(*x, *y, *width, *height);
                 },
                 GlesEvent::SwapBuffers { .. } => self.swap_buffers()?,
                 _ => {}

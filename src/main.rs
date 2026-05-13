@@ -644,10 +644,13 @@ fn run_apk_native(
 
 fn print_gles_summary(events: &[aemu::hle_imports::GlesEvent]) {
     let mut counts = BTreeMap::new();
+    let mut payload_bytes = 0usize;
     for event in events {
         *counts.entry(event.kind()).or_insert(0usize) += 1;
+        payload_bytes += event.payload_len();
     }
     println!("gles events: {}", events.len());
+    println!("gles payload bytes: {payload_bytes}");
     for (kind, count) in counts {
         println!("  {kind}: {count}");
     }
