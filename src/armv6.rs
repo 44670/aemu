@@ -7938,7 +7938,7 @@ fn neon_halving_sub(a: u64, b: u64, size: usize, signed: bool) -> u64 {
             as u64)
             & neon_elem_mask(size)
     } else {
-        ((a.wrapping_sub(b) & neon_elem_mask(size)) >> 1) & neon_elem_mask(size)
+        (((i128::from(a) - i128::from(b)) >> 1) as i64 as u64) & neon_elem_mask(size)
     }
 }
 
@@ -8995,6 +8995,16 @@ mod tests {
         )
         .unwrap(); // vsub.i16 d5, d3, d4
         assert_eq!(cpu.dreg(5), 0x0007_0005_0003_0001);
+
+        cpu.set_dreg(3, 0xffff_8000_0001_0000);
+        cpu.set_dreg(4, 0x0001_ffff_0002_0001);
+        cpu.execute_arm(
+            enc_neon_3same(true, 1, 3, 7, 2, false, false, 4),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vhsub.u16 d7, d3, d4
+        assert_eq!(cpu.dreg(7), 0x7fff_c000_ffff_ffff);
 
         cpu.set_dreg(1, 0x0007_0003_0009_0001);
         cpu.set_dreg(2, 0x0004_0008_0002_0005);

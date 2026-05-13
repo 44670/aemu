@@ -5193,6 +5193,45 @@ fn qemu_oracle_neon_register_shift_counts_use_low_byte() {
 }
 
 #[test]
+fn qemu_oracle_neon_unsigned_halving_subtract_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_hsub_a\n\
+         vld1.16 {d3}, [r5]\n\
+         ldr r5, =values_hsub_b\n\
+         vld1.16 {d4}, [r5]\n\
+         vhsub.u16 d7, d3, d4\n\
+         ldr r5, =out_neon_hsub\n\
+         vst1.16 {d7}, [r5]\n\
+         ldr r0, [r5]\n\
+         ldr r1, [r5, #4]\n\
+         eor r0, r0, r1\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_hsub_a: .hword 0x0000, 0x0001, 0x8000, 0xffff\n\
+         values_hsub_b: .hword 0x0001, 0x0002, 0xffff, 0x0001\n\
+         out_neon_hsub: .space 8\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(3, 0xffff_8000_0001_0000);
+    cpu.set_dreg(4, 0x0001_ffff_0002_0001);
+    cpu.execute_arm(
+        neon_3same_instr(true, 1, 3, 7, 2, false, false, 4),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vhsub.u16 d7, d3, d4
+
+    let folded = (cpu.dreg(7) as u32) ^ ((cpu.dreg(7) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_vfp_double_lane_moves_match_interpreter() {
     let asm = oracle_program(
         ".fpu vfp\n\
