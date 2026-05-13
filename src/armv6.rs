@@ -759,6 +759,13 @@ impl Cpu {
             return self.exec_arm_neon_2reg_shift_long(instr, pc, u, imm6, vd, q, vm);
         }
 
+        if matches!(opcode, 14 | 15) {
+            if l {
+                return Ok(false);
+            }
+            return self.exec_arm_neon_vcvt_fixed(instr, pc, u, imm6, vd, q, vm, opcode == 15);
+        }
+
         if matches!(opcode, 8 | 9) {
             return self.exec_arm_neon_2reg_shift_narrow(instr, pc, u, imm6, vd, opcode, l, q, vm);
         }
@@ -922,6 +929,64 @@ impl Cpu {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_vcvt_fixed(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        unsigned: bool,
+        imm6: u32,
+        vd: usize,
+        q: bool,
+        vm: usize,
+        to_fixed: bool,
+    ) -> Result<bool> {
+        if imm6 & 0x20 == 0 {
+            return Ok(false);
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 || vm & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+
+        let fbits = 64 - imm6;
+        let scale = 2f64.powi(fbits as i32);
+        let src = self.neon_reg_bytes(vm, q);
+        let mut out = [0u8; 16];
+
+        for lane in 0..(if q { 4 } else { 2 }) {
+            let value = neon_read_elem(&src, lane, 2) as u32;
+            let result = if to_fixed {
+                let input = f64::from(f32::from_bits(value)) * scale;
+                let (bits, flags) = if unsigned {
+                    vfp_trunc_to_u32_bits(input)
+                } else {
+                    vfp_trunc_to_i32_bits(input)
+                };
+                self.fpscr |= flags;
+                bits
+            } else {
+                let input = if unsigned {
+                    f64::from(value)
+                } else {
+                    f64::from(value as i32)
+                } / scale;
+                let result = input as f32;
+                self.fpscr |= vfp_int_to_f32_inexact_flag(input, result);
+                result.to_bits()
+            };
+            neon_write_elem(&mut out, lane, 2, u64::from(result));
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
     fn exec_arm_neon_vext(&mut self, instr: u32, pc: u32) -> Result<bool> {
         let vd = vfp_double_d(instr);
         let vn = vfp_double_n(instr);
@@ -1029,6 +1094,23 @@ impl Cpu {
         let op2 = (instr >> 7) & 0xf;
 
         match (op1, op2) {
+            (0, 4 | 5) => self.exec_arm_neon_pairwise_add_long(
+                instr,
+                pc,
+                size,
+                op2 & 1 != 0,
+                false,
+                q,
+                vd,
+                vm,
+            ),
+            (0, 8..=11) => self.exec_arm_neon_2reg_count_or_not(instr, pc, size, op2, q, vd, vm),
+            (0, 12 | 13) => {
+                self.exec_arm_neon_pairwise_add_long(instr, pc, size, op2 & 1 != 0, true, q, vd, vm)
+            }
+            (0, 14 | 15) => {
+                self.exec_arm_neon_2reg_saturating_abs_neg(instr, pc, size, op2 == 15, q, vd, vm)
+            }
             (0, 0..=2) => {
                 self.check_dreg(vd)?;
                 self.check_dreg(vm)?;
@@ -1112,6 +1194,162 @@ impl Cpu {
             }
             _ => Ok(false),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_pairwise_add_long(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        size: usize,
+        unsigned: bool,
+        accumulate: bool,
+        q: bool,
+        vd: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if size == 3 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 || vm & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+
+        let src = self.neon_reg_bytes(vm, q);
+        let old = self.neon_reg_bytes(vd, q);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        let mask = neon_elem_mask(wide_size);
+
+        for lane in 0..neon_lanes(q, wide_size) {
+            let a = neon_read_elem(&src, lane * 2, size);
+            let b = neon_read_elem(&src, lane * 2 + 1, size);
+            let pair = if unsigned {
+                a.wrapping_add(b)
+            } else {
+                (neon_sign_extend(a, size) as i128 + neon_sign_extend(b, size) as i128) as u64
+            } & mask;
+            let result = if accumulate {
+                pair.wrapping_add(neon_read_elem(&old, lane, wide_size)) & mask
+            } else {
+                pair
+            };
+            neon_write_elem(&mut out, lane, wide_size, result);
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_2reg_count_or_not(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        size: usize,
+        op2: u32,
+        q: bool,
+        vd: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        match op2 {
+            8 | 9 if size == 3 => return Err(Trap::UndefinedArm { pc, instr }),
+            10 | 11 if size != 0 => return Err(Trap::UndefinedArm { pc, instr }),
+            _ => {}
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 || vm & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+
+        let src = self.neon_reg_bytes(vm, q);
+        let mut out = [0u8; 16];
+        let bytes = neon_reg_bytes(q);
+        if op2 == 11 {
+            for idx in 0..bytes {
+                out[idx] = !src[idx];
+            }
+        } else if op2 == 10 {
+            for idx in 0..bytes {
+                out[idx] = src[idx].count_ones() as u8;
+            }
+        } else {
+            let bits = neon_elem_bits(size);
+            let mask = neon_elem_mask(size);
+            for lane in 0..neon_lanes(q, size) {
+                let value = neon_read_elem(&src, lane, size) & mask;
+                let count_source = if op2 == 8 && value & (1u64 << (bits - 1)) != 0 {
+                    !value & mask
+                } else {
+                    value
+                };
+                let leading = if count_source == 0 {
+                    bits
+                } else {
+                    count_source.leading_zeros() - (64 - bits)
+                };
+                let result = if op2 == 8 { leading - 1 } else { leading };
+                neon_write_elem(&mut out, lane, size, u64::from(result));
+            }
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_2reg_saturating_abs_neg(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        size: usize,
+        negate: bool,
+        q: bool,
+        vd: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if size == 3 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 || vm & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+
+        let bits = neon_elem_bits(size);
+        let min = -(1i128 << (bits - 1));
+        let max = (1i128 << (bits - 1)) - 1;
+        let src = self.neon_reg_bytes(vm, q);
+        let mut out = [0u8; 16];
+        for lane in 0..neon_lanes(q, size) {
+            let value = i128::from(neon_sign_extend(neon_read_elem(&src, lane, size), size));
+            let result = if value == min {
+                self.cpsr.q = true;
+                max
+            } else if negate {
+                -value
+            } else {
+                value.abs()
+            };
+            neon_write_elem(&mut out, lane, size, result as i64 as u64);
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
     }
 
     fn exec_arm_neon_2reg_permute(
@@ -3534,6 +3772,14 @@ impl Cpu {
             return Ok(());
         }
 
+        if self.exec_thumb32_hint(first, second)? {
+            return Ok(());
+        }
+
+        if self.exec_thumb32_exclusive(first, second, pc, mem)? {
+            return Ok(());
+        }
+
         if (first & 0xf800) == 0xf000 && (second & 0x8000) != 0 {
             return self.exec_thumb32_branch(first, second, pc);
         }
@@ -3565,8 +3811,11 @@ impl Cpu {
             return self.exec_thumb32_strd(first, second, pc, mem);
         }
 
-        if (first & 0xfff0) == 0xf8c0 || (first & 0xfff0) == 0xf8d0 {
-            return self.exec_thumb32_word_transfer(first, second, pc, mem);
+        if matches!(
+            first & 0xfff0,
+            0xf880 | 0xf890 | 0xf8a0 | 0xf8b0 | 0xf8c0 | 0xf8d0
+        ) {
+            return self.exec_thumb32_immediate_transfer(first, second, pc, mem);
         }
 
         if (first & 0xffff) == 0xe92d {
@@ -3574,6 +3823,69 @@ impl Cpu {
         }
 
         Err(Trap::UndefinedThumb { pc, instr: first })
+    }
+
+    fn exec_thumb32_hint(&mut self, first: u16, second: u16) -> Result<bool> {
+        if first == 0xf3af && (second & 0xfff0) == 0x8000 {
+            return Ok(true);
+        }
+        if first == 0xf3bf && (second & 0xfff0) == 0x8f20 {
+            self.exclusive_reservation = None;
+            return Ok(true);
+        }
+        if first == 0xf3bf && matches!(second & 0xfff0, 0x8f40 | 0x8f50 | 0x8f60) {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn exec_thumb32_exclusive<M: Memory>(
+        &mut self,
+        first: u16,
+        second: u16,
+        _pc: u32,
+        mem: &mut M,
+    ) -> Result<bool> {
+        if (first & 0xfff0) == 0xe850 && (second & 0x0f00) == 0x0f00 {
+            let rn = usize::from(first & 0xf);
+            let rt = usize::from((second >> 12) & 0xf);
+            if rn == 15 || rt == 15 {
+                return Err(Trap::Unpredictable("Thumb LDREX with PC register"));
+            }
+            let addr = self.regs[rn].wrapping_add(u32::from(second & 0xff) << 2);
+            self.regs[rt] = mem.load32(addr)?;
+            self.exclusive_reservation = Some(ExclusiveReservation { addr, size: 4 });
+            return Ok(true);
+        }
+
+        if (first & 0xfff0) == 0xe840 {
+            let rn = usize::from(first & 0xf);
+            let rt = usize::from((second >> 12) & 0xf);
+            let rd = usize::from((second >> 8) & 0xf);
+            if rn == 15 || rd == 15 || rt == 15 {
+                return Err(Trap::Unpredictable("Thumb STREX with PC register"));
+            }
+            if rd == rn || rd == rt {
+                return Err(Trap::Unpredictable(
+                    "Thumb STREX status register overlaps operand",
+                ));
+            }
+            let addr = self.regs[rn].wrapping_add(u32::from(second & 0xff) << 2);
+            if self
+                .exclusive_reservation
+                .map(|reservation| reservation.addr == addr && reservation.size == 4)
+                .unwrap_or(false)
+            {
+                mem.store32(addr, self.regs[rt])?;
+                self.regs[rd] = 0;
+            } else {
+                self.regs[rd] = 1;
+            }
+            self.exclusive_reservation = None;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn exec_thumb32_modified_immediate(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
@@ -3749,46 +4061,96 @@ impl Cpu {
         Ok(())
     }
 
-    fn exec_thumb32_word_transfer<M: Memory>(
+    fn exec_thumb32_immediate_transfer<M: Memory>(
         &mut self,
         first: u16,
         second: u16,
         pc: u32,
         mem: &mut M,
     ) -> Result<()> {
-        let load = (first & 0x0010) != 0;
+        let op = first & 0xfff0;
+        let load = matches!(op, 0xf890 | 0xf8b0 | 0xf8d0);
+        let size = match op {
+            0xf880 | 0xf890 => 1,
+            0xf8a0 | 0xf8b0 => 2,
+            0xf8c0 | 0xf8d0 => 4,
+            _ => unreachable!(),
+        };
         let rn = usize::from(first & 0xf);
         let rt = usize::from((second >> 12) & 0xf);
         if rn == 15 {
             if !load {
                 return Err(Trap::Unpredictable(
-                    "Thumb word store with PC base register",
+                    "Thumb immediate store with PC base register",
                 ));
             }
             let addr = (pc.wrapping_add(4) & !3).wrapping_add(u32::from(second & 0x0fff));
-            let value = mem.load32(addr)?;
-            if rt == 15 {
-                self.branch_exchange(value);
-            } else {
-                self.regs[rt] = value;
+            match size {
+                1 => {
+                    if rt == 15 {
+                        return Err(Trap::Unpredictable("Thumb byte load with PC destination"));
+                    }
+                    self.regs[rt] = u32::from(mem.load8(addr)?);
+                }
+                2 => {
+                    if rt == 15 {
+                        return Err(Trap::Unpredictable(
+                            "Thumb halfword load with PC destination",
+                        ));
+                    }
+                    self.regs[rt] = u32::from(mem.load16(addr)?);
+                }
+                4 => {
+                    let value = mem.load32(addr)?;
+                    if rt == 15 {
+                        self.branch_exchange(value);
+                    } else {
+                        self.regs[rt] = value;
+                    }
+                }
+                _ => unreachable!(),
             }
             return Ok(());
         }
         let addr = self.regs[rn].wrapping_add(u32::from(second & 0x0fff));
         if load {
-            let value = mem.load32(addr)?;
-            if rt == 15 {
-                self.branch_exchange(value);
-            } else {
-                self.regs[rt] = value;
+            match size {
+                1 => {
+                    if rt == 15 {
+                        return Err(Trap::Unpredictable("Thumb byte load with PC destination"));
+                    }
+                    self.regs[rt] = u32::from(mem.load8(addr)?);
+                }
+                2 => {
+                    if rt == 15 {
+                        return Err(Trap::Unpredictable(
+                            "Thumb halfword load with PC destination",
+                        ));
+                    }
+                    self.regs[rt] = u32::from(mem.load16(addr)?);
+                }
+                4 => {
+                    let value = mem.load32(addr)?;
+                    if rt == 15 {
+                        self.branch_exchange(value);
+                    } else {
+                        self.regs[rt] = value;
+                    }
+                }
+                _ => unreachable!(),
             }
         } else {
             if rt == 15 {
                 return Err(Trap::Unpredictable(
-                    "Thumb word store with PC source register",
+                    "Thumb immediate store with PC source register",
                 ));
             }
-            self.store32(mem, addr, self.regs[rt])?;
+            match size {
+                1 => self.store8(mem, addr, self.regs[rt] as u8)?,
+                2 => self.store16(mem, addr, self.regs[rt] as u16)?,
+                4 => self.store32(mem, addr, self.regs[rt])?,
+                _ => unreachable!(),
+            }
         }
         Ok(())
     }
@@ -7649,6 +8011,65 @@ mod tests {
     }
 
     #[test]
+    fn neon_two_register_misc_pairwise_count_and_saturating_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        let pack_u16x4 = |values: [u16; 4]| {
+            let mut bytes = [0u8; 8];
+            for (idx, value) in values.into_iter().enumerate() {
+                bytes[idx * 2..idx * 2 + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            u64::from_le_bytes(bytes)
+        };
+        let pack_i16x4 = |values: [i16; 4]| {
+            let mut bytes = [0u8; 8];
+            for (idx, value) in values.into_iter().enumerate() {
+                bytes[idx * 2..idx * 2 + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            u64::from_le_bytes(bytes)
+        };
+
+        cpu.set_dreg(28, u64::from_le_bytes([1, 2, 250, 5, 0xff, 1, 0, 16]));
+        cpu.set_dreg(29, u64::from_le_bytes([10, 20, 30, 40, 50, 60, 70, 80]));
+        cpu.execute_arm(enc_neon_2reg_misc(18, 0, 0, 5, true, 28), 0, &mut mem)
+            .unwrap(); // vpaddl.u8 q9, q14
+        assert_eq!(cpu.dreg(18), pack_u16x4([3, 255, 256, 16]));
+        assert_eq!(cpu.dreg(19), pack_u16x4([30, 70, 110, 150]));
+
+        cpu.set_dreg(14, u64::from(10u32) | (u64::from(20u32) << 32));
+        cpu.set_dreg(16, pack_i16x4([-1, -2, 1000, -2000]));
+        cpu.execute_arm(enc_neon_2reg_misc(14, 1, 0, 12, false, 16), 0, &mut mem)
+            .unwrap(); // vpadal.s16 d14, d16
+        assert_eq!(
+            cpu.dreg(14),
+            u64::from(7u32) | (u64::from((-980i32) as u32) << 32)
+        );
+
+        cpu.set_dreg(
+            2,
+            u64::from_le_bytes([0x00, 0x01, 0x80, 0xff, 0x0f, 0xf0, 0x55, 0xaa]),
+        );
+        cpu.execute_arm(enc_neon_2reg_misc(4, 0, 0, 9, false, 2), 0, &mut mem)
+            .unwrap(); // vclz.i8 d4, d2
+        assert_eq!(cpu.dreg(4), u64::from_le_bytes([8, 7, 0, 0, 4, 0, 1, 0]));
+
+        cpu.execute_arm(enc_neon_2reg_misc(5, 0, 0, 10, false, 2), 0, &mut mem)
+            .unwrap(); // vcnt.8 d5, d2
+        assert_eq!(cpu.dreg(5), u64::from_le_bytes([0, 1, 1, 8, 4, 4, 4, 4]));
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(6, u64::from_le_bytes([0x80, 0xff, 0x7f, 0x01, 0, 0, 0, 0]));
+        cpu.execute_arm(enc_neon_2reg_misc(7, 0, 0, 14, false, 6), 0, &mut mem)
+            .unwrap(); // vqabs.s8 d7, d6
+        assert_eq!(
+            cpu.dreg(7),
+            u64::from_le_bytes([0x7f, 1, 0x7f, 1, 0, 0, 0, 0])
+        );
+        assert!(cpu.cpsr.q);
+    }
+
+    #[test]
     fn neon_immediate_shift_and_narrow_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
@@ -7692,6 +8113,33 @@ mod tests {
         .unwrap(); // vqshrun.s64 d7, q8, #1
         assert_eq!(cpu.dreg(7), 1);
         assert!(cpu.cpsr.q);
+
+        let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+        cpu.fpscr = 0;
+        cpu.set_dreg(26, pack2(1.5, 2.0));
+        cpu.set_dreg(27, pack2(0.5, 3.0));
+        cpu.execute_arm(
+            enc_neon_2reg_shift(true, 41, 22, 15, false, true, 26),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vcvt.u32.f32 q11, q13, #23
+        assert_eq!(cpu.dreg(22), 0x0100_0000_00c0_0000);
+        assert_eq!(cpu.dreg(23), 0x0180_0000_0040_0000);
+        assert_eq!(cpu.fpscr & FPSCR_IOC, 0);
+
+        cpu.set_dreg(2, 0x0100_0000_00c0_0000);
+        cpu.set_dreg(3, 0x0180_0000_0040_0000);
+        cpu.execute_arm(
+            enc_neon_2reg_shift(true, 41, 22, 14, false, true, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vcvt.f32.u32 q11, q1, #23
+        assert_eq!(f32::from_bits(cpu.sreg(44)), 1.5);
+        assert_eq!(f32::from_bits(cpu.sreg(45)), 2.0);
+        assert_eq!(f32::from_bits(cpu.sreg(46)), 0.5);
+        assert_eq!(f32::from_bits(cpu.sreg(47)), 3.0);
     }
 
     #[test]
@@ -8080,6 +8528,29 @@ mod tests {
         assert_eq!(cpu.pc(), 0x4c190);
         assert!(cpu.cpsr.t);
 
+        cpu.set_pc(0x4b6c0);
+        mem.load_thumb_halfwords(0x4b6c0, &[0xf3bf, 0x8f5b])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // dmb ish
+        assert_eq!(cpu.pc(), 0x4b6c4);
+        assert!(cpu.cpsr.t);
+
+        mem.store32(0x4c000, 0x1111_2222).unwrap();
+        cpu.set_reg(3, 0x4c000);
+        cpu.set_pc(0x4b6c4);
+        mem.load_thumb_halfwords(0x4b6c4, &[0xe853, 0x5f00])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ldrex r5, [r3]
+        assert_eq!(cpu.reg(5), 0x1111_2222);
+
+        cpu.set_reg(2, 0x3333_4444);
+        cpu.set_pc(0x4b6c8);
+        mem.load_thumb_halfwords(0x4b6c8, &[0xe843, 0x2100])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // strex r1, r2, [r3]
+        assert_eq!(cpu.reg(1), 0);
+        assert_eq!(mem.load32(0x4c000).unwrap(), 0x3333_4444);
+
         cpu.set_pc(0x4b6a2);
         cpu.set_reg(0, 0x0000_00f0);
         mem.load_thumb_halfwords(0x4b6a2, &[0xfab0, 0xf380])
@@ -8153,6 +8624,20 @@ mod tests {
             .unwrap();
         cpu.step(&mut mem).unwrap(); // str.w r1, [r6, #0x98]
         assert_eq!(mem.load32(0x4c298).unwrap(), 0x5555_6666);
+
+        cpu.set_pc(0x4ba08);
+        cpu.set_reg(3, 0x4c2a0);
+        cpu.set_reg(14, 0x1234_56ee);
+        mem.load_thumb_halfwords(0x4ba08, &[0xf883, 0xe000])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // strb.w lr, [r3]
+        assert_eq!(mem.load8(0x4c2a0).unwrap(), 0xee);
+
+        cpu.set_pc(0x4ba0c);
+        mem.load_thumb_halfwords(0x4ba0c, &[0xf893, 0x2000])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ldrb.w r2, [r3]
+        assert_eq!(cpu.reg(2), 0xee);
 
         cpu.set_pc(0x4ba10);
         mem.load_thumb_halfwords(0x4ba10, &[0xf8df, 0x4498])

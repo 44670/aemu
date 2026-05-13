@@ -69,7 +69,7 @@ pub enum NativeRuntimeStep {
 pub struct NativeRuntimeTraceEntry {
     pub pc: u32,
     pub isa: Isa,
-    pub lr: u32,
+    pub regs: [u32; 16],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,8 +113,20 @@ impl fmt::Display for NativeRuntimeError {
                     for entry in tail {
                         write!(
                             f,
-                            "\n  {:?} pc={:#010x} lr={:#010x}",
-                            entry.isa, entry.pc, entry.lr
+                            "\n  {:?} pc={:#010x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r12={:#010x} sp={:#010x} lr={:#010x}",
+                            entry.isa,
+                            entry.pc,
+                            entry.regs[0],
+                            entry.regs[1],
+                            entry.regs[2],
+                            entry.regs[3],
+                            entry.regs[4],
+                            entry.regs[5],
+                            entry.regs[6],
+                            entry.regs[7],
+                            entry.regs[12],
+                            entry.regs[13],
+                            entry.regs[14],
                         )?;
                     }
                 }
@@ -256,7 +268,7 @@ impl NativeRuntime {
             tail.push_back(NativeRuntimeTraceEntry {
                 pc: self.cpu.pc(),
                 isa: self.cpu.isa(),
-                lr: self.cpu.reg(14),
+                regs: core::array::from_fn(|idx| self.cpu.reg(idx)),
             });
             if let Err(source) = self.step() {
                 return Err(NativeRuntimeError::Traced {
@@ -265,7 +277,10 @@ impl NativeRuntime {
                 });
             }
         }
-        Err(NativeRuntimeError::Cpu(Trap::StepLimit))
+        Err(NativeRuntimeError::Traced {
+            source: Box::new(NativeRuntimeError::Cpu(Trap::StepLimit)),
+            tail: tail.into_iter().collect(),
+        })
     }
 
     pub fn run_constructors(
