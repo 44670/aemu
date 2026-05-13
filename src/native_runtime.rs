@@ -16,6 +16,20 @@ const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
 const RUN_FUNCTION_TRACE_LEN: usize = 24;
+const ANDROID_APP_CONFIG_OFFSET: u32 = 0x10;
+const ANDROID_APP_LOOPER_OFFSET: u32 = 0x1c;
+const ANDROID_APP_INPUT_QUEUE_OFFSET: u32 = 0x20;
+const ANDROID_APP_WINDOW_OFFSET: u32 = 0x24;
+const ANDROID_APP_ACTIVITY_STATE_OFFSET: u32 = 0x38;
+const ANDROID_APP_DESTROY_REQUESTED_OFFSET: u32 = 0x3c;
+const ANDROID_APP_RUNNING_OFFSET: u32 = 0x6c;
+const ANDROID_APP_PENDING_INPUT_QUEUE_OFFSET: u32 = 0x7c;
+const ANDROID_APP_PENDING_WINDOW_OFFSET: u32 = 0x80;
+const ANDROID_POLL_SOURCE_MAIN: u32 = 1;
+const APP_CMD_INIT_WINDOW: u32 = 1;
+const APP_CMD_GAINED_FOCUS: u32 = 6;
+const APP_CMD_START: u32 = 10;
+const APP_CMD_RESUME: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeConfig {
@@ -350,11 +364,71 @@ impl NativeRuntime {
         harness: NativeActivityHarness,
     ) -> Result<(), NativeRuntimeError> {
         self.store_runtime32(app.wrapping_add(0x0c), harness.activity)?;
-        self.store_runtime32(app.wrapping_add(0x10), harness.configuration)?;
-        self.store_runtime32(app.wrapping_add(0x1c), harness.looper)?;
-        self.store_runtime32(app.wrapping_add(0x20), harness.input_queue)?;
-        self.store_runtime32(app.wrapping_add(0x24), harness.window)?;
-        self.store_runtime32(app.wrapping_add(0x6c), 1)?;
+        self.store_runtime32(
+            app.wrapping_add(ANDROID_APP_CONFIG_OFFSET),
+            harness.configuration,
+        )?;
+        self.store_runtime32(app.wrapping_add(ANDROID_APP_LOOPER_OFFSET), harness.looper)?;
+        self.store_runtime32(
+            app.wrapping_add(ANDROID_APP_PENDING_INPUT_QUEUE_OFFSET),
+            harness.input_queue,
+        )?;
+        self.store_runtime32(
+            app.wrapping_add(ANDROID_APP_PENDING_WINDOW_OFFSET),
+            harness.window,
+        )?;
+        self.store_runtime32(app.wrapping_add(ANDROID_APP_WINDOW_OFFSET), 0)?;
+        self.store_runtime32(app.wrapping_add(ANDROID_APP_INPUT_QUEUE_OFFSET), 0)?;
+        self.store_runtime32(app.wrapping_add(ANDROID_APP_ACTIVITY_STATE_OFFSET), 0)?;
+        self.store_runtime32(app.wrapping_add(ANDROID_APP_DESTROY_REQUESTED_OFFSET), 0)?;
+        self.store_runtime32(app.wrapping_add(ANDROID_APP_RUNNING_OFFSET), 1)?;
+        self.queue_android_lifecycle_events(app)?;
+        Ok(())
+    }
+
+    fn queue_android_lifecycle_events(&mut self, app: u32) -> Result<(), NativeRuntimeError> {
+        let process = self.write_guest_words(&[
+            0xe92d_4030, // push {r4, r5, lr}
+            0xe1a0_4000, // mov r4, r0
+            0xe591_500c, // ldr r5, [r1, #12]
+            0xe355_0001, // cmp r5, #APP_CMD_INIT_WINDOW
+            0x0594_3080, // ldreq r3, [r4, #pendingWindow]
+            0x0584_3024, // streq r3, [r4, #window]
+            0xe355_000a, // cmp r5, #APP_CMD_START
+            0x0584_5038, // streq r5, [r4, #activityState]
+            0xe355_000b, // cmp r5, #APP_CMD_RESUME
+            0x0584_5038, // streq r5, [r4, #activityState]
+            0xe355_000d, // cmp r5, #APP_CMD_PAUSE
+            0x0584_5038, // streq r5, [r4, #activityState]
+            0xe355_000e, // cmp r5, #APP_CMD_STOP
+            0x0584_5038, // streq r5, [r4, #activityState]
+            0xe355_000f, // cmp r5, #APP_CMD_DESTROY
+            0x03a0_3001, // moveq r3, #1
+            0x0584_303c, // streq r3, [r4, #destroyRequested]
+            0xe594_3004, // ldr r3, [r4, #onAppCmd]
+            0xe353_0000, // cmp r3, #0
+            0x0a00_0002, // beq after_on_app_cmd
+            0xe1a0_0004, // mov r0, r4
+            0xe1a0_1005, // mov r1, r5
+            0xe12f_ff33, // blx r3
+            0xe355_0002, // cmp r5, #APP_CMD_TERM_WINDOW
+            0x03a0_3000, // moveq r3, #0
+            0x0584_3024, // streq r3, [r4, #window]
+            0xe8bd_8030, // pop {r4, r5, pc}
+        ])?;
+        for command in [
+            APP_CMD_START,
+            APP_CMD_RESUME,
+            APP_CMD_INIT_WINDOW,
+            APP_CMD_GAINED_FOCUS,
+        ] {
+            let source = self.alloc_guest_zeroed(0x10, 4)?;
+            self.store_runtime32(source, ANDROID_POLL_SOURCE_MAIN)?;
+            self.store_runtime32(source.wrapping_add(0x04), app)?;
+            self.store_runtime32(source.wrapping_add(0x08), process)?;
+            self.store_runtime32(source.wrapping_add(0x0c), command)?;
+            self.hle.queue_alooper_event(source);
+        }
         Ok(())
     }
 
@@ -819,6 +893,72 @@ mod tests {
         assert_eq!(
             runtime.link.memory.load32(java_vm_out).unwrap(),
             harness.java_vm
+        );
+    }
+
+    #[test]
+    fn native_activity_queues_lifecycle_alooper_sources() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x4000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        let harness = runtime.prepare_native_activity().unwrap();
+        let app = runtime.prepare_android_app(harness).unwrap();
+        let out = runtime.alloc_guest_zeroed(12, 4).unwrap();
+
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_reg(14, 0x6000_0000);
+        runtime.cpu.set_reg(0, 0);
+        runtime.cpu.set_reg(1, out);
+        runtime.cpu.set_reg(2, out + 4);
+        runtime.cpu.set_reg(3, out + 8);
+        runtime
+            .hle
+            .dispatch(
+                "ALooper_pollAll",
+                &mut runtime.cpu,
+                &mut runtime.link.memory,
+            )
+            .unwrap();
+
+        let source = runtime.link.memory.load32(out + 8).unwrap();
+        assert_eq!(runtime.cpu.reg(0), ANDROID_POLL_SOURCE_MAIN);
+        assert_eq!(runtime.link.memory.load32(source).unwrap(), 1);
+        assert_eq!(runtime.link.memory.load32(source + 4).unwrap(), app);
+        assert_ne!(runtime.link.memory.load32(source + 8).unwrap(), 0);
+        assert_eq!(
+            runtime.link.memory.load32(source + 12).unwrap(),
+            APP_CMD_START
+        );
+
+        runtime
+            .hle
+            .dispatch(
+                "ALooper_pollAll",
+                &mut runtime.cpu,
+                &mut runtime.link.memory,
+            )
+            .unwrap();
+        let source = runtime.link.memory.load32(out + 8).unwrap();
+        assert_eq!(
+            runtime.link.memory.load32(source + 12).unwrap(),
+            APP_CMD_RESUME
         );
     }
 

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 
 use crate::armv6::{Cpu, Memory};
@@ -47,6 +48,55 @@ const ARMV7_NEON_HWCAP: u32 = HWCAP_SWP
     | HWCAP_VFPV3
     | HWCAP_TLS
     | HWCAP_VFPD32;
+const EGL_DISPLAY_HANDLE: u32 = 1;
+const EGL_CONFIG_HANDLE: u32 = 2;
+const EGL_CONTEXT_HANDLE: u32 = 3;
+const EGL_SURFACE_HANDLE: u32 = 4;
+const EGL_SUCCESS: u32 = 0x3000;
+const EGL_BUFFER_SIZE: u32 = 0x3020;
+const EGL_ALPHA_SIZE: u32 = 0x3021;
+const EGL_BLUE_SIZE: u32 = 0x3022;
+const EGL_GREEN_SIZE: u32 = 0x3023;
+const EGL_RED_SIZE: u32 = 0x3024;
+const EGL_DEPTH_SIZE: u32 = 0x3025;
+const EGL_STENCIL_SIZE: u32 = 0x3026;
+const EGL_CONFIG_CAVEAT: u32 = 0x3027;
+const EGL_CONFIG_ID: u32 = 0x3028;
+const EGL_LEVEL: u32 = 0x3029;
+const EGL_MAX_PBUFFER_HEIGHT: u32 = 0x302a;
+const EGL_MAX_PBUFFER_PIXELS: u32 = 0x302b;
+const EGL_MAX_PBUFFER_WIDTH: u32 = 0x302c;
+const EGL_NATIVE_RENDERABLE: u32 = 0x302d;
+const EGL_NATIVE_VISUAL_ID: u32 = 0x302e;
+const EGL_NATIVE_VISUAL_TYPE: u32 = 0x302f;
+const EGL_SAMPLES: u32 = 0x3031;
+const EGL_SAMPLE_BUFFERS: u32 = 0x3032;
+const EGL_SURFACE_TYPE: u32 = 0x3033;
+const EGL_TRANSPARENT_TYPE: u32 = 0x3034;
+const EGL_NONE: u32 = 0x3038;
+const EGL_BIND_TO_TEXTURE_RGB: u32 = 0x3039;
+const EGL_BIND_TO_TEXTURE_RGBA: u32 = 0x303a;
+const EGL_MIN_SWAP_INTERVAL: u32 = 0x303b;
+const EGL_MAX_SWAP_INTERVAL: u32 = 0x303c;
+const EGL_LUMINANCE_SIZE: u32 = 0x303d;
+const EGL_ALPHA_MASK_SIZE: u32 = 0x303e;
+const EGL_COLOR_BUFFER_TYPE: u32 = 0x303f;
+const EGL_RENDERABLE_TYPE: u32 = 0x3040;
+const EGL_CONFORMANT: u32 = 0x3042;
+const EGL_VENDOR: u32 = 0x3053;
+const EGL_VERSION: u32 = 0x3054;
+const EGL_EXTENSIONS: u32 = 0x3055;
+const EGL_HEIGHT: u32 = 0x3056;
+const EGL_WIDTH: u32 = 0x3057;
+const EGL_CLIENT_APIS: u32 = 0x308d;
+const EGL_RGB_BUFFER: u32 = 0x308e;
+const EGL_WINDOW_BIT: u32 = 0x0004;
+const EGL_PBUFFER_BIT: u32 = 0x0001;
+const EGL_OPENGL_ES_BIT: u32 = 0x0001;
+const EGL_OPENGL_ES2_BIT: u32 = 0x0004;
+const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
+const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
+const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -177,6 +227,7 @@ pub struct HleRuntime {
     next_fd: u32,
     next_pthread_key: u32,
     pthread_specific: Vec<PthreadSpecific>,
+    alooper_events: VecDeque<u32>,
     random_state: u32,
 }
 
@@ -203,8 +254,13 @@ impl HleRuntime {
             next_fd: FIRST_FAKE_FD,
             next_pthread_key: 0,
             pthread_specific: Vec::new(),
+            alooper_events: VecDeque::new(),
             random_state: 0x1234_5678,
         }
+    }
+
+    pub fn queue_alooper_event(&mut self, source: u32) {
+        self.alooper_events.push_back(source);
     }
 
     pub fn dispatch<M: Memory>(
@@ -717,6 +773,7 @@ impl HleRuntime {
         let out_fd = cpu.reg(1);
         let out_events = cpu.reg(2);
         let out_data = cpu.reg(3);
+        let source = self.alooper_events.pop_front();
         if out_fd != 0 {
             store32(memory, out_fd, u32::MAX)?;
         }
@@ -724,9 +781,26 @@ impl HleRuntime {
             store32(memory, out_events, 0)?;
         }
         if out_data != 0 {
-            store32(memory, out_data, 0)?;
+            store32(memory, out_data, source.unwrap_or(0))?;
         }
-        Ok(self.return32(cpu, u32::MAX))
+        if std::env::var_os("AEMU_TRACE_ALOOPER").is_some() {
+            if let Some(source) = source {
+                let id = load32(memory, source).unwrap_or(u32::MAX);
+                let app = load32(memory, source.wrapping_add(4)).unwrap_or(0);
+                let process = load32(memory, source.wrapping_add(8)).unwrap_or(0);
+                let command = load32(memory, source.wrapping_add(12)).unwrap_or(u32::MAX);
+                eprintln!(
+                    "ALOOPER source={source:#010x} id={id} app={app:#010x} process={process:#010x} command={command}"
+                );
+            } else {
+                eprintln!("ALOOPER no-event");
+            }
+        }
+        if source.is_some() {
+            Ok(self.return32(cpu, 1))
+        } else {
+            Ok(self.return32(cpu, u32::MAX))
+        }
     }
 
     fn read_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -920,8 +994,10 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         match name {
-            "eglGetDisplay" | "eglCreateContext" | "eglCreateWindowSurface" => {
-                Ok(self.return32(cpu, 1))
+            "eglGetDisplay" => Ok(self.return32(cpu, EGL_DISPLAY_HANDLE)),
+            "eglCreateContext" => Ok(self.return32(cpu, EGL_CONTEXT_HANDLE)),
+            "eglCreateWindowSurface" | "eglCreatePbufferSurface" => {
+                Ok(self.return32(cpu, EGL_SURFACE_HANDLE))
             }
             "eglInitialize" => {
                 if cpu.reg(1) != 0 {
@@ -933,14 +1009,48 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 1))
             }
             "eglChooseConfig" => {
+                let configs = cpu.reg(2);
+                let config_size = cpu.reg(3);
                 let num_config_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
+                if configs != 0 && config_size != 0 {
+                    store32(memory, configs, EGL_CONFIG_HANDLE)?;
+                }
                 if num_config_ptr != 0 {
                     store32(memory, num_config_ptr, 1)?;
                 }
                 Ok(self.return32(cpu, 1))
             }
-            "eglGetError" => Ok(self.return32(cpu, 0x3000)),
+            "eglGetConfigAttrib" => {
+                let attr = cpu.reg(2);
+                let value_ptr = cpu.reg(3);
+                if value_ptr != 0 {
+                    store32(memory, value_ptr, egl_config_attrib(attr))?;
+                }
+                Ok(self.return32(cpu, 1))
+            }
+            "eglQuerySurface" => {
+                let attr = cpu.reg(2);
+                let value_ptr = cpu.reg(3);
+                if value_ptr != 0 {
+                    store32(memory, value_ptr, egl_surface_attrib(attr))?;
+                }
+                Ok(self.return32(cpu, 1))
+            }
+            "eglQueryString" => {
+                let Some(value) = egl_query_string(cpu.reg(1)) else {
+                    return Ok(self.return32(cpu, 0));
+                };
+                let ptr = self.alloc_c_string(memory, value)?;
+                Ok(self.return32(cpu, ptr))
+            }
+            "eglGetCurrentDisplay" => Ok(self.return32(cpu, EGL_DISPLAY_HANDLE)),
+            "eglGetCurrentContext" => Ok(self.return32(cpu, EGL_CONTEXT_HANDLE)),
+            "eglGetCurrentSurface" => Ok(self.return32(cpu, EGL_SURFACE_HANDLE)),
+            "eglGetError" => Ok(self.return32(cpu, EGL_SUCCESS)),
             "eglGetProcAddress" => Ok(self.return32(cpu, 0)),
+            "eglBindAPI" | "eglMakeCurrent" | "eglSwapBuffers" | "eglSwapInterval"
+            | "eglDestroySurface" | "eglDestroyContext" | "eglTerminate" | "eglReleaseThread"
+            | "eglSurfaceAttrib" | "eglWaitGL" | "eglWaitNative" => Ok(self.return32(cpu, 1)),
             _ => Ok(self.return32(cpu, 1)),
         }
     }
@@ -980,6 +1090,15 @@ impl HleRuntime {
             eprintln!("HLE alloc size={size:#x} align={align:#x} -> {start:#010x}");
         }
         Ok(start)
+    }
+
+    fn alloc_c_string<M: Memory>(&mut self, memory: &mut M, value: &str) -> Result<u32, HleError> {
+        let ptr = self.alloc(value.len() as u32 + 1, 1)?;
+        for (idx, byte) in value.bytes().enumerate() {
+            store8(memory, ptr.wrapping_add(idx as u32), byte)?;
+        }
+        store8(memory, ptr.wrapping_add(value.len() as u32), 0)?;
+        Ok(ptr)
     }
 
     fn set_errno<M: Memory>(&mut self, memory: &mut M, errno: u32) -> Result<(), HleError> {
@@ -1749,6 +1868,53 @@ fn align_up(value: u32, align: u32) -> Option<u32> {
         .map(|value| value & !(align - 1))
 }
 
+fn egl_query_string(name: u32) -> Option<&'static str> {
+    match name {
+        EGL_VENDOR => Some("AEMU"),
+        EGL_VERSION => Some("1.4 AEMU EGL"),
+        EGL_EXTENSIONS => Some("EGL_KHR_create_context EGL_KHR_surfaceless_context"),
+        EGL_CLIENT_APIS => Some("OpenGL ES"),
+        _ => None,
+    }
+}
+
+fn egl_config_attrib(attr: u32) -> u32 {
+    match attr {
+        EGL_BUFFER_SIZE => 32,
+        EGL_RED_SIZE | EGL_GREEN_SIZE | EGL_BLUE_SIZE | EGL_ALPHA_SIZE => 8,
+        EGL_DEPTH_SIZE => 24,
+        EGL_STENCIL_SIZE => 8,
+        EGL_CONFIG_CAVEAT => EGL_NONE,
+        EGL_CONFIG_ID => EGL_CONFIG_HANDLE,
+        EGL_LEVEL => 0,
+        EGL_MAX_PBUFFER_HEIGHT => EGL_DEFAULT_SURFACE_HEIGHT,
+        EGL_MAX_PBUFFER_PIXELS => EGL_DEFAULT_SURFACE_WIDTH * EGL_DEFAULT_SURFACE_HEIGHT,
+        EGL_MAX_PBUFFER_WIDTH => EGL_DEFAULT_SURFACE_WIDTH,
+        EGL_NATIVE_RENDERABLE => 0,
+        EGL_NATIVE_VISUAL_ID => ANDROID_WINDOW_FORMAT_RGBA_8888,
+        EGL_NATIVE_VISUAL_TYPE => EGL_NONE,
+        EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
+        EGL_SURFACE_TYPE => EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+        EGL_TRANSPARENT_TYPE => EGL_NONE,
+        EGL_BIND_TO_TEXTURE_RGB | EGL_BIND_TO_TEXTURE_RGBA => 0,
+        EGL_MIN_SWAP_INTERVAL | EGL_MAX_SWAP_INTERVAL => 1,
+        EGL_LUMINANCE_SIZE | EGL_ALPHA_MASK_SIZE => 0,
+        EGL_COLOR_BUFFER_TYPE => EGL_RGB_BUFFER,
+        EGL_RENDERABLE_TYPE | EGL_CONFORMANT => EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT,
+        _ => 0,
+    }
+}
+
+fn egl_surface_attrib(attr: u32) -> u32 {
+    match attr {
+        EGL_WIDTH => EGL_DEFAULT_SURFACE_WIDTH,
+        EGL_HEIGHT => EGL_DEFAULT_SURFACE_HEIGHT,
+        EGL_CONFIG_ID => EGL_CONFIG_HANDLE,
+        EGL_RENDERABLE_TYPE => EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::armv6::Isa;
@@ -1813,6 +1979,81 @@ mod tests {
         cpu.set_reg(0, AT_HWCAP2);
         hle.dispatch("getauxval", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn dispatches_egl_facade_outputs() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_VENDOR);
+        hle.dispatch("eglQueryString", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_c_string(&mut memory, cpu.reg(0), 32).unwrap(), "AEMU");
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 0x1104);
+        hle.dispatch("eglInitialize", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load32(0x1100).unwrap(), 1);
+        assert_eq!(memory.load32(0x1104).unwrap(), 4);
+
+        memory.store32(0x1200, 0x1124).unwrap();
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0x1120);
+        cpu.set_reg(3, 1);
+        cpu.set_reg(13, 0x1200);
+        hle.dispatch("eglChooseConfig", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load32(0x1120).unwrap(), EGL_CONFIG_HANDLE);
+        assert_eq!(memory.load32(0x1124).unwrap(), 1);
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_CONFIG_HANDLE);
+        cpu.set_reg(2, EGL_NATIVE_VISUAL_ID);
+        cpu.set_reg(3, 0x1130);
+        hle.dispatch("eglGetConfigAttrib", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(
+            memory.load32(0x1130).unwrap(),
+            ANDROID_WINDOW_FORMAT_RGBA_8888
+        );
+
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(2, EGL_RENDERABLE_TYPE);
+        cpu.set_reg(3, 0x1134);
+        hle.dispatch("eglGetConfigAttrib", &mut cpu, &mut memory)
+            .unwrap();
+        assert_ne!(memory.load32(0x1134).unwrap() & EGL_OPENGL_ES2_BIT, 0);
+
+        cpu.set_reg(14, 0x2014);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_SURFACE_HANDLE);
+        cpu.set_reg(2, EGL_WIDTH);
+        cpu.set_reg(3, 0x1140);
+        hle.dispatch("eglQuerySurface", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1140).unwrap(), EGL_DEFAULT_SURFACE_WIDTH);
+
+        cpu.set_reg(14, 0x2018);
+        cpu.set_reg(2, EGL_HEIGHT);
+        cpu.set_reg(3, 0x1144);
+        hle.dispatch("eglQuerySurface", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1144).unwrap(), EGL_DEFAULT_SURFACE_HEIGHT);
     }
 
     #[test]
@@ -1924,6 +2165,35 @@ mod tests {
         assert_eq!(cpu.reg(0), u32::MAX);
         assert_eq!(memory.load32(0x1100).unwrap(), u32::MAX);
         assert_eq!(memory.load32(0x1104).unwrap(), 0);
+        assert_eq!(memory.load32(0x1108).unwrap(), 0);
+    }
+
+    #[test]
+    fn dispatches_queued_alooper_event_source() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        hle.queue_alooper_event(0x1234_5678);
+
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 0x1104);
+        cpu.set_reg(3, 0x1108);
+        hle.dispatch("ALooper_pollAll", &mut cpu, &mut memory)
+            .unwrap();
+
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load32(0x1100).unwrap(), u32::MAX);
+        assert_eq!(memory.load32(0x1104).unwrap(), 0);
+        assert_eq!(memory.load32(0x1108).unwrap(), 0x1234_5678);
+
+        hle.dispatch("ALooper_pollAll", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
         assert_eq!(memory.load32(0x1108).unwrap(), 0);
     }
 
