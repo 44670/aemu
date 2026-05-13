@@ -25,7 +25,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Test APK path is `/mnt/hgfs/deb13/AndroidGames` | `AGENTS.md`, `docs/minecraft_pe_probe.md`, and CLI probes use that path. | Satisfied |
 | 1:1 guest address map | `src/native_loader.rs`, `src/guest_memory.rs`, `AGENTS.md`. | Satisfied |
 | APK native load/link | `cargo run -- link-apk ... --abi armeabi-v7a` reports loaded and relocated. | Satisfied for local ARMv7 research APK |
-| System import HLE | `src/hle_imports.rs`; local MCPE probe resolves 906 imports with zero unresolved. GLES object-name generation writes texture/buffer/framebuffer/renderbuffer names back to guest memory, and the current target facades cover libstdc++ hash helpers, GLES precision/texture-parameter queries, profiler ticks, no-input/gamepad polling, transform interpolation, render-context texture unbind, and no-network social/auth ticks. | Initial coverage |
+| System import HLE | `src/hle_imports.rs`; local MCPE probe resolves 906 imports with zero unresolved. GLES object-name generation writes texture/buffer/framebuffer/renderbuffer names back to guest memory, GLES shader/program HLE now reflects active uniforms and attributes from MCPE shader source, and the current target facades cover libstdc++ hash helpers, GLES precision/texture-parameter queries, profiler ticks, no-input/gamepad polling, transform interpolation, render-context texture unbind, and no-network social/auth ticks. | Initial coverage |
 | HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address and linked runtime HLE entries such as `__dynamic_cast`. | Initial coverage |
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, and MCPE UI render setup without an undefined NEON trap. | Initial coverage |
@@ -124,14 +124,30 @@ AEMU_TRACE_HLE=Swap AEMU_TRACE_HLE_LIMIT=20 AEMU_TRACE_STEPS=100000000 timeout 2
 This traces repeated `eglSwapInterval` and `eglSwapBuffers` calls beginning at
 about 82.33M guest steps. A companion `AEMU_TRACE_HLE=glClear` probe reaches
 repeated `glClearColor`, `glClearDepthf`, and `glClear` calls in the same
-window. A `Draw`-filtered 400M-step probe still did not observe `glDraw*`; the
-current blocker is therefore advancing from clear/swap presentation to real
-draw submission, not vector instruction decode, import resolution, EGL startup,
-or the former worker-pool coroutine loop.
+window.
+
+The GLES shader facade now tracks `glCreateShader`, `glShaderSource`,
+`glCreateProgram`, `glAttachShader`, and `glLinkProgram`, then reports active
+uniforms/attributes through `glGetProgramiv`, `glGetActiveUniform`,
+`glGetActiveAttrib`, `glGetUniformLocation`, and `glGetAttribLocation`.
+Reflection parses MCPE-style GLSL aliases such as `MAT4`, `POS3`, and `POS4`,
+takes the WebGL/GLES2 side of `#if __VERSION__ >= 300`, and filters
+declared-but-unused uniforms so MCPE does not crash in
+`mce::ShaderOGL::reflectShaderUniforms()` on optimized-out metadata.
+
+After this shader reflection work, a swap-filtered 140M-step probe still
+reaches repeated `eglSwapInterval` and `eglSwapBuffers` beginning at about
+82.63M guest steps. A `glDraw`-filtered 220M-step probe does not crash, but it
+still reaches the step cap without any traced `glDrawArrays` or
+`glDrawElements`. The current blocker is therefore advancing from clear/swap
+presentation to real draw submission, not vector instruction decode, import
+resolution, EGL startup, shader reflection, or the former worker-pool coroutine
+loop.
 
 ## Latest Verification
 
 - `cargo fmt --check`
+- `cargo test dispatches_gles_shader_reflection_facade_outputs`
 - `cargo test neon`
 - `cargo test dispatches_gles_object_name_facade_outputs`
 - `cargo test dispatches_gles_precision_and_texture_parameter_queries`
@@ -143,11 +159,15 @@ or the former worker-pool coroutine loop.
 - `cargo test dispatches_minecraft_transform_interpolation`
 - `cargo test dispatches_minecraft_ogl_unbind_all_textures`
 - `cargo test dispatches_no_network_social_tick_facades`
-- `cargo test` with 138 unit/integration-facing tests and 108 QEMU oracle tests
+- `cargo test` with 140 unit/integration-facing tests and 111 QEMU oracle tests
 - `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
 - `cargo check --features sdl2`
+- `AEMU_TRACE_HLE=Swap ... --steps 140000000 --launch` reaches repeated
+  `eglSwapInterval`/`eglSwapBuffers` at about 82.63M guest steps
+- `AEMU_TRACE_HLE=glDraw ... --steps 220000000 --launch` reaches the step cap
+  without a crash and without traced `glDraw*`
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
-  reports 578 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
+  reports 579 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
 
 ## Required Next Input
 

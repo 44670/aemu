@@ -198,9 +198,14 @@ gets past the earlier C++ RTTI stack crash. The runtime also now reserves
 `WorkerPool::processCoroutines(double)` as a narrow target HLE facade for the
 single-threaded Android HLE model. With that worker-pool drain bypassed, the
 local ARMv7 MCPE run reaches repeated `glClear*` and `eglSwapBuffers` calls at
-about 82.33M guest steps. It does not show an undefined NEON opcode; the
-remaining graphics blocker is advancing from clear/swap presentation to traced
-`glDraw*` submission rather than vector instruction decode or EGL startup.
+about 82.33M guest steps. The GLES facade now reflects active uniforms and
+attributes from MCPE GLSL shader source and avoids the
+`mce::ShaderOGL::reflectShaderUniforms()` null-metadata crash for
+declared-but-unused uniforms. A follow-up `glDraw`-filtered 220M-step probe
+still does not show traced `glDraw*`. It does not show an undefined NEON opcode;
+the remaining graphics blocker is advancing from clear/swap presentation to
+traced `glDraw*` submission rather than vector instruction decode, EGL startup,
+or shader reflection.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.

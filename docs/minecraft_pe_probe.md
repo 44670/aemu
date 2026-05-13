@@ -152,11 +152,19 @@ eglSwapBuffers
 ```
 
 A companion `AEMU_TRACE_HLE=glClear` probe reaches repeated `glClearColor`,
-`glClearDepthf`, and `glClear` calls in the same window. A `Draw`-filtered
-400M-step probe still did not observe `glDraw*`, so the next graphics target is
-real draw submission after clear/swap presentation. The run does not stop on an
-undefined NEON opcode. An older APK with `lib/armeabi/libminecraftpe.so` is
-still required to validate the ARMv6 Minecraft PE path.
+`glClearDepthf`, and `glClear` calls in the same window. The GLES HLE now keeps
+shader/program state and reflects active uniforms/attributes from MCPE GLSL
+source, including WebGL/GLES2 `#if __VERSION__ >= 300` handling and filtering of
+declared-but-unused uniforms that real GLES would optimize out.
+
+After that reflection work, a swap-filtered 140M-step probe still reaches
+repeated `eglSwapInterval` and `eglSwapBuffers` at about 82.63M guest steps. A
+`glDraw`-filtered 220M-step probe no longer crashes in
+`mce::ShaderOGL::reflectShaderUniforms()`, but it still does not observe
+`glDraw*`, so the next graphics target is real draw submission after clear/swap
+presentation. The run does not stop on an undefined NEON opcode. An older APK
+with `lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
+Minecraft PE path.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:

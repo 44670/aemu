@@ -118,6 +118,8 @@ const GL_LINEAR: u32 = 0x2601;
 const GL_REPEAT: u32 = 0x2901;
 const GL_MAX_TEXTURE_IMAGE_UNITS: u32 = 0x8872;
 const GL_MAX_VERTEX_ATTRIBS: u32 = 0x8869;
+const GL_FLOAT: u32 = 0x1406;
+const GL_INT: u32 = 0x1404;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
 const GL_LINK_STATUS: u32 = 0x8b82;
 const GL_INFO_LOG_LENGTH: u32 = 0x8b84;
@@ -125,6 +127,21 @@ const GL_ACTIVE_UNIFORMS: u32 = 0x8b86;
 const GL_ACTIVE_UNIFORM_MAX_LENGTH: u32 = 0x8b87;
 const GL_ACTIVE_ATTRIBUTES: u32 = 0x8b89;
 const GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: u32 = 0x8b8a;
+const GL_FLOAT_VEC2: u32 = 0x8b50;
+const GL_FLOAT_VEC3: u32 = 0x8b51;
+const GL_FLOAT_VEC4: u32 = 0x8b52;
+const GL_INT_VEC2: u32 = 0x8b53;
+const GL_INT_VEC3: u32 = 0x8b54;
+const GL_INT_VEC4: u32 = 0x8b55;
+const GL_BOOL: u32 = 0x8b56;
+const GL_BOOL_VEC2: u32 = 0x8b57;
+const GL_BOOL_VEC3: u32 = 0x8b58;
+const GL_BOOL_VEC4: u32 = 0x8b59;
+const GL_FLOAT_MAT2: u32 = 0x8b5a;
+const GL_FLOAT_MAT3: u32 = 0x8b5b;
+const GL_FLOAT_MAT4: u32 = 0x8b5c;
+const GL_SAMPLER_2D: u32 = 0x8b5e;
+const GL_SAMPLER_CUBE: u32 = 0x8b60;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
 const GL_LOW_FLOAT: u32 = 0x8df0;
 const GL_MEDIUM_FLOAT: u32 = 0x8df1;
@@ -285,6 +302,8 @@ pub struct HleRuntime {
     apk_path: Option<PathBuf>,
     assets: Vec<AndroidAsset>,
     next_gl_name: u32,
+    gl_shaders: Vec<GlShader>,
+    gl_programs: Vec<GlProgram>,
     next_fd: u32,
     files: Vec<FakeFile>,
     virtual_files: Vec<VirtualFile>,
@@ -310,6 +329,29 @@ struct AndroidAsset {
     buffer: u32,
     len: u32,
     closed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GlShader {
+    name: u32,
+    shader_type: u32,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct GlProgram {
+    name: u32,
+    shaders: Vec<u32>,
+    uniforms: Vec<GlActive>,
+    attributes: Vec<GlActive>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlActive {
+    name: String,
+    size: u32,
+    ty: u32,
+    location: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +398,8 @@ impl HleRuntime {
             apk_path: None,
             assets: Vec::new(),
             next_gl_name: 1,
+            gl_shaders: Vec::new(),
+            gl_programs: Vec::new(),
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
             virtual_files: Vec::new(),
@@ -2454,10 +2498,43 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         match name {
-            "glCreateProgram" | "glCreateShader" => {
-                let value = self.next_gl_name;
-                self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
+            "glCreateProgram" => {
+                let value = self.alloc_gl_name();
+                self.gl_programs.push(GlProgram {
+                    name: value,
+                    shaders: Vec::new(),
+                    uniforms: Vec::new(),
+                    attributes: Vec::new(),
+                });
                 Ok(self.return32(cpu, value))
+            }
+            "glCreateShader" => {
+                let value = self.alloc_gl_name();
+                self.gl_shaders.push(GlShader {
+                    name: value,
+                    shader_type: cpu.reg(0),
+                    source: String::new(),
+                });
+                Ok(self.return32(cpu, value))
+            }
+            "glShaderSource" => self.gl_shader_source(cpu, memory),
+            "glAttachShader" => {
+                let program = cpu.reg(0);
+                let shader = cpu.reg(1);
+                if let Some(program) = self
+                    .gl_programs
+                    .iter_mut()
+                    .find(|item| item.name == program)
+                {
+                    if !program.shaders.contains(&shader) {
+                        program.shaders.push(shader);
+                    }
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "glLinkProgram" => {
+                self.gl_link_program(cpu.reg(0));
+                Ok(self.return32(cpu, 0))
             }
             "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
                 self.gl_gen_names(cpu, memory)
@@ -2472,7 +2549,7 @@ impl HleRuntime {
             }
             "glGetError" => Ok(self.return32(cpu, 0)),
             "glGetProgramiv" => {
-                let value = gl_program_iv(cpu.reg(1));
+                let value = self.gl_program_iv(cpu.reg(0), cpu.reg(1));
                 if cpu.reg(2) != 0 {
                     store32(memory, cpu.reg(2), value)?;
                 }
@@ -2512,25 +2589,8 @@ impl HleRuntime {
                 }
                 Ok(self.return32(cpu, 0))
             }
-            "glGetActiveUniform" | "glGetActiveAttrib" => {
-                let length_ptr = cpu.reg(3);
-                let size_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
-                let type_ptr = load32(memory, cpu.reg(13).wrapping_add(4)).unwrap_or(0);
-                let name_ptr = load32(memory, cpu.reg(13).wrapping_add(8)).unwrap_or(0);
-                if length_ptr != 0 {
-                    store32(memory, length_ptr, 0)?;
-                }
-                if size_ptr != 0 {
-                    store32(memory, size_ptr, 0)?;
-                }
-                if type_ptr != 0 {
-                    store32(memory, type_ptr, 0)?;
-                }
-                if name_ptr != 0 && cpu.reg(2) != 0 {
-                    store8(memory, name_ptr, 0)?;
-                }
-                Ok(self.return32(cpu, 0))
-            }
+            "glGetActiveUniform" => self.gl_get_active(cpu, memory, true),
+            "glGetActiveAttrib" => self.gl_get_active(cpu, memory, false),
             "glGetProgramInfoLog" | "glGetShaderInfoLog" => {
                 let length_ptr = cpu.reg(2);
                 let info_log_ptr = cpu.reg(3);
@@ -2542,10 +2602,17 @@ impl HleRuntime {
                 }
                 Ok(self.return32(cpu, 0))
             }
-            "glGetAttribLocation" | "glGetUniformLocation" => Ok(self.return32(cpu, 0)),
+            "glGetAttribLocation" => self.gl_get_location(cpu, memory, false),
+            "glGetUniformLocation" => self.gl_get_location(cpu, memory, true),
             "glIsTexture" => Ok(self.return32(cpu, u32::from(cpu.reg(0) != 0))),
             _ => Ok(self.return32(cpu, 0)),
         }
+    }
+
+    fn alloc_gl_name(&mut self) -> u32 {
+        let value = self.next_gl_name;
+        self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
+        value
     }
 
     fn gl_gen_names<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2553,12 +2620,177 @@ impl HleRuntime {
         let out = cpu.reg(1);
         if out != 0 {
             for idx in 0..count {
-                let value = self.next_gl_name;
-                self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
+                let value = self.alloc_gl_name();
                 store32(memory, out.wrapping_add(idx.wrapping_mul(4)), value)?;
             }
         }
         Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_shader_source<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let shader_name = cpu.reg(0);
+        let count = cpu.reg(1);
+        let strings = cpu.reg(2);
+        let lengths = cpu.reg(3);
+        let mut source = String::new();
+        for idx in 0..count {
+            let string_ptr = load32(memory, strings.wrapping_add(idx.wrapping_mul(4)))?;
+            if string_ptr == 0 {
+                continue;
+            }
+            let bytes = if lengths != 0 {
+                let raw_len = load32(memory, lengths.wrapping_add(idx.wrapping_mul(4)))?;
+                if (raw_len as i32) >= 0 {
+                    load_bytes(memory, string_ptr, raw_len)?
+                } else {
+                    load_c_string(memory, string_ptr, 64 * 1024)?.into_bytes()
+                }
+            } else {
+                load_c_string(memory, string_ptr, 64 * 1024)?.into_bytes()
+            };
+            source.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        if let Some(shader) = self
+            .gl_shaders
+            .iter_mut()
+            .find(|shader| shader.name == shader_name)
+        {
+            shader.source = source;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_link_program(&mut self, program_name: u32) {
+        let Some(shader_names) = self
+            .gl_programs
+            .iter()
+            .find(|program| program.name == program_name)
+            .map(|program| program.shaders.clone())
+        else {
+            return;
+        };
+        let mut sources = Vec::new();
+        for shader_name in shader_names {
+            if let Some(shader) = self
+                .gl_shaders
+                .iter()
+                .find(|shader| shader.name == shader_name)
+            {
+                sources.push((shader.shader_type, shader.source.as_str()));
+            }
+        }
+        let uniforms = reflect_glsl_uniforms(&sources);
+        let attributes = reflect_glsl_attributes(&sources);
+        if let Some(program) = self
+            .gl_programs
+            .iter_mut()
+            .find(|program| program.name == program_name)
+        {
+            program.uniforms = uniforms;
+            program.attributes = attributes;
+        }
+    }
+
+    fn gl_program_iv(&self, program_name: u32, name: u32) -> u32 {
+        let program = self
+            .gl_programs
+            .iter()
+            .find(|program| program.name == program_name);
+        match name {
+            GL_LINK_STATUS => 1,
+            GL_INFO_LOG_LENGTH => 0,
+            GL_ACTIVE_UNIFORMS => program.map_or(0, |program| program.uniforms.len() as u32),
+            GL_ACTIVE_UNIFORM_MAX_LENGTH => program
+                .and_then(|program| active_max_name_len(&program.uniforms))
+                .unwrap_or(0),
+            GL_ACTIVE_ATTRIBUTES => program.map_or(0, |program| program.attributes.len() as u32),
+            GL_ACTIVE_ATTRIBUTE_MAX_LENGTH => program
+                .and_then(|program| active_max_name_len(&program.attributes))
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    fn gl_get_active<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        uniform: bool,
+    ) -> Result<(), HleError> {
+        let program_name = cpu.reg(0);
+        let index = cpu.reg(1) as usize;
+        let buf_size = cpu.reg(2);
+        let length_ptr = cpu.reg(3);
+        let size_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
+        let type_ptr = load32(memory, cpu.reg(13).wrapping_add(4)).unwrap_or(0);
+        let name_ptr = load32(memory, cpu.reg(13).wrapping_add(8)).unwrap_or(0);
+        let active = self
+            .gl_programs
+            .iter()
+            .find(|program| program.name == program_name)
+            .and_then(|program| {
+                if uniform {
+                    program.uniforms.get(index)
+                } else {
+                    program.attributes.get(index)
+                }
+            });
+        if let Some(active) = active {
+            let written = write_gl_name(memory, name_ptr, buf_size, &active.name)?;
+            if length_ptr != 0 {
+                store32(memory, length_ptr, written)?;
+            }
+            if size_ptr != 0 {
+                store32(memory, size_ptr, active.size)?;
+            }
+            if type_ptr != 0 {
+                store32(memory, type_ptr, active.ty)?;
+            }
+        } else {
+            if length_ptr != 0 {
+                store32(memory, length_ptr, 0)?;
+            }
+            if size_ptr != 0 {
+                store32(memory, size_ptr, 0)?;
+            }
+            if type_ptr != 0 {
+                store32(memory, type_ptr, 0)?;
+            }
+            if name_ptr != 0 && buf_size != 0 {
+                store8(memory, name_ptr, 0)?;
+            }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_get_location<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        uniform: bool,
+    ) -> Result<(), HleError> {
+        let program_name = cpu.reg(0);
+        let name = load_c_string(memory, cpu.reg(1), 1024).unwrap_or_default();
+        let location = self
+            .gl_programs
+            .iter()
+            .find(|program| program.name == program_name)
+            .and_then(|program| {
+                let active = if uniform {
+                    &program.uniforms
+                } else {
+                    &program.attributes
+                };
+                active
+                    .iter()
+                    .find(|item| active_name_matches(&item.name, &name))
+            })
+            .map_or(u32::MAX, |item| item.location);
+        Ok(self.return32(cpu, location))
     }
 
     pub(crate) fn alloc(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
@@ -4032,6 +4264,372 @@ fn egl_surface_attrib(attr: u32) -> u32 {
     }
 }
 
+fn active_max_name_len(active: &[GlActive]) -> Option<u32> {
+    active.iter().map(|item| item.name.len() as u32 + 1).max()
+}
+
+fn write_gl_name<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    buf_size: u32,
+    name: &str,
+) -> Result<u32, HleError> {
+    if ptr == 0 || buf_size == 0 {
+        return Ok(0);
+    }
+    let max_bytes = buf_size.saturating_sub(1) as usize;
+    let bytes = name.as_bytes();
+    let write_len = bytes.len().min(max_bytes);
+    for (idx, byte) in bytes.iter().copied().take(write_len).enumerate() {
+        store8(memory, ptr.wrapping_add(idx as u32), byte)?;
+    }
+    store8(memory, ptr.wrapping_add(write_len as u32), 0)?;
+    Ok(write_len as u32)
+}
+
+fn active_name_matches(active: &str, query: &str) -> bool {
+    active == query || active.strip_suffix("[0]").is_some_and(|base| base == query)
+}
+
+fn reflect_glsl_uniforms(sources: &[(u32, &str)]) -> Vec<GlActive> {
+    let mut active = Vec::new();
+    for (_, source) in sources {
+        let source = glsl_es2_visible_source(source);
+        reflect_glsl_declarations(&source, "uniform", &mut active);
+    }
+    active
+}
+
+fn reflect_glsl_attributes(sources: &[(u32, &str)]) -> Vec<GlActive> {
+    let mut active = Vec::new();
+    for (_, source) in sources {
+        let source = glsl_es2_visible_source(source);
+        reflect_glsl_declarations(&source, "attribute", &mut active);
+    }
+    active
+}
+
+fn reflect_glsl_declarations(source: &str, keyword: &str, active: &mut Vec<GlActive>) {
+    let tokens = glsl_tokens(source);
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        if tokens[idx] != keyword {
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        idx = skip_glsl_qualifiers(&tokens, idx);
+        let Some(ty_token) = tokens.get(idx) else {
+            break;
+        };
+        let Some(ty) = glsl_type_to_gl(ty_token) else {
+            idx = skip_glsl_declaration(&tokens, idx);
+            continue;
+        };
+        idx += 1;
+        loop {
+            idx = skip_glsl_qualifiers(&tokens, idx);
+            let Some(token) = tokens.get(idx) else {
+                return;
+            };
+            if token == ";" {
+                idx += 1;
+                break;
+            }
+            if token == "," {
+                idx += 1;
+                continue;
+            }
+            if !is_glsl_identifier(token) {
+                idx += 1;
+                continue;
+            }
+            let base_name = token.clone();
+            idx += 1;
+            let mut size = 1u32;
+            let mut name = base_name.clone();
+            if tokens.get(idx).is_some_and(|token| token == "[") {
+                if let Some(size_token) = tokens.get(idx + 1) {
+                    size = size_token.parse::<u32>().unwrap_or(1).max(1);
+                }
+                name = format!("{base_name}[0]");
+                while idx < tokens.len() && tokens[idx] != "]" {
+                    idx += 1;
+                }
+                if idx < tokens.len() {
+                    idx += 1;
+                }
+            }
+            if glsl_token_occurrences(&tokens, &base_name) > 1 {
+                push_gl_active(active, name, size, ty);
+            }
+            while idx < tokens.len() && tokens[idx] != "," && tokens[idx] != ";" {
+                idx += 1;
+            }
+        }
+    }
+}
+
+fn glsl_token_occurrences(tokens: &[String], name: &str) -> usize {
+    tokens.iter().filter(|token| token.as_str() == name).count()
+}
+
+fn push_gl_active(active: &mut Vec<GlActive>, name: String, size: u32, ty: u32) {
+    if active
+        .iter()
+        .any(|item| active_name_matches(&item.name, &name))
+    {
+        return;
+    }
+    active.push(GlActive {
+        name,
+        size,
+        ty,
+        location: active.len() as u32,
+    });
+}
+
+fn skip_glsl_qualifiers(tokens: &[String], mut idx: usize) -> usize {
+    loop {
+        let Some(token) = tokens.get(idx) else {
+            return idx;
+        };
+        if token == "layout" && tokens.get(idx + 1).is_some_and(|token| token == "(") {
+            idx += 2;
+            while idx < tokens.len() && tokens[idx] != ")" {
+                idx += 1;
+            }
+            if idx < tokens.len() {
+                idx += 1;
+            }
+            continue;
+        }
+        if !is_glsl_qualifier(token) {
+            return idx;
+        }
+        idx += 1;
+    }
+}
+
+fn skip_glsl_declaration(tokens: &[String], mut idx: usize) -> usize {
+    while idx < tokens.len() && tokens[idx] != ";" {
+        idx += 1;
+    }
+    idx.saturating_add(1)
+}
+
+fn is_glsl_qualifier(token: &str) -> bool {
+    matches!(
+        token,
+        "const"
+            | "centroid"
+            | "flat"
+            | "smooth"
+            | "invariant"
+            | "lowp"
+            | "mediump"
+            | "highp"
+            | "readonly"
+            | "writeonly"
+            | "coherent"
+            | "volatile"
+            | "restrict"
+    )
+}
+
+fn is_glsl_identifier(token: &str) -> bool {
+    token
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+}
+
+fn glsl_type_to_gl(token: &str) -> Option<u32> {
+    match token {
+        "float" => Some(GL_FLOAT),
+        "int" => Some(GL_INT),
+        "bool" => Some(GL_BOOL),
+        "vec2" => Some(GL_FLOAT_VEC2),
+        "vec3" | "POS3" => Some(GL_FLOAT_VEC3),
+        "vec4" | "POS4" => Some(GL_FLOAT_VEC4),
+        "ivec2" => Some(GL_INT_VEC2),
+        "ivec3" => Some(GL_INT_VEC3),
+        "ivec4" => Some(GL_INT_VEC4),
+        "bvec2" => Some(GL_BOOL_VEC2),
+        "bvec3" => Some(GL_BOOL_VEC3),
+        "bvec4" => Some(GL_BOOL_VEC4),
+        "mat2" => Some(GL_FLOAT_MAT2),
+        "mat3" => Some(GL_FLOAT_MAT3),
+        "mat4" | "MAT4" => Some(GL_FLOAT_MAT4),
+        "sampler2D" => Some(GL_SAMPLER_2D),
+        "samplerCube" => Some(GL_SAMPLER_CUBE),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlslPreprocFrame {
+    parent_active: bool,
+    condition_value: bool,
+    known: bool,
+    active: bool,
+}
+
+fn glsl_es2_visible_source(source: &str) -> String {
+    let source = strip_glsl_comments(source);
+    let mut out = String::new();
+    let mut frames: Vec<GlslPreprocFrame> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(expr) = trimmed.strip_prefix("#ifdef") {
+            let parent_active = frames.last().map_or(true, |frame| frame.active);
+            let condition_value = glsl_unknown_preproc_condition_value(expr);
+            frames.push(GlslPreprocFrame {
+                parent_active,
+                condition_value,
+                known: false,
+                active: parent_active && condition_value,
+            });
+            continue;
+        }
+        if let Some(expr) = trimmed.strip_prefix("#ifndef") {
+            let parent_active = frames.last().map_or(true, |frame| frame.active);
+            let condition_value = !glsl_unknown_preproc_condition_value(expr);
+            frames.push(GlslPreprocFrame {
+                parent_active,
+                condition_value,
+                known: false,
+                active: parent_active && condition_value,
+            });
+            continue;
+        }
+        if let Some(expr) = trimmed.strip_prefix("#if") {
+            let parent_active = frames.last().map_or(true, |frame| frame.active);
+            let (known, condition_value) = glsl_es2_preproc_condition_value(expr);
+            frames.push(GlslPreprocFrame {
+                parent_active,
+                condition_value,
+                known,
+                active: parent_active && condition_value,
+            });
+            continue;
+        }
+        if trimmed.starts_with("#else") {
+            if let Some(frame) = frames.last_mut() {
+                frame.active = if frame.known {
+                    frame.parent_active && !frame.condition_value
+                } else {
+                    false
+                };
+            }
+            continue;
+        }
+        if trimmed.starts_with("#endif") {
+            frames.pop();
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if frames.last().map_or(true, |frame| frame.active) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn glsl_unknown_preproc_condition_value(_expr: &str) -> bool {
+    true
+}
+
+fn glsl_es2_preproc_condition_value(expr: &str) -> (bool, bool) {
+    if !expr.contains("__VERSION__") {
+        return (false, true);
+    }
+    let compact: String = expr.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let value = compact.contains("__VERSION__<300")
+        || compact.contains("__VERSION__<=100")
+        || compact.contains("__VERSION__==100");
+    (true, value)
+}
+
+fn strip_glsl_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut idx = 0usize;
+    let mut in_block = false;
+    while idx < bytes.len() {
+        if in_block {
+            if bytes[idx] == b'*' && bytes.get(idx + 1) == Some(&b'/') {
+                in_block = false;
+                idx += 2;
+            } else {
+                if bytes[idx] == b'\n' {
+                    out.push('\n');
+                }
+                idx += 1;
+            }
+            continue;
+        }
+        if bytes[idx] == b'/' && bytes.get(idx + 1) == Some(&b'/') {
+            idx += 2;
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            if idx < bytes.len() {
+                out.push('\n');
+                idx += 1;
+            }
+            continue;
+        }
+        if bytes[idx] == b'/' && bytes.get(idx + 1) == Some(&b'*') {
+            in_block = true;
+            idx += 2;
+            continue;
+        }
+        out.push(bytes[idx] as char);
+        idx += 1;
+    }
+    out
+}
+
+fn glsl_tokens(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte.is_ascii_whitespace() {
+            idx += 1;
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = idx;
+            idx += 1;
+            while idx < bytes.len() && (bytes[idx].is_ascii_alphanumeric() || bytes[idx] == b'_') {
+                idx += 1;
+            }
+            tokens.push(String::from_utf8_lossy(&bytes[start..idx]).into_owned());
+            continue;
+        }
+        if byte.is_ascii_digit() {
+            let start = idx;
+            idx += 1;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            tokens.push(String::from_utf8_lossy(&bytes[start..idx]).into_owned());
+            continue;
+        }
+        if matches!(byte, b';' | b',' | b'[' | b']' | b'(' | b')') {
+            tokens.push((byte as char).to_string());
+        }
+        idx += 1;
+    }
+    tokens
+}
+
 fn gl_query_string(name: u32) -> Option<&'static str> {
     match name {
         GL_VENDOR => Some("AEMU"),
@@ -4042,18 +4640,6 @@ fn gl_query_string(name: u32) -> Option<&'static str> {
         ),
         GL_SHADING_LANGUAGE_VERSION => Some("OpenGL ES GLSL ES 1.00 AEMU"),
         _ => None,
-    }
-}
-
-fn gl_program_iv(name: u32) -> u32 {
-    match name {
-        GL_LINK_STATUS => 1,
-        GL_INFO_LOG_LENGTH
-        | GL_ACTIVE_UNIFORMS
-        | GL_ACTIVE_UNIFORM_MAX_LENGTH
-        | GL_ACTIVE_ATTRIBUTES
-        | GL_ACTIVE_ATTRIBUTE_MAX_LENGTH => 0,
-        _ => 0,
     }
 }
 
@@ -4478,6 +5064,154 @@ mod tests {
             .unwrap();
         assert_eq!(memory.load32(0x1120).unwrap(), 0);
         assert_eq!(memory.load8(0x1124).unwrap(), 0);
+    }
+
+    #[test]
+    fn dispatches_gles_shader_reflection_facade_outputs() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x9000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(13, 0x1800);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x5000);
+        const GL_FRAGMENT_SHADER: u32 = 0x8b30;
+        const GL_VERTEX_SHADER: u32 = 0x8b31;
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, GL_VERTEX_SHADER);
+        hle.dispatch("glCreateShader", &mut cpu, &mut memory)
+            .unwrap();
+        let vertex_shader = cpu.reg(0);
+        let vertex_source = "\
+            uniform MAT4 WORLDVIEWPROJ;\n\
+            uniform vec4 LIGHTING;\n\
+            attribute mediump vec4 POSITION;\n\
+            attribute vec4 COLOR;\n\
+            varying vec4 color;\n\
+            void main() { gl_Position = WORLDVIEWPROJ * POSITION; color = COLOR; }\n";
+        let vertex_source_ptr = hle.alloc_c_string(&mut memory, vertex_source).unwrap();
+        memory.store32(0x1100, vertex_source_ptr).unwrap();
+        memory.store32(0x1104, vertex_source.len() as u32).unwrap();
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, vertex_shader);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0x1100);
+        cpu.set_reg(3, 0x1104);
+        hle.dispatch("glShaderSource", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, GL_FRAGMENT_SHADER);
+        hle.dispatch("glCreateShader", &mut cpu, &mut memory)
+            .unwrap();
+        let fragment_shader = cpu.reg(0);
+        let fragment_source = "\
+            #if __VERSION__ >= 300\n\
+            uniform highp vec3 TEXTURE_DIMENSIONS;\n\
+            #else\n\
+            uniform sampler2D TEXTURE_0;\n\
+            #endif\n\
+            void main() { gl_FragColor = texture2D(TEXTURE_0, vec2(0.0)); }\n";
+        let fragment_source_ptr = hle.alloc_c_string(&mut memory, fragment_source).unwrap();
+        memory.store32(0x1110, fragment_source_ptr).unwrap();
+        memory
+            .store32(0x1114, fragment_source.len() as u32)
+            .unwrap();
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, fragment_shader);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0x1110);
+        cpu.set_reg(3, 0x1114);
+        hle.dispatch("glShaderSource", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2010);
+        hle.dispatch("glCreateProgram", &mut cpu, &mut memory)
+            .unwrap();
+        let program = cpu.reg(0);
+        cpu.set_reg(14, 0x2014);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, vertex_shader);
+        hle.dispatch("glAttachShader", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x2018);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, fragment_shader);
+        hle.dispatch("glAttachShader", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x201c);
+        cpu.set_reg(0, program);
+        hle.dispatch("glLinkProgram", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2020);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, GL_ACTIVE_UNIFORMS);
+        cpu.set_reg(2, 0x1120);
+        hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1120).unwrap(), 2);
+        cpu.set_reg(14, 0x2024);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, GL_ACTIVE_ATTRIBUTES);
+        cpu.set_reg(2, 0x1124);
+        hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1124).unwrap(), 2);
+
+        memory.store32(0x1800, 0x1134).unwrap();
+        memory.store32(0x1804, 0x1138).unwrap();
+        memory.store32(0x1808, 0x1140).unwrap();
+        cpu.set_reg(14, 0x2028);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 64);
+        cpu.set_reg(3, 0x1130);
+        hle.dispatch("glGetActiveUniform", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1130).unwrap(), 13);
+        assert_eq!(memory.load32(0x1134).unwrap(), 1);
+        assert_eq!(memory.load32(0x1138).unwrap(), GL_FLOAT_MAT4);
+        assert_eq!(
+            load_c_string(&mut memory, 0x1140, 64).unwrap(),
+            "WORLDVIEWPROJ"
+        );
+
+        cpu.set_reg(14, 0x202c);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 64);
+        cpu.set_reg(3, 0x1130);
+        hle.dispatch("glGetActiveUniform", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1138).unwrap(), GL_SAMPLER_2D);
+        assert_eq!(load_c_string(&mut memory, 0x1140, 64).unwrap(), "TEXTURE_0");
+
+        cpu.set_reg(14, 0x2030);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 64);
+        cpu.set_reg(3, 0x1130);
+        hle.dispatch("glGetActiveAttrib", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1138).unwrap(), GL_FLOAT_VEC4);
+        assert_eq!(load_c_string(&mut memory, 0x1140, 64).unwrap(), "POSITION");
+
+        let texture_name = hle.alloc_c_string(&mut memory, "TEXTURE_0").unwrap();
+        cpu.set_reg(14, 0x2034);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, texture_name);
+        hle.dispatch("glGetUniformLocation", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        let color_name = hle.alloc_c_string(&mut memory, "COLOR").unwrap();
+        cpu.set_reg(14, 0x2038);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, color_name);
+        hle.dispatch("glGetAttribLocation", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
     }
 
     #[test]
