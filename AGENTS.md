@@ -202,6 +202,17 @@ SDL2 replay state model with guest-to-host GL object maps, payload upload,
 client attribute/index staging, framebuffer readback, and GL error accounting.
 `HleRuntime::set_apk_bytes` lets browser-fed APK bytes satisfy Android asset
 reads without relying on a host filesystem path.
+`src/wasm_api.rs` exports the initial browser MCPE path as
+`runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)`: it links native
+libraries from APK bytes, runs constructors and the native activity to the
+first `eglSwapBuffers`, then replays the captured GLES stream into a WebGL 1
+canvas. `web/mcpe_first_frame.html` is the static browser harness for that
+export after generating `web/pkg` with `wasm-bindgen`; build the wasm library
+with:
+
+```sh
+cargo build --lib --target wasm32-unknown-unknown --no-default-features --features webgl
+```
 
 ## Guest Addressing
 

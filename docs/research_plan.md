@@ -126,17 +126,20 @@ useful, but it does not replace the browser WebGL backend.
    bytes for buffer, texture, uniform, and client-side draw-index data. The SDL2
    host replays the first-swap stream, submits all 744 indexed draws, reads back
    nonzero RGB/alpha pixels, and reports zero host GL errors. A wasm-only WebGL
-   replay host now compiles and mirrors the SDL2 guest object/state mapping; a
-   full browser harness is still pending. APK linking and Android asset reads
-   both have byte-backed paths, so browser code does not need a host filesystem
-   path for native libraries or `AAssetManager_open`.
+   replay host now compiles and mirrors the SDL2 guest object/state mapping.
+   APK linking and Android asset reads both have byte-backed paths, so browser
+   code does not need a host filesystem path for native libraries or
+   `AAssetManager_open`. The initial wasm export and static harness can run
+   MCPE bytes to first swap and replay the resulting GLES stream into WebGL 1;
+   browser-side performance and worker/asynchronous execution are still pending.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach
    the first frame.
 8. Build the wasm/WebGL target and keep desktop SDL2 as the debugger target.
    Current status: the crate checks for `wasm32-unknown-unknown` with the
-   `webgl` feature; a full browser harness is still pending.
+   `webgl` feature and builds a `cdylib` wasm target for `wasm-bindgen` via
+   `cargo build --lib --target wasm32-unknown-unknown --no-default-features --features webgl`.
 
 ## Sources Checked
 

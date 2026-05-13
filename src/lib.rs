@@ -11,5 +11,7 @@ pub mod native_loader;
 pub mod native_runtime;
 #[cfg(feature = "sdl2")]
 pub mod sdl_shell;
+#[cfg(all(feature = "webgl", target_arch = "wasm32"))]
+pub mod wasm_api;
 pub mod wasm_webgl;
 pub mod zip_probe;
