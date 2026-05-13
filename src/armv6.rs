@@ -3780,11 +3780,25 @@ impl Cpu {
             return Ok(());
         }
 
+        if (first & 0xfe00) == 0xea00 && (second & 0x8000) == 0 {
+            return self.exec_thumb32_shifted_register(first, second, pc);
+        }
+
+        if matches!(first & 0xfff0, 0xf340 | 0xf360 | 0xf3c0) && (second & 0x8020) == 0 {
+            return self.exec_thumb32_bitfield(first, second, pc);
+        }
+
         if (first & 0xf800) == 0xf000 && (second & 0x8000) != 0 {
             return self.exec_thumb32_branch(first, second, pc);
         }
 
-        if (first & 0xf800) == 0xf000 && (second & 0x8000) == 0 {
+        if (first & 0xfa00) == 0xf200 && (second & 0x8000) == 0 {
+            if self.exec_thumb32_plain_immediate(first, second, pc)? {
+                return Ok(());
+            }
+        }
+
+        if (first & 0xfa00) == 0xf000 && (second & 0x8000) == 0 {
             return self.exec_thumb32_modified_immediate(first, second, pc);
         }
 
@@ -3797,6 +3811,10 @@ impl Cpu {
             }
             self.regs[rd] = self.regs[rm].leading_zeros();
             return Ok(());
+        }
+
+        if (first & 0xff80) == 0xfa00 && (second & 0xf0f0) == 0xf000 {
+            return self.exec_thumb32_register_shift(first, second, pc);
         }
 
         if first == 0xe8bd {
@@ -3813,7 +3831,18 @@ impl Cpu {
 
         if matches!(
             first & 0xfff0,
-            0xf880 | 0xf890 | 0xf8a0 | 0xf8b0 | 0xf8c0 | 0xf8d0
+            0xf800
+                | 0xf810
+                | 0xf820
+                | 0xf830
+                | 0xf840
+                | 0xf850
+                | 0xf880
+                | 0xf890
+                | 0xf8a0
+                | 0xf8b0
+                | 0xf8c0
+                | 0xf8d0
         ) {
             return self.exec_thumb32_immediate_transfer(first, second, pc, mem);
         }
@@ -3837,6 +3866,169 @@ impl Cpu {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn exec_thumb32_register_shift(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        let op = (first >> 5) & 0x3;
+        let set_flags = first & (1 << 4) != 0;
+        let rm = usize::from(first & 0xf);
+        let rd = usize::from((second >> 8) & 0xf);
+        let rs = usize::from(second & 0xf);
+        if rd == 15 || rm == 15 || rs == 15 {
+            return Err(Trap::Unpredictable("Thumb register shift with PC register"));
+        }
+        let shift = match op {
+            0 => Shift::Lsl,
+            1 => Shift::Lsr,
+            2 => Shift::Asr,
+            3 => Shift::Ror,
+            _ => unreachable!(),
+        };
+        let shifted = shift_operand(
+            self.regs[rm],
+            shift,
+            self.regs[rs] & 0xff,
+            self.cpsr.c,
+            false,
+        );
+        self.regs[rd] = shifted.value;
+        if set_flags {
+            self.cpsr.set_nzc(shifted.value, shifted.carry);
+        }
+        let _ = pc;
+        Ok(())
+    }
+
+    fn exec_thumb32_shifted_register(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        let op = (first >> 5) & 0xf;
+        let set_flags = first & (1 << 4) != 0;
+        let rn = usize::from(first & 0xf);
+        let rd = usize::from((second >> 8) & 0xf);
+        let rm = usize::from(second & 0xf);
+        if rm == 15 {
+            return Err(Trap::Unpredictable(
+                "Thumb shifted register with PC operand",
+            ));
+        }
+
+        let imm3 = u32::from((second >> 12) & 0x7);
+        let imm2 = u32::from((second >> 6) & 0x3);
+        let shift = decode_arm_shift(u32::from((second >> 4) & 0x3));
+        let shifted = shift_operand(self.regs[rm], shift, (imm3 << 2) | imm2, self.cpsr.c, true);
+        let lhs = if rn == 15 {
+            if matches!(op, 0x8 | 0xd | 0xe) {
+                pc.wrapping_add(4) & !3
+            } else {
+                0
+            }
+        } else {
+            self.regs[rn]
+        };
+
+        match op {
+            0x0 | 0x1 | 0x2 | 0x3 | 0x4 => {
+                if rd == 15 && !matches!(op, 0x0 | 0x4) {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let value = match op {
+                    0x0 => lhs & shifted.value,
+                    0x1 => lhs & !shifted.value,
+                    0x2 => lhs | shifted.value,
+                    0x3 => lhs | !shifted.value,
+                    0x4 => lhs ^ shifted.value,
+                    _ => unreachable!(),
+                };
+                if rd == 15 {
+                    self.cpsr.set_nzc(value, shifted.carry);
+                } else {
+                    self.regs[rd] = value;
+                    if set_flags {
+                        self.cpsr.set_nzc(value, shifted.carry);
+                    }
+                }
+                Ok(())
+            }
+            0x8 | 0xa | 0xb | 0xd | 0xe => {
+                if rd == 15 && !matches!(op, 0x8 | 0xd) {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let (value, carry, overflow) = match op {
+                    0x8 => add_with_flags(lhs, shifted.value),
+                    0xa => add_with_carry(lhs, shifted.value, self.cpsr.c),
+                    0xb => add_with_carry(lhs, !shifted.value, self.cpsr.c),
+                    0xd => sub_with_flags(lhs, shifted.value),
+                    0xe => sub_with_flags(shifted.value, lhs),
+                    _ => unreachable!(),
+                };
+                if rd == 15 {
+                    self.cpsr.set_nzcv(value, carry, overflow);
+                } else {
+                    self.regs[rd] = value;
+                    if set_flags {
+                        self.cpsr.set_nzcv(value, carry, overflow);
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(Trap::UndefinedThumb { pc, instr: first }),
+        }
+    }
+
+    fn exec_thumb32_bitfield(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        let rn = usize::from(first & 0xf);
+        let rd = usize::from((second >> 8) & 0xf);
+        if rd == 15 {
+            return Err(Trap::Unpredictable(
+                "Thumb bitfield instruction with PC destination",
+            ));
+        }
+
+        let imm3 = u32::from((second >> 12) & 0x7);
+        let imm2 = u32::from((second >> 6) & 0x3);
+        let lsb = (imm3 << 2) | imm2;
+        let width_or_msb = u32::from(second & 0x1f);
+
+        match first & 0xfff0 {
+            0xf340 | 0xf3c0 => {
+                if rn == 15 {
+                    return Err(Trap::Unpredictable("Thumb bitfield extract with PC source"));
+                }
+                let width = width_or_msb + 1;
+                if lsb + width > 32 {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let raw = if width == 32 {
+                    self.regs[rn]
+                } else {
+                    (self.regs[rn] >> lsb) & ((1u32 << width) - 1)
+                };
+                self.regs[rd] = if (first & 0xfff0) == 0xf340 {
+                    sign_extend(raw, width) as u32
+                } else {
+                    raw
+                };
+                Ok(())
+            }
+            0xf360 => {
+                if width_or_msb < lsb {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let width = width_or_msb - lsb + 1;
+                let field_mask = if width == 32 {
+                    u32::MAX
+                } else {
+                    ((1u32 << width) - 1) << lsb
+                };
+                let insert = if rn == 15 {
+                    0
+                } else {
+                    (self.regs[rn] << lsb) & field_mask
+                };
+                self.regs[rd] = (self.regs[rd] & !field_mask) | insert;
+                Ok(())
+            }
+            _ => Err(Trap::UndefinedThumb { pc, instr: first }),
+        }
     }
 
     fn exec_thumb32_exclusive<M: Memory>(
@@ -3888,6 +4080,52 @@ impl Cpu {
         Ok(false)
     }
 
+    fn exec_thumb32_plain_immediate(&mut self, first: u16, second: u16, pc: u32) -> Result<bool> {
+        let rd = usize::from((second >> 8) & 0xf);
+        if rd == 15 {
+            return Err(Trap::Unpredictable(
+                "Thumb plain immediate with PC destination",
+            ));
+        }
+
+        let imm12 = (u32::from((first >> 10) & 1) << 11)
+            | (u32::from((second >> 12) & 0x7) << 8)
+            | u32::from(second & 0xff);
+        let imm16 = (u32::from(first & 0xf) << 12) | imm12;
+
+        match first & 0xfbf0 {
+            0xf200 => {
+                let rn = usize::from(first & 0xf);
+                let lhs = if rn == 15 {
+                    pc.wrapping_add(4) & !3
+                } else {
+                    self.regs[rn]
+                };
+                self.regs[rd] = lhs.wrapping_add(imm12);
+                Ok(true)
+            }
+            0xf2a0 => {
+                let rn = usize::from(first & 0xf);
+                let lhs = if rn == 15 {
+                    pc.wrapping_add(4) & !3
+                } else {
+                    self.regs[rn]
+                };
+                self.regs[rd] = lhs.wrapping_sub(imm12);
+                Ok(true)
+            }
+            0xf240 => {
+                self.regs[rd] = imm16;
+                Ok(true)
+            }
+            0xf2c0 => {
+                self.regs[rd] = (self.regs[rd] & 0x0000_ffff) | (imm16 << 16);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn exec_thumb32_modified_immediate(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
         let op = (first >> 5) & 0xf;
         let set_flags = first & (1 << 4) != 0;
@@ -3899,8 +4137,19 @@ impl Cpu {
         let (imm, carry) = thumb_expand_imm(imm12, self.cpsr.c);
 
         match op {
-            0x0 => {
-                let value = self.regs[rn] & imm;
+            0x0 | 0x1 | 0x2 | 0x3 | 0x4 => {
+                if rd == 15 && !matches!(op, 0x0 | 0x4) {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let lhs = if rn == 15 { 0 } else { self.regs[rn] };
+                let value = match op {
+                    0x0 => lhs & imm,
+                    0x1 => lhs & !imm,
+                    0x2 => lhs | imm,
+                    0x3 => lhs | !imm,
+                    0x4 => lhs ^ imm,
+                    _ => unreachable!(),
+                };
                 if rd == 15 {
                     self.cpsr.set_nzc(value, carry);
                 } else {
@@ -3911,20 +4160,8 @@ impl Cpu {
                 }
                 Ok(())
             }
-            0x2 => {
-                if rd == 15 {
-                    return Err(Trap::UndefinedThumb { pc, instr: first });
-                }
-                let lhs = if rn == 15 { 0 } else { self.regs[rn] };
-                let value = lhs | imm;
-                self.regs[rd] = value;
-                if set_flags {
-                    self.cpsr.set_nzc(value, carry);
-                }
-                Ok(())
-            }
-            0x8 | 0xd => {
-                if rd == 15 {
+            0x8 | 0xa | 0xb | 0xd | 0xe => {
+                if rd == 15 && !matches!(op, 0x8 | 0xd) {
                     return Err(Trap::UndefinedThumb { pc, instr: first });
                 }
                 let lhs = if rn == 15 {
@@ -3932,14 +4169,21 @@ impl Cpu {
                 } else {
                     self.regs[rn]
                 };
-                let (value, carry, overflow) = if op == 0x8 {
-                    add_with_flags(lhs, imm)
-                } else {
-                    sub_with_flags(lhs, imm)
+                let (value, carry, overflow) = match op {
+                    0x8 => add_with_flags(lhs, imm),
+                    0xa => add_with_carry(lhs, imm, self.cpsr.c),
+                    0xb => add_with_carry(lhs, !imm, self.cpsr.c),
+                    0xd => sub_with_flags(lhs, imm),
+                    0xe => sub_with_flags(imm, lhs),
+                    _ => unreachable!(),
                 };
-                self.regs[rd] = value;
-                if set_flags {
+                if rd == 15 {
                     self.cpsr.set_nzcv(value, carry, overflow);
+                } else {
+                    self.regs[rd] = value;
+                    if set_flags {
+                        self.cpsr.set_nzcv(value, carry, overflow);
+                    }
                 }
                 Ok(())
             }
@@ -3948,6 +4192,27 @@ impl Cpu {
     }
 
     fn exec_thumb32_branch(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        if (second >> 14) & 0x3 == 0b10 && second & (1 << 12) == 0 {
+            let cond = u32::from((first >> 6) & 0xf);
+            if cond >= 0xe {
+                return Err(Trap::UndefinedThumb { pc, instr: first });
+            }
+
+            let s = u32::from((first >> 10) & 1);
+            let imm6 = u32::from(first & 0x003f);
+            let i1 = u32::from((second >> 13) & 1);
+            let i2 = u32::from((second >> 11) & 1);
+            let imm11 = u32::from(second & 0x07ff);
+            let imm = sign_extend(
+                (s << 20) | (i2 << 19) | (i1 << 18) | (imm6 << 12) | (imm11 << 1),
+                21,
+            );
+            if condition_passed(cond, self.cpsr) {
+                self.regs[15] = pc.wrapping_add(4).wrapping_add(imm as u32);
+            }
+            return Ok(());
+        }
+
         let s = u32::from((first >> 10) & 1);
         let imm10 = u32::from(first & 0x03ff);
         let j1 = u32::from((second >> 13) & 1);
@@ -4069,11 +4334,12 @@ impl Cpu {
         mem: &mut M,
     ) -> Result<()> {
         let op = first & 0xfff0;
-        let load = matches!(op, 0xf890 | 0xf8b0 | 0xf8d0);
+        let imm12_form = matches!(op, 0xf880 | 0xf890 | 0xf8a0 | 0xf8b0 | 0xf8c0 | 0xf8d0);
+        let load = matches!(op, 0xf810 | 0xf830 | 0xf850 | 0xf890 | 0xf8b0 | 0xf8d0);
         let size = match op {
-            0xf880 | 0xf890 => 1,
-            0xf8a0 | 0xf8b0 => 2,
-            0xf8c0 | 0xf8d0 => 4,
+            0xf800 | 0xf810 | 0xf880 | 0xf890 => 1,
+            0xf820 | 0xf830 | 0xf8a0 | 0xf8b0 => 2,
+            0xf840 | 0xf850 | 0xf8c0 | 0xf8d0 => 4,
             _ => unreachable!(),
         };
         let rn = usize::from(first & 0xf);
@@ -4084,7 +4350,13 @@ impl Cpu {
                     "Thumb immediate store with PC base register",
                 ));
             }
-            let addr = (pc.wrapping_add(4) & !3).wrapping_add(u32::from(second & 0x0fff));
+            let base = pc.wrapping_add(4) & !3;
+            let offset = u32::from(second & 0x0fff);
+            let addr = if first & (1 << 7) != 0 {
+                base.wrapping_add(offset)
+            } else {
+                base.wrapping_sub(offset)
+            };
             match size {
                 1 => {
                     if rt == 15 {
@@ -4112,8 +4384,93 @@ impl Cpu {
             }
             return Ok(());
         }
-        let addr = self.regs[rn].wrapping_add(u32::from(second & 0x0fff));
+
+        if !imm12_form && second & (1 << 11) == 0 {
+            if second & 0x0fc0 != 0 {
+                return Err(Trap::UndefinedThumb { pc, instr: first });
+            }
+            let rm = usize::from(second & 0xf);
+            if rm == 15 {
+                return Err(Trap::Unpredictable(
+                    "Thumb register transfer with PC offset register",
+                ));
+            }
+            let shift = u32::from((second >> 4) & 0x3);
+            let addr = self.regs[rn].wrapping_add(self.regs[rm] << shift);
+            if load {
+                match size {
+                    1 => {
+                        if rt == 15 {
+                            return Err(Trap::Unpredictable("Thumb byte load with PC destination"));
+                        }
+                        self.regs[rt] = u32::from(mem.load8(addr)?);
+                    }
+                    2 => {
+                        if rt == 15 {
+                            return Err(Trap::Unpredictable(
+                                "Thumb halfword load with PC destination",
+                            ));
+                        }
+                        self.regs[rt] = u32::from(mem.load16(addr)?);
+                    }
+                    4 => {
+                        let value = mem.load32(addr)?;
+                        if rt == 15 {
+                            self.branch_exchange(value);
+                        } else {
+                            self.regs[rt] = value;
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                if rt == 15 {
+                    return Err(Trap::Unpredictable(
+                        "Thumb register store with PC source register",
+                    ));
+                }
+                match size {
+                    1 => self.store8(mem, addr, self.regs[rt] as u8)?,
+                    2 => self.store16(mem, addr, self.regs[rt] as u16)?,
+                    4 => self.store32(mem, addr, self.regs[rt])?,
+                    _ => unreachable!(),
+                }
+            }
+            return Ok(());
+        }
+
+        let (addr, writeback_addr, writeback) = if imm12_form {
+            (
+                self.regs[rn].wrapping_add(u32::from(second & 0x0fff)),
+                0,
+                false,
+            )
+        } else {
+            if second & (1 << 11) == 0 {
+                return Err(Trap::UndefinedThumb { pc, instr: first });
+            }
+            let pre_index = second & (1 << 10) != 0;
+            let add = second & (1 << 9) != 0;
+            let writeback = second & (1 << 8) != 0;
+            if !pre_index && !writeback {
+                return Err(Trap::UndefinedThumb { pc, instr: first });
+            }
+            let offset = u32::from(second & 0x00ff);
+            let base = self.regs[rn];
+            let offset_addr = if add {
+                base.wrapping_add(offset)
+            } else {
+                base.wrapping_sub(offset)
+            };
+            let addr = if pre_index { offset_addr } else { base };
+            (addr, offset_addr, writeback)
+        };
         if load {
+            if writeback && rn == rt {
+                return Err(Trap::Unpredictable(
+                    "Thumb immediate load writeback overlaps destination",
+                ));
+            }
             match size {
                 1 => {
                     if rt == 15 {
@@ -4131,6 +4488,9 @@ impl Cpu {
                 }
                 4 => {
                     let value = mem.load32(addr)?;
+                    if writeback {
+                        self.regs[rn] = writeback_addr;
+                    }
                     if rt == 15 {
                         self.branch_exchange(value);
                     } else {
@@ -4138,6 +4498,9 @@ impl Cpu {
                     }
                 }
                 _ => unreachable!(),
+            }
+            if writeback && size != 4 {
+                self.regs[rn] = writeback_addr;
             }
         } else {
             if rt == 15 {
@@ -4150,6 +4513,9 @@ impl Cpu {
                 2 => self.store16(mem, addr, self.regs[rt] as u16)?,
                 4 => self.store32(mem, addr, self.regs[rt])?,
                 _ => unreachable!(),
+            }
+            if writeback {
+                self.regs[rn] = writeback_addr;
             }
         }
         Ok(())
@@ -8535,6 +8901,32 @@ mod tests {
         assert_eq!(cpu.pc(), 0x4b6c4);
         assert!(cpu.cpsr.t);
 
+        cpu.set_pc(0x4b6d8);
+        cpu.set_reg(14, 0);
+        mem.load_thumb_halfwords(0x4b6d8, &[0xf1be, 0x0f00])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // cmp.w lr, #0
+        assert!(cpu.cpsr.z);
+
+        cpu.set_pc(0x4b6dc);
+        cpu.set_reg(14, 1);
+        mem.load_thumb_halfwords(0x4b6dc, &[0xf1be, 0x0f00])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // cmp.w lr, #0
+        assert!(!cpu.cpsr.z);
+
+        cpu.set_pc(0x7036_177a);
+        cpu.cpsr.z = true;
+        cpu.execute_thumb32(0xf000, 0x80b1, 0x7036_1776, &mut mem)
+            .unwrap(); // beq.w 0x703618dc
+        assert_eq!(cpu.pc(), 0x7036_18dc);
+
+        cpu.set_pc(0x7036_177a);
+        cpu.cpsr.z = false;
+        cpu.execute_thumb32(0xf000, 0x80b1, 0x7036_1776, &mut mem)
+            .unwrap(); // beq.w not taken
+        assert_eq!(cpu.pc(), 0x7036_177a);
+
         mem.store32(0x4c000, 0x1111_2222).unwrap();
         cpu.set_reg(3, 0x4c000);
         cpu.set_pc(0x4b6c4);
@@ -8558,6 +8950,28 @@ mod tests {
         cpu.step(&mut mem).unwrap(); // clz r3, r0
         assert_eq!(cpu.reg(3), 24);
         assert_eq!(cpu.pc(), 0x4b6a6);
+
+        cpu.set_pc(0x4b6a6);
+        cpu.set_reg(8, 1);
+        cpu.set_reg(4, 4);
+        mem.load_thumb_halfwords(0x4b6a6, &[0xfa08, 0xf104])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // lsl.w r1, r8, r4
+        assert_eq!(cpu.reg(1), 16);
+
+        cpu.set_pc(0x4b6aa);
+        cpu.set_reg(3, 0xe0);
+        mem.load_thumb_halfwords(0x4b6aa, &[0xea4f, 0x1353])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // lsr.w r3, r3, #5
+        assert_eq!(cpu.reg(3), 7);
+
+        cpu.set_pc(0x4b6ae);
+        cpu.set_reg(2, 0x1234_abcd);
+        mem.load_thumb_halfwords(0x4b6ae, &[0xf3c2, 0x020b])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ubfx r2, r2, #0, #12
+        assert_eq!(cpu.reg(2), 0xbcd);
 
         cpu.set_pc(0x4b6d0);
         cpu.set_reg(2, 0x8000_0001);
@@ -8606,6 +9020,37 @@ mod tests {
         cpu.step(&mut mem).unwrap(); // add.w r8, r6, #0x150
         assert_eq!(cpu.reg(8), 0x1150);
 
+        cpu.set_pc(0x4b994);
+        cpu.set_reg(4, 0x703b_4dbc);
+        mem.load_thumb_halfwords(0x4b994, &[0xf204, 0x101d])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // addw r0, r4, #0x11d
+        assert_eq!(cpu.reg(0), 0x703b_4ed9);
+
+        cpu.set_pc(0x4b998);
+        mem.load_thumb_halfwords(0x4b998, &[0xf2a4, 0x111d])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // subw r1, r4, #0x11d
+        assert_eq!(cpu.reg(1), 0x703b_4c9f);
+
+        cpu.set_pc(0x4b99c);
+        mem.load_thumb_halfwords(0x4b99c, &[0xf64a, 0x32cd])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // movw r2, #0xabcd
+        assert_eq!(cpu.reg(2), 0xabcd);
+
+        cpu.set_pc(0x4b9a0);
+        mem.load_thumb_halfwords(0x4b9a0, &[0xf2c1, 0x2234])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // movt r2, #0x1234
+        assert_eq!(cpu.reg(2), 0x1234_abcd);
+
+        cpu.set_pc(0x4b9a4);
+        mem.load_thumb_halfwords(0x4b9a4, &[0xf20f, 0x0320])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // adr.w r3, #0x20
+        assert_eq!(cpu.reg(3), 0x4b9c8);
+
         cpu.set_pc(0x4b9b2);
         cpu.set_reg(2, 0x1111_2222);
         cpu.set_reg(3, 0x3333_4444);
@@ -8645,6 +9090,25 @@ mod tests {
         mem.store32(0x4beac, 0x1234_5678).unwrap();
         cpu.step(&mut mem).unwrap(); // ldr.w r4, [pc, #0x498]
         assert_eq!(cpu.reg(4), 0x1234_5678);
+
+        cpu.set_pc(0x4ba14);
+        cpu.set_reg(13, 0x4c260);
+        mem.store32(0x4c260, 0x4bb01).unwrap();
+        mem.load_thumb_halfwords(0x4ba14, &[0xf85d, 0xfb04])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ldr pc, [sp], #4
+        assert_eq!(cpu.pc(), 0x4bb00);
+        assert!(cpu.cpsr.t);
+        assert_eq!(cpu.reg(13), 0x4c264);
+
+        cpu.set_pc(0x4ba18);
+        cpu.set_reg(6, 0x4c280);
+        cpu.set_reg(7, 3);
+        mem.store32(0x4c28c, 0xfeed_face).unwrap();
+        mem.load_thumb_halfwords(0x4ba18, &[0xf856, 0x0027])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ldr.w r0, [r6, r7, lsl #2]
+        assert_eq!(cpu.reg(0), 0xfeed_face);
 
         cpu.set_pc(0x4b758);
         cpu.set_reg(0, 0xaaaa_bbbb);

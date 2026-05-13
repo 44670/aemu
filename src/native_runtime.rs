@@ -113,7 +113,7 @@ impl fmt::Display for NativeRuntimeError {
                     for entry in tail {
                         write!(
                             f,
-                            "\n  {:?} pc={:#010x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r12={:#010x} sp={:#010x} lr={:#010x}",
+                            "\n  {:?} pc={:#010x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} sp={:#010x} lr={:#010x}",
                             entry.isa,
                             entry.pc,
                             entry.regs[0],
@@ -124,6 +124,10 @@ impl fmt::Display for NativeRuntimeError {
                             entry.regs[5],
                             entry.regs[6],
                             entry.regs[7],
+                            entry.regs[8],
+                            entry.regs[9],
+                            entry.regs[10],
+                            entry.regs[11],
                             entry.regs[12],
                             entry.regs[13],
                             entry.regs[14],

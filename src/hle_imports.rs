@@ -126,7 +126,14 @@ pub struct HleRuntime {
     errno_addr: u32,
     heap_next: u32,
     heap_end: u32,
+    allocations: Vec<HleAllocation>,
     next_gl_name: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HleAllocation {
+    ptr: u32,
+    size: u32,
 }
 
 impl HleRuntime {
@@ -135,6 +142,7 @@ impl HleRuntime {
             errno_addr,
             heap_next: align_up(heap_base, 8).unwrap_or(heap_base),
             heap_end: heap_base.saturating_add(heap_size),
+            allocations: Vec::new(),
             next_gl_name: 1,
         }
     }
@@ -165,9 +173,9 @@ impl HleRuntime {
             "strcat" => self.strcat(cpu, memory),
             "strchr" => self.strchr(cpu, memory),
             "strrchr" => self.strrchr(cpu, memory),
-            "malloc" => self.malloc_call(cpu),
+            "malloc" => self.malloc_call(cpu, memory),
             "calloc" => self.calloc(cpu, memory),
-            "realloc" => self.realloc(cpu),
+            "realloc" => self.realloc(cpu, memory),
             "free" => Ok(self.return32(cpu, 0)),
             "__errno" => Ok(self.return32(cpu, self.errno_addr)),
             "__aeabi_idiv" => self.aeabi_idiv(cpu),
@@ -364,7 +372,16 @@ impl HleRuntime {
         Ok(self.return32(cpu, found))
     }
 
-    fn malloc_call(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+    fn malloc_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
+            let saved_lr = load32(memory, cpu.reg(13).wrapping_add(4)).unwrap_or(0);
+            eprintln!(
+                "HLE malloc request size={:#x} r4={:#x} lr={:#010x} caller_lr={saved_lr:#010x}",
+                cpu.reg(0),
+                cpu.reg(4),
+                cpu.reg(14)
+            );
+        }
         let ptr = self.alloc(cpu.reg(0), 8)?;
         Ok(self.return32(cpu, ptr))
     }
@@ -382,14 +399,28 @@ impl HleRuntime {
         Ok(self.return32(cpu, ptr))
     }
 
-    fn realloc(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+    fn realloc<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let ptr = cpu.reg(0);
         let size = cpu.reg(1);
         if ptr == 0 {
             let new_ptr = self.alloc(size, 8)?;
             Ok(self.return32(cpu, new_ptr))
+        } else if size == 0 {
+            Ok(self.return32(cpu, 0))
         } else {
-            Ok(self.return32(cpu, ptr))
+            let new_ptr = self.alloc(size, 8)?;
+            let old_size = self
+                .allocations
+                .iter()
+                .rev()
+                .find(|allocation| allocation.ptr == ptr)
+                .map(|allocation| allocation.size)
+                .unwrap_or(0);
+            for idx in 0..old_size.min(size) {
+                let byte = load8(memory, ptr.wrapping_add(idx))?;
+                store8(memory, new_ptr.wrapping_add(idx), byte)?;
+            }
+            Ok(self.return32(cpu, new_ptr))
         }
     }
 
@@ -546,6 +577,10 @@ impl HleRuntime {
             return Err(HleError::HeapExhausted { requested: size });
         }
         self.heap_next = end;
+        self.allocations.push(HleAllocation { ptr: start, size });
+        if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
+            eprintln!("HLE alloc size={size:#x} align={align:#x} -> {start:#010x}");
+        }
         Ok(start)
     }
 
@@ -1315,6 +1350,18 @@ mod tests {
         cpu.set_reg(2, 4);
         hle.dispatch("memcpy", &mut cpu, &mut memory).unwrap();
         assert_eq!(memory.load_bytes_for_test(0x1200, 4), b"abc\0");
+
+        cpu.set_reg(0, 4);
+        hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
+        let old_ptr = cpu.reg(0);
+        memory.load_bytes(old_ptr, b"rust").unwrap();
+
+        cpu.set_reg(0, old_ptr);
+        cpu.set_reg(1, 8);
+        hle.dispatch("realloc", &mut cpu, &mut memory).unwrap();
+        let new_ptr = cpu.reg(0);
+        assert_ne!(new_ptr, old_ptr);
+        assert_eq!(memory.load_bytes_for_test(new_ptr, 4), b"rust");
     }
 
     trait TestBytes {
