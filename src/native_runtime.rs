@@ -414,6 +414,7 @@ impl NativeRuntime {
         self.store_runtime32(activity.wrapping_add(0x1c), 0)?; // instance
         self.store_runtime32(activity.wrapping_add(0x20), asset_manager)?;
         self.store_runtime32(activity.wrapping_add(0x24), obb_path)?;
+        self.hle.set_native_activity(activity);
 
         Ok(NativeActivityHarness {
             activity,
@@ -674,7 +675,7 @@ impl NativeRuntime {
         self.cpu.branch_exchange(address);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
-        let trace_range = parse_trace_pc_range();
+        let trace_ranges = parse_trace_pc_ranges();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
@@ -702,10 +703,11 @@ impl NativeRuntime {
                     self.cpu.reg(14),
                 );
             }
-            if let Some((start, end)) = trace_range {
+            if !trace_ranges.is_empty() {
                 let pc = self.cpu.pc();
-                if pc >= start
-                    && pc < end
+                if trace_ranges
+                    .iter()
+                    .any(|&(start, end)| pc >= start && pc < end)
                     && trace_pc_limit.map_or(true, |limit| trace_pc_count < limit)
                 {
                     trace_pc_count += 1;
@@ -1103,12 +1105,18 @@ impl NativeRuntime {
     }
 }
 
-fn parse_trace_pc_range() -> Option<(u32, u32)> {
-    let raw = std::env::var("AEMU_TRACE_PC_RANGE").ok()?;
-    let (start, end) = raw.split_once(':')?;
-    let start = parse_u32_env(start)?;
-    let end = parse_u32_env(end)?;
-    (start < end).then_some((start, end))
+fn parse_trace_pc_ranges() -> Vec<(u32, u32)> {
+    let Some(raw) = std::env::var("AEMU_TRACE_PC_RANGE").ok() else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .filter_map(|range| {
+            let (start, end) = range.trim().split_once(':')?;
+            let start = parse_u32_env(start)?;
+            let end = parse_u32_env(end)?;
+            (start < end).then_some((start, end))
+        })
+        .collect()
 }
 
 fn parse_trace_step_interval() -> Option<usize> {

@@ -309,6 +309,7 @@ pub struct HleRuntime {
     virtual_files: Vec<VirtualFile>,
     next_pthread_key: u32,
     pthread_specific: Vec<PthreadSpecific>,
+    native_activity: Option<u32>,
     alooper_events: VecDeque<u32>,
     random_state: u32,
     clock_ns: u64,
@@ -405,6 +406,7 @@ impl HleRuntime {
             virtual_files: Vec::new(),
             next_pthread_key: 0,
             pthread_specific: Vec::new(),
+            native_activity: None,
             alooper_events: VecDeque::new(),
             random_state: 0x1234_5678,
             clock_ns: 0,
@@ -415,6 +417,10 @@ impl HleRuntime {
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
+    }
+
+    pub fn set_native_activity(&mut self, activity: u32) {
+        self.native_activity = Some(activity);
     }
 
     pub fn queue_alooper_event(&mut self, source: u32) {
@@ -635,7 +641,6 @@ impl HleRuntime {
             "_ZN3mce16RenderContextOGL17unbindAllTexturesEv" => {
                 self.minecraft_ogl_unbind_all_textures(cpu, memory)
             }
-            "_ZN10WorkerPool17processCoroutinesEd" => Ok(self.return32(cpu, 0)),
             "_ZN12ProfilerLite4tickEbb" | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd" => {
                 Ok(self.return32(cpu, 0))
             }
@@ -1232,12 +1237,20 @@ impl HleRuntime {
         }
 
         // Android's native_app_glue waits for the created thread to mark
-        // android_app.running at offset 0x6c before ANativeActivity_onCreate
-        // returns. The launch probe drives android_main explicitly afterward.
-        if arg != 0 {
+        // android_app.running before ANativeActivity_onCreate returns. Other
+        // thread arguments may be game worker objects, so only touch app-like
+        // structs that point back to the registered ANativeActivity.
+        if arg != 0 && self.is_native_app_thread_arg(memory, arg) {
             store32(memory, arg.wrapping_add(0x6c), 1)?;
         }
         Ok(self.return32(cpu, 0))
+    }
+
+    fn is_native_app_thread_arg<M: Memory>(&self, memory: &mut M, arg: u32) -> bool {
+        let Some(activity) = self.native_activity else {
+            return false;
+        };
+        load32(memory, arg.wrapping_add(0x0c)).is_ok_and(|candidate| candidate == activity)
     }
 
     fn pthread_key_create<M: Memory>(
@@ -3317,7 +3330,6 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN10Multitouch9isPressedEi"
             | "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f"
             | "_ZN3mce16RenderContextOGL17unbindAllTexturesEv"
-            | "_ZN10WorkerPool17processCoroutinesEd"
             | "_ZN12ProfilerLite4tickEbb"
             | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd"
             | "_ZN18MinecraftTelemetry4tickEv"
@@ -5520,6 +5532,38 @@ mod tests {
     }
 
     #[test]
+    fn pthread_create_marks_only_native_app_thread_arg_running() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        hle.set_native_activity(0x1100);
+
+        let app = 0x1200;
+        memory.store32(app + 0x0c, 0x1100).unwrap();
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(3, app);
+        hle.dispatch("pthread_create", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_ne!(memory.load32(0x1300).unwrap(), 0);
+        assert_eq!(memory.load32(app + 0x6c).unwrap(), 1);
+
+        let worker_arg = 0x1400;
+        memory.store32(worker_arg + 0x0c, 0xfeed_beef).unwrap();
+        memory.store32(worker_arg + 0x6c, 0x55aa_aa55).unwrap();
+        cpu.set_reg(0, 0x1310);
+        cpu.set_reg(3, worker_arg);
+        hle.dispatch("pthread_create", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_ne!(memory.load32(0x1310).unwrap(), 0);
+        assert_eq!(memory.load32(worker_arg + 0x6c).unwrap(), 0x55aa_aa55);
+    }
+
+    #[test]
     fn dispatches_alooper_poll_as_no_event() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
@@ -6109,31 +6153,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_worker_pool_coroutine_facade() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x1000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x1100);
-        cpu.set_reg(2, 0);
-        cpu.set_reg(3, 0x3ff0_0000);
-        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
-
-        let descriptor = describe_hle_import("_ZN10WorkerPool17processCoroutinesEd").unwrap();
-        assert_eq!(descriptor.kind, HleSymbolKind::Target);
-        assert_eq!(descriptor.behavior, HleCallBehavior::Implemented);
-
-        hle.dispatch(
-            "_ZN10WorkerPool17processCoroutinesEd",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
+    fn keeps_worker_pool_coroutines_native() {
+        assert!(describe_hle_import("_ZN10WorkerPool17processCoroutinesEd").is_none());
     }
 
     #[test]
