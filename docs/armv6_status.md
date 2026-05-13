@@ -125,6 +125,9 @@ CPU work.
   add/sub/absolute-difference/multiply-long families, saturating doubling
   multiply-long forms, pairwise integer min/max, `VQDMULH`/`VQRDMULH`, and
   vector `VABS`/`VNEG`
+- Runtime HLE now reports ARMv7 NEON/VFPv3/VFP-D32 capability through
+  `getauxval(AT_HWCAP)` while keeping `AT_HWCAP2` zero to avoid selecting
+  ARMv8 crypto instructions before those are implemented.
 - Thumb-1 common instruction set: shifts, ALU ops, high-register ops,
   literal loads, load/store forms, push/pop, multiple load/store,
   including `LDMIA` base-in-list writeback suppression,

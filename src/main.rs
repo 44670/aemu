@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use aemu::armv6::Memory;
+
 fn main() {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
@@ -94,15 +96,18 @@ fn main() {
             }
         }
         Some("run-apk-native") => {
-            let (path, config, max_steps) = match parse_run_apk_native_args(args.collect()) {
+            let (path, config, max_steps, launch) = match parse_run_apk_native_args(args.collect())
+            {
                 Ok(parsed) => parsed,
                 Err(err) => {
                     eprintln!("{err}");
-                    eprintln!("usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N]");
+                    eprintln!(
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch]"
+                    );
                     std::process::exit(2);
                 }
             };
-            if let Err(err) = run_apk_native(&path, &config, max_steps) {
+            if let Err(err) = run_apk_native(&path, &config, max_steps, launch) {
                 eprintln!("native run failed: {err}");
                 std::process::exit(1);
             }
@@ -116,7 +121,7 @@ fn main() {
             eprintln!("  aemu imports-so <lib.so> [--limit N|--all]");
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
-            eprintln!("  aemu run-apk-native <app.apk> [--abi ABI] [--steps N]");
+            eprintln!("  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch]");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -500,7 +505,7 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
 
 fn parse_run_apk_native_args(
     args: Vec<String>,
-) -> Result<(PathBuf, aemu::native_loader::NativeLoadConfig, usize), String> {
+) -> Result<(PathBuf, aemu::native_loader::NativeLoadConfig, usize, bool), String> {
     let mut iter = args.into_iter();
     let Some(path) = iter.next() else {
         return Err("missing APK path".to_string());
@@ -508,6 +513,7 @@ fn parse_run_apk_native_args(
 
     let mut config = aemu::native_loader::NativeLoadConfig::default();
     let mut max_steps = 100_000usize;
+    let mut launch = false;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--abi" => {
@@ -523,17 +529,19 @@ fn parse_run_apk_native_args(
                     .parse()
                     .map_err(|_| format!("invalid --steps value: {value}"))?;
             }
+            "--launch" => launch = true,
             _ => return Err(format!("unknown run-apk-native argument: {arg}")),
         }
     }
 
-    Ok((PathBuf::from(path), config, max_steps))
+    Ok((PathBuf::from(path), config, max_steps, launch))
 }
 
 fn run_apk_native(
     path: &Path,
     config: &aemu::native_loader::NativeLoadConfig,
     max_steps: usize,
+    launch: bool,
 ) -> Result<(), String> {
     let report = aemu::native_loader::load_apk_native_libraries_with_config(path, config)
         .map_err(|err| format!("link failed: {err}"))?;
@@ -570,6 +578,84 @@ fn run_apk_native(
             })?;
     }
     println!("native constructors completed");
+    if launch {
+        run_native_activity_launch(&mut runtime, max_steps)?;
+    }
+    Ok(())
+}
+
+fn run_native_activity_launch(
+    runtime: &mut aemu::native_runtime::NativeRuntime,
+    max_steps: usize,
+) -> Result<(), String> {
+    const ACTIVITY_LIBRARY: &str = "libminecraftpe.so";
+    let on_create = runtime
+        .symbol_address_in_library(ACTIVITY_LIBRARY, "ANativeActivity_onCreate")
+        .or_else(|| runtime.symbol_address("ANativeActivity_onCreate"))
+        .ok_or_else(|| "missing ANativeActivity_onCreate export".to_string())?;
+    let harness = runtime
+        .prepare_native_activity()
+        .map_err(|err| format!("native activity harness setup failed: {err}"))?;
+
+    if let Some(jni_on_load) = runtime.symbol_address_in_library(ACTIVITY_LIBRARY, "JNI_OnLoad") {
+        println!(
+            "launch: JNI_OnLoad {jni_on_load:#010x} java_vm {:#010x}",
+            harness.java_vm
+        );
+        runtime
+            .run_function_with_args(jni_on_load, &[harness.java_vm, 0], max_steps)
+            .map_err(|err| format!("JNI_OnLoad failed: {err}"))?;
+    }
+
+    if let Some(native_register_this) = runtime.symbol_address_in_library(
+        ACTIVITY_LIBRARY,
+        "Java_com_mojang_minecraftpe_MainActivity_nativeRegisterThis",
+    ) {
+        println!(
+            "launch: nativeRegisterThis {native_register_this:#010x} env {:#010x}",
+            harness.jni_env
+        );
+        runtime
+            .run_function_with_args(
+                native_register_this,
+                &[harness.jni_env, harness.activity_class],
+                max_steps,
+            )
+            .map_err(|err| format!("nativeRegisterThis failed: {err}"))?;
+    }
+
+    println!(
+        "launch: ANativeActivity_onCreate {on_create:#010x} activity {:#010x}",
+        harness.activity
+    );
+    runtime
+        .run_function_with_args(on_create, &[harness.activity, 0, 0], max_steps)
+        .map_err(|err| format!("ANativeActivity_onCreate failed: {err}"))?;
+
+    let mut app = runtime
+        .link
+        .memory
+        .load32(harness.activity.wrapping_add(0x1c))
+        .map_err(|err| format!("failed to read ANativeActivity.instance: {err}"))?;
+    if app == 0 {
+        app = runtime
+            .prepare_android_app(harness)
+            .map_err(|err| format!("android_app harness setup failed: {err}"))?;
+    } else {
+        runtime
+            .populate_android_app(app, harness)
+            .map_err(|err| format!("android_app harness patch failed: {err}"))?;
+    }
+
+    let android_main = runtime
+        .symbol_address_in_library(ACTIVITY_LIBRARY, "android_main")
+        .or_else(|| runtime.symbol_address("android_main"))
+        .ok_or_else(|| "missing android_main export".to_string())?;
+    println!("launch: android_main {android_main:#010x} android_app {app:#010x}");
+    runtime
+        .run_function_with_args(android_main, &[app], max_steps)
+        .map_err(|err| format!("android_main failed: {err}"))?;
+    println!("native activity launch returned");
     Ok(())
 }
 

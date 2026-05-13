@@ -3882,8 +3882,7 @@ fn qemu_oracle_thumb32_table_branch_matches_interpreter() {
     cpu.set_isa(aemu::armv6::Isa::Thumb);
     cpu.set_pc(0x1000);
     cpu.set_reg(2, 3);
-    mem.load_thumb_halfwords(0x1000, &[0xe8df, 0xf002])
-        .unwrap();
+    mem.load_thumb_halfwords(0x1000, &[0xe8df, 0xf002]).unwrap();
     mem.load_bytes(0x1004, &[2, 4, 6, 8]).unwrap();
     cpu.step(&mut mem).unwrap(); // tbb [pc, r2]
 

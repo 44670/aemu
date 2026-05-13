@@ -4852,6 +4852,26 @@ impl Cpu {
         _pc: u32,
         mem: &mut M,
     ) -> Result<bool> {
+        if (first & 0xfff0) == 0xe8d0
+            && (second & 0x0f0f) == 0x0f0f
+            && matches!((second >> 4) & 0xf, 4 | 5)
+        {
+            let rn = usize::from(first & 0xf);
+            let rt = usize::from((second >> 12) & 0xf);
+            if rn == 15 || rt == 15 {
+                return Err(Trap::Unpredictable("Thumb LDREX with PC register"));
+            }
+            let addr = self.regs[rn];
+            let (value, size) = if (second & 0x00f0) == 0x0040 {
+                (u32::from(mem.load8(addr)?), 1)
+            } else {
+                (u32::from(mem.load16(addr)?), 2)
+            };
+            self.regs[rt] = value;
+            self.exclusive_reservation = Some(ExclusiveReservation { addr, size });
+            return Ok(true);
+        }
+
         if (first & 0xfff0) == 0xe850 && (second & 0x0f00) == 0x0f00 {
             let rn = usize::from(first & 0xf);
             let rt = usize::from((second >> 12) & 0xf);
@@ -4861,6 +4881,41 @@ impl Cpu {
             let addr = self.regs[rn].wrapping_add(u32::from(second & 0xff) << 2);
             self.regs[rt] = mem.load32(addr)?;
             self.exclusive_reservation = Some(ExclusiveReservation { addr, size: 4 });
+            return Ok(true);
+        }
+
+        if (first & 0xfff0) == 0xe8c0
+            && (second & 0x0f00) == 0x0f00
+            && matches!((second >> 4) & 0xf, 4 | 5)
+        {
+            let rn = usize::from(first & 0xf);
+            let rt = usize::from((second >> 12) & 0xf);
+            let rd = usize::from(second & 0xf);
+            if rn == 15 || rd == 15 || rt == 15 {
+                return Err(Trap::Unpredictable("Thumb STREX with PC register"));
+            }
+            if rd == rn || rd == rt {
+                return Err(Trap::Unpredictable(
+                    "Thumb STREX status register overlaps operand",
+                ));
+            }
+            let addr = self.regs[rn];
+            let size = if (second & 0x00f0) == 0x0040 { 1 } else { 2 };
+            if self
+                .exclusive_reservation
+                .map(|reservation| reservation.addr == addr && reservation.size == size)
+                .unwrap_or(false)
+            {
+                if size == 1 {
+                    mem.store8(addr, self.regs[rt] as u8)?;
+                } else {
+                    mem.store16(addr, self.regs[rt] as u16)?;
+                }
+                self.regs[rd] = 0;
+            } else {
+                self.regs[rd] = 1;
+            }
+            self.exclusive_reservation = None;
             return Ok(true);
         }
 
@@ -5093,7 +5148,9 @@ impl Cpu {
         let rn = usize::from(first & 0xf);
         let rm = usize::from(second & 0xf);
         if rm == 15 {
-            return Err(Trap::Unpredictable("Thumb table branch with PC index register"));
+            return Err(Trap::Unpredictable(
+                "Thumb table branch with PC index register",
+            ));
         }
 
         let base = if rn == 15 {
@@ -10355,6 +10412,38 @@ mod tests {
         cpu.step(&mut mem).unwrap(); // strex r1, r2, [r3]
         assert_eq!(cpu.reg(1), 0);
         assert_eq!(mem.load32(0x4c000).unwrap(), 0x3333_4444);
+
+        mem.store8(0x4c010, 0x7f).unwrap();
+        cpu.set_reg(0, 0x4c010);
+        cpu.set_pc(0x4b6cc);
+        mem.load_thumb_halfwords(0x4b6cc, &[0xe8d0, 0x2f4f])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ldrexb r2, [r0]
+        assert_eq!(cpu.reg(2), 0x7f);
+
+        cpu.set_reg(1, 0xab);
+        cpu.set_pc(0x4b6d0);
+        mem.load_thumb_halfwords(0x4b6d0, &[0xe8c0, 0x1f43])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // strexb r3, r1, [r0]
+        assert_eq!(cpu.reg(3), 0);
+        assert_eq!(mem.load8(0x4c010).unwrap(), 0xab);
+
+        mem.store16(0x4c012, 0x1234).unwrap();
+        cpu.set_reg(0, 0x4c012);
+        cpu.set_pc(0x4b6d4);
+        mem.load_thumb_halfwords(0x4b6d4, &[0xe8d0, 0x2f5f])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ldrexh r2, [r0]
+        assert_eq!(cpu.reg(2), 0x1234);
+
+        cpu.set_reg(1, 0x5678);
+        cpu.set_pc(0x4b6d8);
+        mem.load_thumb_halfwords(0x4b6d8, &[0xe8c0, 0x1f53])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // strexh r3, r1, [r0]
+        assert_eq!(cpu.reg(3), 0);
+        assert_eq!(mem.load16(0x4c012).unwrap(), 0x5678);
 
         cpu.set_pc(0x4b6a2);
         cpu.set_reg(0, 0x0000_00f0);

@@ -7,6 +7,28 @@ pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 const FAKE_FILE_SIZE: u32 = 0x40;
 const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
 const FIRST_FAKE_FD: u32 = 3;
+const AT_HWCAP: u32 = 16;
+const AT_HWCAP2: u32 = 26;
+const HWCAP_SWP: u32 = 1 << 0;
+const HWCAP_HALF: u32 = 1 << 1;
+const HWCAP_THUMB: u32 = 1 << 2;
+const HWCAP_FAST_MULT: u32 = 1 << 4;
+const HWCAP_VFP: u32 = 1 << 6;
+const HWCAP_EDSP: u32 = 1 << 7;
+const HWCAP_NEON: u32 = 1 << 12;
+const HWCAP_VFPV3: u32 = 1 << 13;
+const HWCAP_TLS: u32 = 1 << 15;
+const HWCAP_VFPD32: u32 = 1 << 19;
+const ARMV7_NEON_HWCAP: u32 = HWCAP_SWP
+    | HWCAP_HALF
+    | HWCAP_THUMB
+    | HWCAP_FAST_MULT
+    | HWCAP_VFP
+    | HWCAP_EDSP
+    | HWCAP_NEON
+    | HWCAP_VFPV3
+    | HWCAP_TLS
+    | HWCAP_VFPD32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -193,6 +215,7 @@ impl HleRuntime {
             "__aeabi_idivmod" => self.aeabi_idivmod(cpu),
             "__aeabi_uidivmod" => self.aeabi_uidivmod(cpu),
             name if descriptor.kind == HleSymbolKind::Libm => self.libm(name, cpu),
+            "getauxval" => Ok(self.return32(cpu, self.getauxval(cpu.reg(0)))),
             "gettimeofday" => self.gettimeofday(cpu, memory),
             "clock_gettime" => self.clock_gettime(cpu, memory),
             "time" => self.time(cpu, memory),
@@ -201,10 +224,12 @@ impl HleRuntime {
             "fdopen" => self.fdopen_call(cpu, memory),
             "fclose" | "close" => Ok(self.return32(cpu, 0)),
             "open" => self.open_call(cpu, memory),
+            "pipe" => self.pipe_call(cpu, memory),
             "read" => self.read_call(cpu, memory),
             "fread" => self.fread_call(cpu, memory),
             "write" => Ok(self.return32(cpu, cpu.reg(2))),
             "fwrite" => Ok(self.return32(cpu, cpu.reg(2))),
+            "pthread_create" => self.pthread_create(cpu, memory),
             "__cxa_guard_acquire" => self.cxa_guard_acquire(cpu, memory),
             "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
             "__cxa_guard_abort" => Ok(self.return32(cpu, 0)),
@@ -231,6 +256,14 @@ impl HleRuntime {
             }
             HleCallBehavior::ReturnNull => Ok(self.return32(cpu, 0)),
             HleCallBehavior::Abort => Err(HleError::Abort(name.to_string())),
+        }
+    }
+
+    fn getauxval(&self, key: u32) -> u32 {
+        match key {
+            AT_HWCAP => ARMV7_NEON_HWCAP,
+            AT_HWCAP2 => 0,
+            _ => 0,
         }
     }
 
@@ -541,6 +574,35 @@ impl HleRuntime {
         Ok(self.return32(cpu, u32::MAX))
     }
 
+    fn pipe_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fds = cpu.reg(0);
+        if fds == 0 {
+            self.set_errno(memory, 14)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let read_fd = self.alloc_fd();
+        let write_fd = self.alloc_fd();
+        store32(memory, fds, read_fd)?;
+        store32(memory, fds.wrapping_add(4), write_fd)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_create<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let thread_out = cpu.reg(0);
+        let arg = cpu.reg(3);
+        if thread_out != 0 {
+            store32(memory, thread_out, self.alloc_fd())?;
+        }
+
+        // Android's native_app_glue waits for the created thread to mark
+        // android_app.running at offset 0x6c before ANativeActivity_onCreate
+        // returns. The launch probe drives android_main explicitly afterward.
+        if arg != 0 {
+            store32(memory, arg.wrapping_add(0x6c), 1)?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
     fn read_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
         let buf = cpu.reg(1);
@@ -776,7 +838,7 @@ impl HleRuntime {
         }
     }
 
-    fn alloc(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
+    pub(crate) fn alloc(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
         let size = size.max(1);
         let start =
             align_up(self.heap_next, align).ok_or(HleError::HeapExhausted { requested: size })?;
@@ -957,6 +1019,7 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "__aeabi_uidiv"
                 | "__aeabi_idivmod"
                 | "__aeabi_uidivmod"
+                | "getauxval"
                 | "gettimeofday"
                 | "clock_gettime"
                 | "time"
@@ -966,10 +1029,12 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "fclose"
                 | "open"
                 | "close"
+                | "pipe"
                 | "read"
                 | "fread"
                 | "write"
                 | "fwrite"
+                | "pthread_create"
                 | "__cxa_guard_acquire"
                 | "__cxa_guard_release"
                 | "__cxa_guard_abort"
@@ -1581,6 +1646,32 @@ mod tests {
         let guard = describe_hle_import("__stack_chk_guard").unwrap();
         initialize_hle_symbol(&mut memory, guard, 0x1100).unwrap();
         assert_eq!(memory.load32(0x1100).unwrap(), 0x00c0_ffee);
+    }
+
+    #[test]
+    fn dispatches_getauxval_with_armv7_neon_hwcap() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        assert_eq!(
+            describe_hle_import("getauxval").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+
+        cpu.set_reg(0, AT_HWCAP);
+        hle.dispatch("getauxval", &mut cpu, &mut memory).unwrap();
+        assert_ne!(cpu.reg(0) & HWCAP_NEON, 0);
+        assert_ne!(cpu.reg(0) & HWCAP_VFPV3, 0);
+        assert_ne!(cpu.reg(0) & HWCAP_VFPD32, 0);
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(0, AT_HWCAP2);
+        hle.dispatch("getauxval", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
     }
 
     #[test]

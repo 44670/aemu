@@ -59,6 +59,23 @@ pub enum NativeConstructorSource {
     InitArray,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeActivityHarness {
+    pub activity: u32,
+    pub callbacks: u32,
+    pub java_vm: u32,
+    pub jni_env: u32,
+    pub activity_class: u32,
+    pub asset_manager: u32,
+    pub configuration: u32,
+    pub looper: u32,
+    pub input_queue: u32,
+    pub window: u32,
+    pub internal_data_path: u32,
+    pub external_data_path: u32,
+    pub obb_path: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRuntimeStep {
     GuestInstruction,
@@ -220,6 +237,169 @@ impl NativeRuntime {
         Err(NativeRuntimeError::Cpu(Trap::StepLimit))
     }
 
+    pub fn symbol_address(&self, name: &str) -> Option<u32> {
+        self.link
+            .global_symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.address)
+    }
+
+    pub fn symbol_address_in_library(&self, library_name: &str, name: &str) -> Option<u32> {
+        self.link
+            .objects
+            .iter()
+            .find(|object| object.library_name == library_name)
+            .and_then(|object| {
+                object
+                    .defined_symbols
+                    .iter()
+                    .find(|symbol| symbol.name == name)
+                    .map(|symbol| symbol.address)
+            })
+    }
+
+    pub fn alloc_guest_zeroed(&mut self, size: u32, align: u32) -> Result<u32, NativeRuntimeError> {
+        let ptr = self
+            .hle
+            .alloc(size, align)
+            .map_err(|source| NativeRuntimeError::Hle {
+                name: "runtime_alloc".to_string(),
+                source,
+            })?;
+        for offset in 0..size {
+            self.link
+                .memory
+                .store8(ptr.wrapping_add(offset), 0)
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        }
+        Ok(ptr)
+    }
+
+    pub fn write_guest_bytes(&mut self, bytes: &[u8]) -> Result<u32, NativeRuntimeError> {
+        let len = u32::try_from(bytes.len()).map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let ptr = self.alloc_guest_zeroed(len.max(1), 1)?;
+        self.link
+            .memory
+            .load_bytes(ptr, bytes)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        Ok(ptr)
+    }
+
+    pub fn write_guest_c_string(&mut self, value: &str) -> Result<u32, NativeRuntimeError> {
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        self.write_guest_bytes(&bytes)
+    }
+
+    pub fn prepare_native_activity(&mut self) -> Result<NativeActivityHarness, NativeRuntimeError> {
+        let (java_vm, jni_env) = self.prepare_jni_tables()?;
+        let callbacks = self.alloc_guest_zeroed(0x40, 4)?;
+        let activity = self.alloc_guest_zeroed(0x40, 4)?;
+        let activity_class = self.alloc_guest_zeroed(0x10, 4)?;
+        let asset_manager = self.alloc_guest_zeroed(0x10, 4)?;
+        let configuration = self.alloc_guest_zeroed(0x20, 4)?;
+        let looper = self.alloc_guest_zeroed(0x10, 4)?;
+        let input_queue = self.alloc_guest_zeroed(0x10, 4)?;
+        let window = self.alloc_guest_zeroed(0x10, 4)?;
+        let internal_data_path = self.write_guest_c_string("/data/data/com.mojang.minecraftpe")?;
+        let external_data_path =
+            self.write_guest_c_string("/sdcard/Android/data/com.mojang.minecraftpe/files")?;
+        let obb_path = self.write_guest_c_string("/sdcard/Android/obb/com.mojang.minecraftpe")?;
+
+        self.store_runtime32(activity, callbacks)?;
+        self.store_runtime32(activity.wrapping_add(0x04), java_vm)?;
+        self.store_runtime32(activity.wrapping_add(0x08), jni_env)?;
+        self.store_runtime32(activity.wrapping_add(0x0c), activity_class)?;
+        self.store_runtime32(activity.wrapping_add(0x10), internal_data_path)?;
+        self.store_runtime32(activity.wrapping_add(0x14), external_data_path)?;
+        self.store_runtime32(activity.wrapping_add(0x18), 19)?; // Android 4.4 API level
+        self.store_runtime32(activity.wrapping_add(0x1c), 0)?; // instance
+        self.store_runtime32(activity.wrapping_add(0x20), asset_manager)?;
+        self.store_runtime32(activity.wrapping_add(0x24), obb_path)?;
+
+        Ok(NativeActivityHarness {
+            activity,
+            callbacks,
+            java_vm,
+            jni_env,
+            activity_class,
+            asset_manager,
+            configuration,
+            looper,
+            input_queue,
+            window,
+            internal_data_path,
+            external_data_path,
+            obb_path,
+        })
+    }
+
+    pub fn prepare_android_app(
+        &mut self,
+        harness: NativeActivityHarness,
+    ) -> Result<u32, NativeRuntimeError> {
+        let app = self.alloc_guest_zeroed(0x94, 4)?;
+        self.populate_android_app(app, harness)?;
+        Ok(app)
+    }
+
+    pub fn populate_android_app(
+        &mut self,
+        app: u32,
+        harness: NativeActivityHarness,
+    ) -> Result<(), NativeRuntimeError> {
+        self.store_runtime32(app.wrapping_add(0x0c), harness.activity)?;
+        self.store_runtime32(app.wrapping_add(0x10), harness.configuration)?;
+        self.store_runtime32(app.wrapping_add(0x1c), harness.looper)?;
+        self.store_runtime32(app.wrapping_add(0x20), harness.input_queue)?;
+        self.store_runtime32(app.wrapping_add(0x24), harness.window)?;
+        self.store_runtime32(app.wrapping_add(0x6c), 1)?;
+        Ok(())
+    }
+
+    fn prepare_jni_tables(&mut self) -> Result<(u32, u32), NativeRuntimeError> {
+        let return_zero = self.write_guest_words(&[0xe3a0_0000, 0xe12f_ff1e])?;
+        let return_arg1 = self.write_guest_words(&[0xe1a0_0001, 0xe12f_ff1e])?;
+        let return_arg2 = self.write_guest_words(&[0xe1a0_0002, 0xe12f_ff1e])?;
+
+        let env_vtable = self.alloc_guest_zeroed(0x400, 4)?;
+        for offset in (0..0x400).step_by(4) {
+            self.store_runtime32(env_vtable.wrapping_add(offset), return_zero)?;
+        }
+        let jni_env = self.alloc_guest_zeroed(4, 4)?;
+        self.store_runtime32(jni_env, env_vtable)?;
+
+        let vm_vtable = self.alloc_guest_zeroed(0x80, 4)?;
+        for offset in (0..0x80).step_by(4) {
+            self.store_runtime32(vm_vtable.wrapping_add(offset), return_zero)?;
+        }
+        let java_vm = self.alloc_guest_zeroed(4, 4)?;
+        self.store_runtime32(java_vm, vm_vtable)?;
+
+        let store_env =
+            self.write_guest_words(&[0xe59f_3008, 0xe581_3000, 0xe3a0_0000, 0xe12f_ff1e, jni_env])?;
+        let store_java_vm =
+            self.write_guest_words(&[0xe59f_3008, 0xe581_3000, 0xe3a0_0000, 0xe12f_ff1e, java_vm])?;
+
+        self.store_runtime32(env_vtable.wrapping_add(0x18), return_arg1)?; // FindClass
+        self.store_runtime32(env_vtable.wrapping_add(0x54), return_arg1)?; // NewGlobalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x64), return_arg1)?; // NewLocalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x7c), return_arg1)?; // GetObjectClass
+        self.store_runtime32(env_vtable.wrapping_add(0x84), return_arg2)?; // GetMethodID
+        self.store_runtime32(env_vtable.wrapping_add(0x178), return_arg2)?; // GetFieldID
+        self.store_runtime32(env_vtable.wrapping_add(0x1c4), return_arg2)?; // GetStaticMethodID
+        self.store_runtime32(env_vtable.wrapping_add(0x240), return_arg2)?; // GetStaticFieldID
+        self.store_runtime32(env_vtable.wrapping_add(0x29c), return_arg1)?; // NewStringUTF
+        self.store_runtime32(env_vtable.wrapping_add(0x2a4), return_arg1)?; // GetStringUTFChars
+        self.store_runtime32(env_vtable.wrapping_add(0x36c), store_java_vm)?; // GetJavaVM
+
+        self.store_runtime32(vm_vtable.wrapping_add(0x10), store_env)?; // AttachCurrentThread
+        self.store_runtime32(vm_vtable.wrapping_add(0x18), store_env)?; // GetEnv
+        self.store_runtime32(vm_vtable.wrapping_add(0x1c), store_env)?; // AttachCurrentThreadAsDaemon
+        Ok((java_vm, jni_env))
+    }
+
     pub fn constructors(&mut self) -> Result<Vec<NativeConstructor>, NativeRuntimeError> {
         let mut out = Vec::new();
         for object in &self.link.objects {
@@ -259,6 +439,18 @@ impl NativeRuntime {
         address: u32,
         max_steps: usize,
     ) -> Result<(), NativeRuntimeError> {
+        self.run_function_with_args(address, &[], max_steps)
+    }
+
+    pub fn run_function_with_args(
+        &mut self,
+        address: u32,
+        args: &[u32],
+        max_steps: usize,
+    ) -> Result<(), NativeRuntimeError> {
+        for (idx, &value) in args.iter().take(4).enumerate() {
+            self.cpu.set_reg(idx, value);
+        }
         self.cpu.branch_exchange(address);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
@@ -372,6 +564,21 @@ impl NativeRuntime {
         }
         Ok(())
     }
+
+    fn store_runtime32(&mut self, addr: u32, value: u32) -> Result<(), NativeRuntimeError> {
+        self.link
+            .memory
+            .store32(addr, value)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))
+    }
+
+    fn write_guest_words(&mut self, words: &[u32]) -> Result<u32, NativeRuntimeError> {
+        let mut bytes = Vec::with_capacity(words.len() * 4);
+        for &word in words {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        self.write_guest_bytes(&bytes)
+    }
 }
 
 fn parse_trace_pc_range() -> Option<(u32, u32)> {
@@ -437,7 +644,7 @@ mod tests {
     use crate::armv6::Memory;
     use crate::guest_memory::MappedMemory;
     use crate::hle_imports::{HleCallBehavior, HleSymbolKind, HleSymbolShape};
-    use crate::native_loader::{HleSymbol, LoadedNativeObject, NativeLinkReport};
+    use crate::native_loader::{HleSymbol, LoadedNativeObject, NativeLinkReport, NativeSymbol};
 
     use super::*;
 
@@ -555,5 +762,115 @@ mod tests {
         runtime.run_constructors(8).unwrap();
         assert_eq!(runtime.cpu.reg(0), 1);
         assert_eq!(runtime.cpu.pc(), CALL_RETURN_SENTINEL);
+    }
+
+    #[test]
+    fn native_activity_jni_table_preserves_refs_and_exposes_java_vm() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x4000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        let harness = runtime.prepare_native_activity().unwrap();
+        let env_vtable = runtime.link.memory.load32(harness.jni_env).unwrap();
+
+        let new_global_ref = runtime.link.memory.load32(env_vtable + 0x54).unwrap();
+        runtime
+            .run_function_with_args(
+                new_global_ref,
+                &[harness.jni_env, harness.activity_class],
+                16,
+            )
+            .unwrap();
+        assert_eq!(runtime.cpu.reg(0), harness.activity_class);
+
+        let method_name = runtime.write_guest_c_string("method").unwrap();
+        let get_method_id = runtime.link.memory.load32(env_vtable + 0x84).unwrap();
+        runtime
+            .run_function_with_args(
+                get_method_id,
+                &[harness.jni_env, harness.activity_class, method_name, 0],
+                16,
+            )
+            .unwrap();
+        assert_eq!(runtime.cpu.reg(0), method_name);
+
+        let java_vm_out = runtime.alloc_guest_zeroed(4, 4).unwrap();
+        let get_java_vm = runtime.link.memory.load32(env_vtable + 0x36c).unwrap();
+        runtime
+            .run_function_with_args(get_java_vm, &[harness.jni_env, java_vm_out], 16)
+            .unwrap();
+        assert_eq!(runtime.cpu.reg(0), 0);
+        assert_eq!(
+            runtime.link.memory.load32(java_vm_out).unwrap(),
+            harness.java_vm
+        );
+    }
+
+    #[test]
+    fn finds_duplicate_symbol_in_requested_library() {
+        let object = |library_name: &str, address: u32| LoadedNativeObject {
+            entry_name: format!("lib/armeabi/{library_name}"),
+            library_name: library_name.to_string(),
+            load_bias: address & 0xfff0_0000,
+            memory_base: address & 0xfff0_0000,
+            memory_size: 0x1000,
+            entry: address & 0xfff0_0000,
+            needed: Vec::new(),
+            imports: Vec::new(),
+            defined_symbols: vec![NativeSymbol {
+                name: "JNI_OnLoad".to_string(),
+                address,
+                library_name: library_name.to_string(),
+            }],
+            relocations: Vec::new(),
+            relocation_count: 0,
+            init: None,
+            init_array: None,
+        };
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: vec![
+                object("libfmod.so", 0x700c_cb68),
+                object("libminecraftpe.so", 0x7128_d499),
+            ],
+            global_symbols: vec![NativeSymbol {
+                name: "JNI_OnLoad".to_string(),
+                address: 0x700c_cb68,
+                library_name: "libfmod.so".to_string(),
+            }],
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let runtime = NativeRuntime {
+            link: report,
+            cpu: Cpu::new(),
+            hle: HleRuntime::new(0, 0x6000_0000, 0x1000),
+        };
+
+        assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));
+        assert_eq!(
+            runtime.symbol_address_in_library("libminecraftpe.so", "JNI_OnLoad"),
+            Some(0x7128_d499)
+        );
     }
 }
