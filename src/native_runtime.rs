@@ -6,8 +6,8 @@ use crate::guest_memory::MappedMemoryError;
 use crate::hle_imports::{HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
 use crate::native_loader::NativeLinkReport;
 
-pub const DEFAULT_STACK_BASE: u32 = 0x6d00_0000;
-pub const DEFAULT_STACK_SIZE: usize = 0x0040_0000;
+pub const DEFAULT_STACK_BASE: u32 = 0x6c00_0000;
+pub const DEFAULT_STACK_SIZE: usize = 0x0200_0000;
 pub const DEFAULT_TLS_BASE: u32 = 0x6e00_0000;
 pub const DEFAULT_TLS_SIZE: usize = 0x0001_0000;
 pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
@@ -109,6 +109,7 @@ pub struct NativeRuntimeTraceEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimeHleTrap {
     address: u32,
+    isa: Isa,
     name: &'static str,
     kind: RuntimeHleTrapKind,
 }
@@ -116,6 +117,14 @@ struct RuntimeHleTrap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeHleTrapKind {
     Jni(JniFunction),
+    CxxDynamicCast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CxxTypeInfoKind {
+    Class,
+    SingleInheritance,
+    VirtualMultipleInheritance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,11 +267,13 @@ impl NativeRuntime {
         let mut hle = HleRuntime::new(errno_addr, config.heap_base, config.heap_size as u32);
         hle.set_apk_path(link.apk_path.clone());
 
+        let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
+
         Ok(Self {
             link,
             cpu,
             hle,
-            runtime_hle_traps: Vec::new(),
+            runtime_hle_traps,
             jni_methods: Vec::new(),
             jni_java_vm: 0,
         })
@@ -271,6 +282,13 @@ impl NativeRuntime {
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
         let pc_before = self.cpu.pc();
         let isa_before = self.cpu.isa();
+        if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
+            self.dispatch_runtime_hle(trap)?;
+            return Ok(NativeRuntimeStep::HleCall {
+                name: trap.name.to_string(),
+                address: pc_before,
+            });
+        }
         match self.cpu.step(&mut self.link.memory) {
             Ok(()) => Ok(NativeRuntimeStep::GuestInstruction),
             Err(Trap::UndefinedArm { pc, instr }) if instr == HLE_TRAP_ARM_INSTR => {
@@ -790,16 +808,165 @@ impl NativeRuntime {
         let address = self.write_guest_words(&[HLE_TRAP_ARM_INSTR])?;
         self.runtime_hle_traps.push(RuntimeHleTrap {
             address,
+            isa: Isa::Arm,
             name,
             kind: RuntimeHleTrapKind::Jni(function),
         });
         Ok(address)
     }
 
+    fn runtime_hle_entry(&self, pc: u32, isa: Isa) -> Option<RuntimeHleTrap> {
+        self.runtime_hle_traps
+            .iter()
+            .find(|trap| trap.address == pc && trap.isa == isa)
+            .copied()
+    }
+
     fn dispatch_runtime_hle(&mut self, trap: RuntimeHleTrap) -> Result<(), NativeRuntimeError> {
         match trap.kind {
             RuntimeHleTrapKind::Jni(function) => self.dispatch_jni(function),
+            RuntimeHleTrapKind::CxxDynamicCast => self.dispatch_cxx_dynamic_cast(),
         }
+    }
+
+    fn dispatch_cxx_dynamic_cast(&mut self) -> Result<(), NativeRuntimeError> {
+        let src_ptr = self.cpu.reg(0);
+        let src_type = self.cpu.reg(1);
+        let dst_type = self.cpu.reg(2);
+        let src2dst_offset = self.cpu.reg(3) as i32;
+        let result = self.cxx_dynamic_cast(src_ptr, src_type, dst_type, src2dst_offset)?;
+        if std::env::var_os("AEMU_TRACE_CXXABI").is_some() {
+            eprintln!(
+                "CXXABI __dynamic_cast src={src_ptr:#010x} src_type={src_type:#010x} dst_type={dst_type:#010x} src2dst={src2dst_offset} -> {result:#010x}"
+            );
+        }
+        self.cpu.set_reg(0, result);
+        self.cpu.branch_exchange(self.cpu.reg(14));
+        Ok(())
+    }
+
+    fn cxx_dynamic_cast(
+        &mut self,
+        src_ptr: u32,
+        src_type: u32,
+        dst_type: u32,
+        src2dst_offset: i32,
+    ) -> Result<u32, NativeRuntimeError> {
+        if src_ptr == 0 || src_type == 0 || dst_type == 0 {
+            return Ok(0);
+        }
+        if src_type == dst_type {
+            return Ok(src_ptr);
+        }
+
+        let object_vptr = self.load_runtime32(src_ptr)?;
+        let offset_to_top = self.load_runtime32(object_vptr.wrapping_sub(8))? as i32;
+        let dynamic_type = self.load_runtime32(object_vptr.wrapping_sub(4))?;
+        let top_ptr = src_ptr.wrapping_add(offset_to_top as u32);
+        if dynamic_type == dst_type {
+            return Ok(top_ptr);
+        }
+
+        let mut visited = Vec::new();
+        if let Some(dst_offset) =
+            self.cxx_type_base_offset(dynamic_type, dst_type, object_vptr, &mut visited)?
+        {
+            return Ok(top_ptr.wrapping_add(dst_offset as u32));
+        }
+
+        if src2dst_offset >= 0 {
+            let mut visited = Vec::new();
+            if self
+                .cxx_type_base_offset(dst_type, src_type, object_vptr, &mut visited)?
+                .is_some_and(|offset| offset == src2dst_offset)
+            {
+                return Ok(top_ptr);
+            }
+        }
+
+        Ok(0)
+    }
+
+    fn cxx_type_base_offset(
+        &mut self,
+        type_info: u32,
+        target_type: u32,
+        object_vptr: u32,
+        visited: &mut Vec<u32>,
+    ) -> Result<Option<i32>, NativeRuntimeError> {
+        if type_info == target_type {
+            return Ok(Some(0));
+        }
+        if type_info == 0 || visited.contains(&type_info) || visited.len() >= 128 {
+            return Ok(None);
+        }
+        visited.push(type_info);
+        let result = match self.cxx_type_info_kind(type_info)? {
+            Some(CxxTypeInfoKind::Class) | None => Ok(None),
+            Some(CxxTypeInfoKind::SingleInheritance) => {
+                let base_type = self.load_runtime32(type_info.wrapping_add(8))?;
+                self.cxx_type_base_offset(base_type, target_type, object_vptr, visited)
+            }
+            Some(CxxTypeInfoKind::VirtualMultipleInheritance) => {
+                let base_count = self.load_runtime32(type_info.wrapping_add(12))?.min(128);
+                for idx in 0..base_count {
+                    let entry = type_info.wrapping_add(16).wrapping_add(idx * 8);
+                    let base_type = self.load_runtime32(entry)?;
+                    let offset_flags = self.load_runtime32(entry.wrapping_add(4))?;
+                    let flags = offset_flags & 0xff;
+                    let raw_offset = (offset_flags as i32) >> 8;
+                    if flags & 0x2 == 0 {
+                        continue;
+                    }
+                    let base_offset = if flags & 0x1 != 0 {
+                        let offset_addr = object_vptr.wrapping_add(raw_offset as u32);
+                        self.load_runtime32(offset_addr)? as i32
+                    } else {
+                        raw_offset
+                    };
+                    if base_type == target_type {
+                        return Ok(Some(base_offset));
+                    }
+                    if let Some(nested_offset) =
+                        self.cxx_type_base_offset(base_type, target_type, object_vptr, visited)?
+                    {
+                        return Ok(Some(base_offset.wrapping_add(nested_offset)));
+                    }
+                }
+                Ok(None)
+            }
+        };
+        visited.pop();
+        result
+    }
+
+    fn cxx_type_info_kind(
+        &mut self,
+        type_info: u32,
+    ) -> Result<Option<CxxTypeInfoKind>, NativeRuntimeError> {
+        let vptr = self.load_runtime32(type_info)?;
+        if self.cxx_vtable_matches(vptr, "_ZTVN10__cxxabiv117__class_type_infoE") {
+            Ok(Some(CxxTypeInfoKind::Class))
+        } else if self.cxx_vtable_matches(vptr, "_ZTVN10__cxxabiv120__si_class_type_infoE") {
+            Ok(Some(CxxTypeInfoKind::SingleInheritance))
+        } else if self.cxx_vtable_matches(vptr, "_ZTVN10__cxxabiv121__vmi_class_type_infoE") {
+            Ok(Some(CxxTypeInfoKind::VirtualMultipleInheritance))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn cxx_vtable_matches(&self, vptr: u32, symbol_name: &str) -> bool {
+        self.symbol_address(symbol_name).is_some_and(|addr| {
+            vptr == addr || vptr == addr.wrapping_add(8) || vptr == addr.wrapping_add(12)
+        })
+    }
+
+    fn load_runtime32(&mut self, addr: u32) -> Result<u32, NativeRuntimeError> {
+        self.link
+            .memory
+            .load32(addr)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))
     }
 
     fn dispatch_jni(&mut self, function: JniFunction) -> Result<(), NativeRuntimeError> {
@@ -981,6 +1148,25 @@ fn parse_trace_hle_filter() -> Option<HleTraceFilter> {
     } else {
         Some(HleTraceFilter::Contains(raw.to_string()))
     }
+}
+
+fn collect_linked_runtime_hle_traps(link: &NativeLinkReport) -> Vec<RuntimeHleTrap> {
+    link.global_symbols
+        .iter()
+        .filter_map(|symbol| match symbol.name.as_str() {
+            "__dynamic_cast" => Some(RuntimeHleTrap {
+                address: symbol.address & !1,
+                isa: if symbol.address & 1 != 0 {
+                    Isa::Thumb
+                } else {
+                    Isa::Arm
+                },
+                name: "__dynamic_cast",
+                kind: RuntimeHleTrapKind::CxxDynamicCast,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn parse_u32_env(raw: &str) -> Option<u32> {
@@ -1310,6 +1496,95 @@ mod tests {
             runtime.link.memory.load32(source + 12).unwrap(),
             APP_CMD_RESUME
         );
+    }
+
+    #[test]
+    fn default_runtime_stack_has_room_below_tls() {
+        assert_eq!(DEFAULT_STACK_SIZE, 0x0200_0000);
+        assert!(
+            DEFAULT_STACK_BASE
+                .checked_add(DEFAULT_STACK_SIZE as u32)
+                .is_some_and(|end| end <= DEFAULT_TLS_BASE)
+        );
+    }
+
+    #[test]
+    fn runtime_hle_dynamic_cast_uses_guest_typeinfo() {
+        let dynamic_cast = 0x7000_0101;
+        let class_type_info_vtable = 0x4000_1000;
+        let si_class_type_info_vtable = 0x4000_1100;
+        let vmi_class_type_info_vtable = 0x4000_1200;
+        let base_type = 0x4000_2000;
+        let derived_type = 0x4000_2020;
+        let object = 0x4000_3000;
+        let object_vptr = 0x4000_3080;
+
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x4000_0000, 0x4000).unwrap();
+        memory
+            .store32(base_type, class_type_info_vtable + 8)
+            .unwrap();
+        memory
+            .store32(derived_type, si_class_type_info_vtable + 8)
+            .unwrap();
+        memory.store32(derived_type + 8, base_type).unwrap();
+        memory.store32(object, object_vptr).unwrap();
+        memory.store32(object_vptr - 8, 0).unwrap();
+        memory.store32(object_vptr - 4, derived_type).unwrap();
+
+        let symbols = vec![
+            NativeSymbol {
+                name: "__dynamic_cast".to_string(),
+                address: dynamic_cast,
+                library_name: "libgnustl_shared.so".to_string(),
+            },
+            NativeSymbol {
+                name: "_ZTVN10__cxxabiv117__class_type_infoE".to_string(),
+                address: class_type_info_vtable,
+                library_name: "libgnustl_shared.so".to_string(),
+            },
+            NativeSymbol {
+                name: "_ZTVN10__cxxabiv120__si_class_type_infoE".to_string(),
+                address: si_class_type_info_vtable,
+                library_name: "libgnustl_shared.so".to_string(),
+            },
+            NativeSymbol {
+                name: "_ZTVN10__cxxabiv121__vmi_class_type_infoE".to_string(),
+                address: vmi_class_type_info_vtable,
+                library_name: "libgnustl_shared.so".to_string(),
+            },
+        ];
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: symbols,
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+
+        runtime
+            .run_function_with_args(
+                dynamic_cast,
+                &[object, base_type, derived_type, 0xffff_ffff],
+                4,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.cpu.reg(0), object);
+        assert_eq!(runtime.cpu.pc(), CALL_RETURN_SENTINEL);
     }
 
     #[test]

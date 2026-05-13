@@ -129,6 +129,10 @@ CPU work.
 - Runtime HLE now reports ARMv7 NEON/VFPv3/VFP-D32 capability through
   `getauxval(AT_HWCAP)` while keeping `AT_HWCAP2` zero to avoid selecting
   ARMv8 crypto instructions before those are implemented.
+- Native runtime HLE can intercept linked C++ ABI entrypoints such as
+  `__dynamic_cast`; the current implementation handles guest RTTI for the
+  `__class_type_info`, `__si_class_type_info`, and `__vmi_class_type_info`
+  shapes seen in the MCPE launch path.
 - Thumb-1 common instruction set: shifts, ALU ops, high-register ops,
   literal loads, load/store forms, push/pop, multiple load/store,
   including `LDMIA` base-in-list writeback suppression,
@@ -184,10 +188,13 @@ baseline but is now the active ARMv7/NEON research target.
 The native launch probe currently completes `libfmod.so`,
 `libgnustl_shared.so`, and `libminecraftpe.so` constructors, calls
 `JNI_OnLoad` for FMOD and Minecraft, invokes `nativeRegisterThis`,
-`ANativeActivity_onCreate`, and `android_main`, then reaches the configured
-50M-step limit in `libgnustl_shared.so` RTTI/dynamic-cast traversal. The
-latest trace does not show an undefined NEON opcode; the remaining blocker is
-runtime/C++ object-model behavior rather than vector instruction decode.
+`ANativeActivity_onCreate`, and `android_main`. The runtime now intercepts
+linked `__dynamic_cast` and uses a 32 MiB default guest stack below TLS, which
+gets past the earlier C++ RTTI stack crash. The latest trace reaches the
+configured 200M-step limit in `libgnustl_shared.so` near `std::string` copy
+construction from the MCPE resource-pack load path. It does not show an
+undefined NEON opcode; the remaining blocker is runtime/libgnustl startup
+progress rather than vector instruction decode.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.
