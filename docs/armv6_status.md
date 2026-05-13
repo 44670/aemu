@@ -191,12 +191,14 @@ The native launch probe currently completes `libfmod.so`,
 `ANativeActivity_onCreate`, and `android_main`. The runtime now intercepts
 linked `__dynamic_cast` and uses a 32 MiB default guest stack below TLS, which
 gets past the earlier C++ RTTI stack crash. The latest draw-focused trace runs
-through EGL setup, texture upload, `glViewport`, `glDepthRangef`, and MCPE UI
-render setup before reaching the configured 800M-step limit around
-`TextBox::setTextboxText(std::string const&)` / `Button::renderBg`. It does
-not show an undefined NEON opcode; the remaining blocker is frame progress from
-GLES state/UI setup to `glDraw*` or `eglSwapBuffers` rather than vector
-instruction decode.
+through EGL setup, texture upload, `glViewport`, `glDepthRangef`, MCPE UI
+render setup, transform interpolation, render-context texture unbind, and frame
+timing/coroutine work before reaching the configured 1.6B-step limit around
+`RunningAverage<double, 100>::append(double const&)`,
+`WorkerPool::processCoroutines(double)`, and
+`std::chrono::_V2::system_clock::now()`. It does not show an undefined NEON
+opcode; the remaining blocker is frame progress from GLES state/UI setup to
+`glDraw*` or `eglSwapBuffers` rather than vector instruction decode.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.

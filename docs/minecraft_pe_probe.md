@@ -135,8 +135,9 @@ launch: android_main ...
 ```
 
 The latest draw-focused run reaches EGL/GLES setup, texture upload,
-`glViewport`, `glDepthRangef`, and MCPE UI render setup before the configured
-step cap. It does not stop on an undefined NEON opcode. An older APK with
+`glViewport`, `glDepthRangef`, MCPE UI render setup, render-context texture
+unbind, and frame timing/coroutine work before the configured 1.6B-step cap. It
+does not stop on an undefined NEON opcode. An older APK with
 `lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
 Minecraft PE path.
 

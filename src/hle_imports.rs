@@ -528,6 +528,68 @@ impl HleRuntime {
             }
             "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
             | "_ZN9UIControl18_resolvePostCreateEv" => self.minecraft_ui_control_resolve_noop(cpu),
+            "_ZN14GamePadManager16getGamePadsInUseEv"
+            | "_ZN14GamePadManager20getConnectedGamePadsEv" => {
+                self.minecraft_empty_vector_return(cpu, memory)
+            }
+            "_ZN13GamePadMapper4tickER15InputEventQueue"
+            | "_ZN13GamePadMapper8tickTurnER15InputEventQueue" => Ok(self.return32(cpu, 0)),
+            "_ZNK7GamePad11isConnectedEv" | "_ZNK7GamePad7isInUseEv" => Ok(self.return32(cpu, 0)),
+            "_ZN6Screen15controllerEventEv"
+            | "_ZN6Screen27_processControllerDirectionEi"
+            | "_ZN11MenuGamePad12getDirectionEi"
+            | "_ZN11MenuGamePad4getXEi"
+            | "_ZN11MenuGamePad4getYEi"
+            | "_ZN11MenuGamePad9isTouchedEi" => Ok(self.return32(cpu, 0)),
+            "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
+            | "_ZN14KeyboardMapper4tickER15InputEventQueue"
+            | "_ZN11MouseMapper21clearInputDeviceQueueEv"
+            | "_ZN11MouseMapper4tickER15InputEventQueue"
+            | "_ZN11TouchMapper21clearInputDeviceQueueEv"
+            | "_ZN11TouchMapper4tickER15InputEventQueue"
+            | "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv"
+            | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
+            | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
+            | "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv"
+            | "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue"
+            | "_ZN11MouseDevice12isButtonDownEi"
+            | "_ZN11MouseDevice14getButtonStateEi"
+            | "_ZN11MouseDevice14getEventButtonEv"
+            | "_ZN11MouseDevice16wasFirstMovementEv"
+            | "_ZN11MouseDevice19getEventButtonStateEv"
+            | "_ZN11MouseDevice4getXEv"
+            | "_ZN11MouseDevice4getYEv"
+            | "_ZN11MouseDevice4nextEv"
+            | "_ZN11MouseDevice5getDXEv"
+            | "_ZN11MouseDevice5getDYEv"
+            | "_ZN11MouseDevice5resetEv"
+            | "_ZN11MouseDevice6reset2Ev"
+            | "_ZN11MouseDevice6rewindEv"
+            | "_ZN11MouseDevice8getEventEv"
+            | "_ZN10Multitouch10isReleasedEi"
+            | "_ZN10Multitouch11isEdgeTouchEi"
+            | "_ZN10Multitouch13isPointerDownEi"
+            | "_ZN10Multitouch15resetThisUpdateEv"
+            | "_ZN10Multitouch19isPressedThisUpdateEi"
+            | "_ZN10Multitouch20isReleasedThisUpdateEi"
+            | "_ZN10Multitouch4nextEv"
+            | "_ZN10Multitouch5resetEv"
+            | "_ZN10Multitouch6commitEv"
+            | "_ZN10Multitouch9isPressedEi" => Ok(self.return32(cpu, 0)),
+            "_ZN10Multitouch19getActivePointerIdsEPPKi"
+            | "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi" => {
+                self.minecraft_empty_pointer_ids_return(cpu, memory)
+            }
+            "_ZN10Multitouch25getFirstActivePointerIdExEv"
+            | "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv" => {
+                Ok(self.return32(cpu, u32::MAX))
+            }
+            "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f" => {
+                self.minecraft_interpolate_transforms(cpu, memory)
+            }
+            "_ZN3mce16RenderContextOGL17unbindAllTexturesEv" => {
+                self.minecraft_ogl_unbind_all_textures(cpu, memory)
+            }
             "_ZN12ProfilerLite4tickEbb" | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd" => {
                 Ok(self.return32(cpu, 0))
             }
@@ -542,9 +604,6 @@ impl HleRuntime {
             | "_ZN6Social11UserManager4tickEv"
             | "_ZNK6Social11UserManager10isSignedInEv"
             | "_ZN9RealmsAPI6updateEv" => Ok(self.return32(cpu, 0)),
-            "_ZN11MouseDevice5resetEv"
-            | "_ZN10Multitouch5resetEv"
-            | "_ZN11TouchMapper21clearInputDeviceQueueEv" => Ok(self.return32(cpu, 0)),
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
             }
@@ -1954,6 +2013,64 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn minecraft_empty_vector_return<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let out = cpu.reg(0);
+        store32(memory, out, 0)?;
+        store32(memory, out.wrapping_add(4), 0)?;
+        store32(memory, out.wrapping_add(8), 0)?;
+        Ok(self.return32(cpu, out))
+    }
+
+    fn minecraft_empty_pointer_ids_return<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let out = cpu.reg(0);
+        if out != 0 {
+            store32(memory, out, 0)?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn minecraft_interpolate_transforms<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let out = cpu.reg(0);
+        let from = cpu.reg(1);
+        let to = cpu.reg(2);
+        let t = f32::from_bits(cpu.reg(3));
+
+        for idx in 0..16 {
+            let offset = idx * 4;
+            let a = f32::from_bits(load32(memory, from.wrapping_add(offset))?);
+            let b = f32::from_bits(load32(memory, to.wrapping_add(offset))?);
+            let value = a + (b - a) * t;
+            store32(memory, out.wrapping_add(offset), value.to_bits())?;
+        }
+
+        Ok(self.return32(cpu, out))
+    }
+
+    fn minecraft_ogl_unbind_all_textures<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let context = cpu.reg(0);
+        for slot in 0..8 {
+            store32(memory, context.wrapping_add(0x7c + slot * 4), 0)?;
+        }
+        store32(memory, context.wrapping_add(0x100), 0x84c7)?;
+        Ok(self.return32(cpu, context))
+    }
+
     fn store_empty_webtoken<M: Memory>(
         &mut self,
         memory: &mut M,
@@ -2912,6 +3029,59 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN13GeometryGroup14tryGetGeometryERKSs"
             | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
             | "_ZN9UIControl18_resolvePostCreateEv"
+            | "_ZN14GamePadManager16getGamePadsInUseEv"
+            | "_ZN14GamePadManager20getConnectedGamePadsEv"
+            | "_ZN13GamePadMapper4tickER15InputEventQueue"
+            | "_ZN13GamePadMapper8tickTurnER15InputEventQueue"
+            | "_ZNK7GamePad11isConnectedEv"
+            | "_ZNK7GamePad7isInUseEv"
+            | "_ZN6Screen15controllerEventEv"
+            | "_ZN6Screen27_processControllerDirectionEi"
+            | "_ZN11MenuGamePad12getDirectionEi"
+            | "_ZN11MenuGamePad4getXEi"
+            | "_ZN11MenuGamePad4getYEi"
+            | "_ZN11MenuGamePad9isTouchedEi"
+            | "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
+            | "_ZN14KeyboardMapper4tickER15InputEventQueue"
+            | "_ZN11MouseMapper21clearInputDeviceQueueEv"
+            | "_ZN11MouseMapper4tickER15InputEventQueue"
+            | "_ZN11TouchMapper21clearInputDeviceQueueEv"
+            | "_ZN11TouchMapper4tickER15InputEventQueue"
+            | "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv"
+            | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
+            | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
+            | "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv"
+            | "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue"
+            | "_ZN11MouseDevice12isButtonDownEi"
+            | "_ZN11MouseDevice14getButtonStateEi"
+            | "_ZN11MouseDevice14getEventButtonEv"
+            | "_ZN11MouseDevice16wasFirstMovementEv"
+            | "_ZN11MouseDevice19getEventButtonStateEv"
+            | "_ZN11MouseDevice4getXEv"
+            | "_ZN11MouseDevice4getYEv"
+            | "_ZN11MouseDevice4nextEv"
+            | "_ZN11MouseDevice5getDXEv"
+            | "_ZN11MouseDevice5getDYEv"
+            | "_ZN11MouseDevice5resetEv"
+            | "_ZN11MouseDevice6reset2Ev"
+            | "_ZN11MouseDevice6rewindEv"
+            | "_ZN11MouseDevice8getEventEv"
+            | "_ZN10Multitouch10isReleasedEi"
+            | "_ZN10Multitouch11isEdgeTouchEi"
+            | "_ZN10Multitouch13isPointerDownEi"
+            | "_ZN10Multitouch15resetThisUpdateEv"
+            | "_ZN10Multitouch19getActivePointerIdsEPPKi"
+            | "_ZN10Multitouch19isPressedThisUpdateEi"
+            | "_ZN10Multitouch20isReleasedThisUpdateEi"
+            | "_ZN10Multitouch25getFirstActivePointerIdExEv"
+            | "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi"
+            | "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv"
+            | "_ZN10Multitouch4nextEv"
+            | "_ZN10Multitouch5resetEv"
+            | "_ZN10Multitouch6commitEv"
+            | "_ZN10Multitouch9isPressedEi"
+            | "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f"
+            | "_ZN3mce16RenderContextOGL17unbindAllTexturesEv"
             | "_ZN12ProfilerLite4tickEbb"
             | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd"
             | "_ZN18MinecraftTelemetry4tickEv"
@@ -2925,9 +3095,6 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN6Social11UserManager4tickEv"
             | "_ZNK6Social11UserManager10isSignedInEv"
             | "_ZN9RealmsAPI6updateEv"
-            | "_ZN11MouseDevice5resetEv"
-            | "_ZN10Multitouch5resetEv"
-            | "_ZN11TouchMapper21clearInputDeviceQueueEv"
     )
 }
 
@@ -3958,6 +4125,59 @@ mod tests {
             "_ZN13GeometryGroup14tryGetGeometryERKSs",
             "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
             "_ZN9UIControl18_resolvePostCreateEv",
+            "_ZN14GamePadManager16getGamePadsInUseEv",
+            "_ZN14GamePadManager20getConnectedGamePadsEv",
+            "_ZN13GamePadMapper4tickER15InputEventQueue",
+            "_ZN13GamePadMapper8tickTurnER15InputEventQueue",
+            "_ZNK7GamePad11isConnectedEv",
+            "_ZNK7GamePad7isInUseEv",
+            "_ZN6Screen15controllerEventEv",
+            "_ZN6Screen27_processControllerDirectionEi",
+            "_ZN11MenuGamePad12getDirectionEi",
+            "_ZN11MenuGamePad4getXEi",
+            "_ZN11MenuGamePad4getYEi",
+            "_ZN11MenuGamePad9isTouchedEi",
+            "_ZN14KeyboardMapper21clearInputDeviceQueueEv",
+            "_ZN14KeyboardMapper4tickER15InputEventQueue",
+            "_ZN11MouseMapper21clearInputDeviceQueueEv",
+            "_ZN11MouseMapper4tickER15InputEventQueue",
+            "_ZN11TouchMapper21clearInputDeviceQueueEv",
+            "_ZN11TouchMapper4tickER15InputEventQueue",
+            "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv",
+            "_ZN19TestAutoInputMapper4tickER15InputEventQueue",
+            "_ZN18DeviceButtonMapper4tickER15InputEventQueue",
+            "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv",
+            "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue",
+            "_ZN11MouseDevice12isButtonDownEi",
+            "_ZN11MouseDevice14getButtonStateEi",
+            "_ZN11MouseDevice14getEventButtonEv",
+            "_ZN11MouseDevice16wasFirstMovementEv",
+            "_ZN11MouseDevice19getEventButtonStateEv",
+            "_ZN11MouseDevice4getXEv",
+            "_ZN11MouseDevice4getYEv",
+            "_ZN11MouseDevice4nextEv",
+            "_ZN11MouseDevice5getDXEv",
+            "_ZN11MouseDevice5getDYEv",
+            "_ZN11MouseDevice5resetEv",
+            "_ZN11MouseDevice6reset2Ev",
+            "_ZN11MouseDevice6rewindEv",
+            "_ZN11MouseDevice8getEventEv",
+            "_ZN10Multitouch10isReleasedEi",
+            "_ZN10Multitouch11isEdgeTouchEi",
+            "_ZN10Multitouch13isPointerDownEi",
+            "_ZN10Multitouch15resetThisUpdateEv",
+            "_ZN10Multitouch19getActivePointerIdsEPPKi",
+            "_ZN10Multitouch19isPressedThisUpdateEi",
+            "_ZN10Multitouch20isReleasedThisUpdateEi",
+            "_ZN10Multitouch25getFirstActivePointerIdExEv",
+            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi",
+            "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv",
+            "_ZN10Multitouch4nextEv",
+            "_ZN10Multitouch5resetEv",
+            "_ZN10Multitouch6commitEv",
+            "_ZN10Multitouch9isPressedEi",
+            "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f",
+            "_ZN3mce16RenderContextOGL17unbindAllTexturesEv",
             "_ZN12ProfilerLite4tickEbb",
             "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd",
             "_ZN18MinecraftTelemetry4tickEv",
@@ -3971,9 +4191,6 @@ mod tests {
             "_ZN6Social11UserManager4tickEv",
             "_ZNK6Social11UserManager10isSignedInEv",
             "_ZN9RealmsAPI6updateEv",
-            "_ZN11MouseDevice5resetEv",
-            "_ZN10Multitouch5resetEv",
-            "_ZN11TouchMapper21clearInputDeviceQueueEv",
         ] {
             assert!(describe_hle_import(name).is_some(), "{name}");
         }
@@ -5126,27 +5343,227 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_no_input_reset_facades() {
+    fn dispatches_no_input_facades() {
         let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
 
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
 
         for (idx, name) in [
-            "_ZN11MouseDevice5resetEv",
-            "_ZN10Multitouch5resetEv",
+            "_ZN14KeyboardMapper21clearInputDeviceQueueEv",
+            "_ZN14KeyboardMapper4tickER15InputEventQueue",
+            "_ZN11MouseMapper21clearInputDeviceQueueEv",
+            "_ZN11MouseMapper4tickER15InputEventQueue",
             "_ZN11TouchMapper21clearInputDeviceQueueEv",
+            "_ZN11TouchMapper4tickER15InputEventQueue",
+            "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv",
+            "_ZN19TestAutoInputMapper4tickER15InputEventQueue",
+            "_ZN18DeviceButtonMapper4tickER15InputEventQueue",
+            "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv",
+            "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue",
+            "_ZN11MouseDevice12isButtonDownEi",
+            "_ZN11MouseDevice14getButtonStateEi",
+            "_ZN11MouseDevice14getEventButtonEv",
+            "_ZN11MouseDevice16wasFirstMovementEv",
+            "_ZN11MouseDevice19getEventButtonStateEv",
+            "_ZN11MouseDevice4getXEv",
+            "_ZN11MouseDevice4getYEv",
+            "_ZN11MouseDevice4nextEv",
+            "_ZN11MouseDevice5getDXEv",
+            "_ZN11MouseDevice5getDYEv",
+            "_ZN11MouseDevice5resetEv",
+            "_ZN11MouseDevice6reset2Ev",
+            "_ZN11MouseDevice6rewindEv",
+            "_ZN11MouseDevice8getEventEv",
+            "_ZN10Multitouch10isReleasedEi",
+            "_ZN10Multitouch11isEdgeTouchEi",
+            "_ZN10Multitouch13isPointerDownEi",
+            "_ZN10Multitouch15resetThisUpdateEv",
+            "_ZN10Multitouch19isPressedThisUpdateEi",
+            "_ZN10Multitouch20isReleasedThisUpdateEi",
+            "_ZN10Multitouch4nextEv",
+            "_ZN10Multitouch5resetEv",
+            "_ZN10Multitouch6commitEv",
+            "_ZN10Multitouch9isPressedEi",
         ]
         .into_iter()
         .enumerate()
         {
             cpu.set_isa(Isa::Arm);
-            cpu.set_reg(14, 0x2001 + (idx as u32) * 4);
+            cpu.set_reg(14, 0x2201 + (idx as u32) * 4);
+            cpu.set_reg(0, u32::MAX);
             hle.dispatch(name, &mut cpu, &mut memory).unwrap();
             assert_eq!(cpu.reg(0), 0);
-            assert_eq!(cpu.pc(), 0x2000 + (idx as u32) * 4);
+            assert_eq!(cpu.pc(), 0x2200 + (idx as u32) * 4);
+            assert_eq!(cpu.isa(), Isa::Thumb);
+        }
+
+        for (idx, name) in [
+            "_ZN10Multitouch19getActivePointerIdsEPPKi",
+            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let out = 0x1100 + (idx as u32) * 0x10;
+            memory.store32(out, 0xaaaa_aaaa).unwrap();
+            cpu.set_isa(Isa::Thumb);
+            cpu.set_reg(14, 0x2601 + (idx as u32) * 4);
+            cpu.set_reg(0, out);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), 0);
+            assert_eq!(memory.load32(out).unwrap(), 0);
+            assert_eq!(cpu.pc(), 0x2600 + (idx as u32) * 4);
+            assert_eq!(cpu.isa(), Isa::Thumb);
+        }
+
+        for (idx, name) in [
+            "_ZN10Multitouch25getFirstActivePointerIdExEv",
+            "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cpu.set_isa(Isa::Arm);
+            cpu.set_reg(14, 0x2701 + (idx as u32) * 4);
+            cpu.set_reg(0, 0);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), u32::MAX);
+            assert_eq!(cpu.pc(), 0x2700 + (idx as u32) * 4);
+            assert_eq!(cpu.isa(), Isa::Thumb);
+        }
+    }
+
+    #[test]
+    fn dispatches_minecraft_transform_interpolation() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+
+        for idx in 0..16 {
+            let offset = (idx as u32) * 4;
+            memory
+                .store32(0x1100 + offset, (idx as f32).to_bits())
+                .unwrap();
+            memory
+                .store32(0x1200 + offset, (100.0 + idx as f32).to_bits())
+                .unwrap();
+        }
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 0x1200);
+        cpu.set_reg(3, 0.25f32.to_bits());
+        let mut hle = HleRuntime::new(0, 0x3000, 0x800);
+
+        hle.dispatch(
+            "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        assert_eq!(cpu.reg(0), 0x1300);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+        for idx in 0..16 {
+            let offset = (idx as u32) * 4;
+            let value = f32::from_bits(memory.load32(0x1300 + offset).unwrap());
+            assert_eq!(value, 25.0 + idx as f32);
+        }
+    }
+
+    #[test]
+    fn dispatches_minecraft_ogl_unbind_all_textures() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        for slot in 0..8 {
+            memory
+                .store32(0x1100 + 0x7c + slot * 4, 0xffff_ffff)
+                .unwrap();
+        }
+        memory.store32(0x1100 + 0x100, 0x84c0).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x1100);
+        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+
+        hle.dispatch(
+            "_ZN3mce16RenderContextOGL17unbindAllTexturesEv",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        assert_eq!(cpu.reg(0), 0x1100);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+        for slot in 0..8 {
+            assert_eq!(memory.load32(0x1100 + 0x7c + slot * 4).unwrap(), 0);
+        }
+        assert_eq!(memory.load32(0x1100 + 0x100).unwrap(), 0x84c7);
+    }
+
+    #[test]
+    fn dispatches_no_gamepad_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Thumb);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
+
+        for (idx, name) in [
+            "_ZN14GamePadManager16getGamePadsInUseEv",
+            "_ZN14GamePadManager20getConnectedGamePadsEv",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let out = 0x1100 + (idx as u32) * 0x20;
+            memory.store32(out, 0xaaaa_aaaa).unwrap();
+            memory.store32(out + 4, 0xbbbb_bbbb).unwrap();
+            memory.store32(out + 8, 0xcccc_cccc).unwrap();
+            cpu.set_isa(Isa::Thumb);
+            cpu.set_reg(14, 0x2401 + (idx as u32) * 4);
+            cpu.set_reg(0, out);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), out);
+            assert_eq!(memory.load32(out).unwrap(), 0);
+            assert_eq!(memory.load32(out + 4).unwrap(), 0);
+            assert_eq!(memory.load32(out + 8).unwrap(), 0);
+            assert_eq!(cpu.pc(), 0x2400 + (idx as u32) * 4);
+            assert_eq!(cpu.isa(), Isa::Thumb);
+        }
+
+        for (idx, name) in [
+            "_ZN13GamePadMapper4tickER15InputEventQueue",
+            "_ZN13GamePadMapper8tickTurnER15InputEventQueue",
+            "_ZNK7GamePad11isConnectedEv",
+            "_ZNK7GamePad7isInUseEv",
+            "_ZN6Screen15controllerEventEv",
+            "_ZN6Screen27_processControllerDirectionEi",
+            "_ZN11MenuGamePad12getDirectionEi",
+            "_ZN11MenuGamePad4getXEi",
+            "_ZN11MenuGamePad4getYEi",
+            "_ZN11MenuGamePad9isTouchedEi",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cpu.set_isa(Isa::Arm);
+            cpu.set_reg(14, 0x2501 + (idx as u32) * 4);
+            cpu.set_reg(0, u32::MAX);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), 0);
+            assert_eq!(cpu.pc(), 0x2500 + (idx as u32) * 4);
             assert_eq!(cpu.isa(), Isa::Thumb);
         }
     }
