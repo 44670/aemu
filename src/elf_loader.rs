@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::armv6::{Memory, VecMemory};
 
 const PT_LOAD: u32 = 1;
+const PT_ARM_EXIDX: u32 = 0x7000_0001;
 const PAGE_SIZE: u32 = 0x1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +14,14 @@ pub struct ElfLoadPlan {
     pub entry: u32,
     pub memory_base: u32,
     pub memory_size: u32,
+    pub arm_exidx: Option<ElfLoadRange>,
     pub segments: Vec<ElfLoadSegment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElfLoadRange {
+    pub addr: u32,
+    pub size: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,10 +89,21 @@ pub fn plan_elf_load(
     let mut segments = Vec::new();
     let mut memory_base = u32::MAX;
     let mut memory_end = 0u32;
+    let mut arm_exidx = None;
 
     for idx in 0..header.phnum {
         let off = header.phoff + idx * header.phentsize;
         let ph = parse_program_header(bytes, off, header.phentsize)?;
+        if ph.p_type == PT_ARM_EXIDX {
+            let addr = load_bias
+                .checked_add(ph.vaddr)
+                .ok_or(ElfLoadError::BadProgramHeader)?;
+            arm_exidx = Some(ElfLoadRange {
+                addr,
+                size: ph.memsz.max(ph.filesz),
+            });
+            continue;
+        }
         if ph.p_type != PT_LOAD {
             continue;
         }
@@ -139,6 +158,7 @@ pub fn plan_elf_load(
         entry,
         memory_base,
         memory_size,
+        arm_exidx,
         segments,
     })
 }

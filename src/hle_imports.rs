@@ -313,6 +313,7 @@ pub struct HleRuntime {
     pthread_specific: Vec<PthreadSpecific>,
     native_activity: Option<u32>,
     alooper_events: VecDeque<u32>,
+    unwind_tables: Vec<HleUnwindTable>,
     random_state: u32,
     clock_ns: u64,
     fake_geometry: Option<u32>,
@@ -324,6 +325,14 @@ pub struct CreatedPthread {
     pub id: u32,
     pub start: u32,
     pub arg: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HleUnwindTable {
+    pub memory_base: u32,
+    pub memory_end: u32,
+    pub exidx_addr: u32,
+    pub exidx_count: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -420,6 +429,7 @@ impl HleRuntime {
             pthread_specific: Vec::new(),
             native_activity: None,
             alooper_events: VecDeque::new(),
+            unwind_tables: Vec::new(),
             random_state: 0x1234_5678,
             clock_ns: 0,
             fake_geometry: None,
@@ -429,6 +439,10 @@ impl HleRuntime {
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
+    }
+
+    pub fn set_unwind_tables(&mut self, unwind_tables: Vec<HleUnwindTable>) {
+        self.unwind_tables = unwind_tables;
     }
 
     pub(crate) fn has_created_pthreads(&self) -> bool {
@@ -504,6 +518,7 @@ impl HleRuntime {
             "realloc" => self.realloc(cpu, memory),
             "free" => self.free_call(cpu),
             "__errno" => Ok(self.return32(cpu, self.errno_addr)),
+            "__gnu_Unwind_Find_exidx" => self.gnu_unwind_find_exidx(cpu, memory),
             "__aeabi_idiv" => self.aeabi_idiv(cpu),
             "__aeabi_uidiv" => self.aeabi_uidiv(cpu),
             "__aeabi_idivmod" => self.aeabi_idivmod(cpu),
@@ -540,6 +555,8 @@ impl HleRuntime {
             "fread" => self.fread_call(cpu, memory),
             "write" => self.write_call(cpu, memory),
             "fwrite" => self.fwrite_call(cpu, memory),
+            "fputs" => self.fputs_call(cpu, memory),
+            "fputc" => self.fputc_call(cpu, memory),
             "pthread_create" => self.pthread_create(cpu, memory),
             "__cxa_guard_acquire" => self.cxa_guard_acquire(cpu, memory),
             "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
@@ -718,6 +735,24 @@ impl HleRuntime {
             AT_HWCAP2 => 0,
             _ => 0,
         }
+    }
+
+    fn gnu_unwind_find_exidx<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let return_address = cpu.reg(0) & !1;
+        let count_ptr = cpu.reg(1);
+        let table = self
+            .unwind_tables
+            .iter()
+            .find(|table| return_address >= table.memory_base && return_address < table.memory_end);
+        let (addr, count) = table.map_or((0, 0), |table| (table.exidx_addr, table.exidx_count));
+        if count_ptr != 0 {
+            store32(memory, count_ptr, count)?;
+        }
+        Ok(self.return32(cpu, addr))
     }
 
     fn sysconf<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -1406,6 +1441,7 @@ impl HleRuntime {
             self.set_errno(memory, 9)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
+        trace_hle_write("write", memory, buf, count);
         let written = self.write_fake_fd(memory, fd, buf, count)?;
         Ok(self.return32(cpu, written))
     }
@@ -1424,8 +1460,47 @@ impl HleRuntime {
         let Ok(fd) = self.fake_file_fd(memory, stream) else {
             return Ok(self.return32(cpu, 0));
         };
+        trace_hle_write("fwrite", memory, ptr, total);
         let written = self.write_fake_fd(memory, fd, ptr, total)?;
         Ok(self.return32(cpu, written / size))
+    }
+
+    fn fputs_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let stream = cpu.reg(1);
+        if ptr == 0 || stream == 0 {
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let len = strlen(memory, ptr)?;
+        trace_hle_write("fputs", memory, ptr, len);
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        self.write_fake_fd(memory, fd, ptr, len)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn fputc_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ch = cpu.reg(0) as u8;
+        let stream = cpu.reg(1);
+        if stream == 0 {
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if std::env::var_os("AEMU_TRACE_HLE_FILE").is_some() {
+            let printable = if ch.is_ascii_graphic() || ch == b' ' {
+                char::from(ch).to_string()
+            } else {
+                format!("\\x{ch:02x}")
+            };
+            eprintln!("HLE file fputc {printable}");
+        }
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(self.return32(cpu, u32::from(ch)));
+        };
+        let scratch = self.alloc(1, 1)?;
+        store8(memory, scratch, ch)?;
+        self.write_fake_fd(memory, fd, scratch, 1)?;
+        Ok(self.return32(cpu, u32::from(ch)))
     }
 
     fn alloc_fd(&mut self) -> u32 {
@@ -4165,6 +4240,20 @@ fn trace_android_asset(args: fmt::Arguments<'_>) {
 fn trace_hle_file(args: fmt::Arguments<'_>) {
     if std::env::var_os("AEMU_TRACE_HLE_FILE").is_some() {
         eprintln!("HLE file {args}");
+    }
+}
+
+fn trace_hle_write<M: Memory>(name: &str, memory: &mut M, ptr: u32, len: u32) {
+    if std::env::var_os("AEMU_TRACE_HLE_FILE").is_none() {
+        return;
+    }
+    let trace_len = len.min(256);
+    match load_bytes(memory, ptr, trace_len) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            eprintln!("HLE file {name} len={len} text={text:?}");
+        }
+        Err(err) => eprintln!("HLE file {name} len={len} text=<{err}>"),
     }
 }
 

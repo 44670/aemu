@@ -85,6 +85,7 @@ pub struct LoadedNativeObject {
     pub relocation_count: usize,
     pub init: Option<u32>,
     pub init_array: Option<GuestTableRange>,
+    pub arm_exidx: Option<GuestTableRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +418,10 @@ fn loaded_object(image: &NativeImage, plan: &ElfLoadPlan) -> LoadedNativeObject 
             addr: plan.load_bias.wrapping_add(range.addr),
             size: range.size,
         }),
+        arm_exidx: plan.arm_exidx.map(|range| GuestTableRange {
+            addr: range.addr,
+            size: range.size,
+        }),
     }
 }
 
@@ -553,14 +558,28 @@ fn resolve_imports(
             if !seen.insert((object.library_name.clone(), import.name.clone())) {
                 continue;
             }
-            if let Some(symbol) = hle_by_name.get(import.name.as_str()) {
+            let native = native_by_name.get(import.name.as_str());
+            let hle = hle_by_name.get(import.name.as_str());
+            if let Some(symbol) = native
+                .filter(|_| hle.is_some())
+                .filter(|_| should_prefer_native_symbol_over_hle(&import.name))
+            {
+                resolved.push(ResolvedNativeImport {
+                    library_name: object.library_name.clone(),
+                    name: import.name.clone(),
+                    address: symbol.address,
+                    source: NativeSymbolSource::Native {
+                        library_name: symbol.library_name.clone(),
+                    },
+                });
+            } else if let Some(symbol) = hle {
                 resolved.push(ResolvedNativeImport {
                     library_name: object.library_name.clone(),
                     name: import.name.clone(),
                     address: symbol.address,
                     source: NativeSymbolSource::Hle { kind: symbol.kind },
                 });
-            } else if let Some(symbol) = native_by_name.get(import.name.as_str()) {
+            } else if let Some(symbol) = native {
                 resolved.push(ResolvedNativeImport {
                     library_name: object.library_name.clone(),
                     name: import.name.clone(),
@@ -592,6 +611,12 @@ fn apply_relocations(
         by_name.insert(symbol.name.clone(), symbol.address);
     }
     for symbol in hle_symbols {
+        if by_name.contains_key(&symbol.name)
+            && should_prefer_native_symbol_over_hle(&symbol.name)
+            && !hle_symbol_overrides_native(symbol)
+        {
+            continue;
+        }
         by_name.insert(symbol.name.clone(), symbol.address);
     }
 
@@ -614,6 +639,32 @@ fn apply_relocations(
         }
     }
     errors
+}
+
+fn hle_symbol_overrides_native(symbol: &HleSymbol) -> bool {
+    symbol.kind == HleSymbolKind::Target || is_defined_hle_override_symbol(&symbol.name)
+}
+
+fn should_prefer_native_symbol_over_hle(name: &str) -> bool {
+    matches!(
+        name,
+        "_Unwind_DeleteException"
+            | "_Unwind_GetLanguageSpecificData"
+            | "_Unwind_GetRegionStart"
+            | "_Unwind_Resume"
+            | "__cxa_allocate_exception"
+            | "__cxa_bad_cast"
+            | "__cxa_begin_catch"
+            | "__cxa_begin_cleanup"
+            | "__cxa_call_unexpected"
+            | "__cxa_end_catch"
+            | "__cxa_free_exception"
+            | "__cxa_pure_virtual"
+            | "__cxa_rethrow"
+            | "__cxa_throw"
+            | "__cxa_type_match"
+            | "__gxx_personality_v0"
+    )
 }
 
 fn align_up(value: u32, align: u32) -> Option<u32> {

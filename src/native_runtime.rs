@@ -3,7 +3,9 @@ use std::fmt;
 
 use crate::armv6::{Cpu, Isa, Memory, Trap};
 use crate::guest_memory::MappedMemoryError;
-use crate::hle_imports::{CreatedPthread, HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
+use crate::hle_imports::{
+    CreatedPthread, HLE_TRAP_ARM_INSTR, HleError, HleRuntime, HleUnwindTable,
+};
 use crate::native_loader::NativeLinkReport;
 
 pub const DEFAULT_STACK_BASE: u32 = 0x6c00_0000;
@@ -17,16 +19,21 @@ const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
 const THREAD_RETURN_SENTINEL: u32 = 0xffff_fff8;
 const RUN_FUNCTION_TRACE_LEN: usize = 24;
+const GUEST_THREAD_TRACE_LEN: usize = 128;
 const GUEST_THREAD_STACK_SIZE: u32 = 0x0004_0000;
 const GUEST_THREAD_STACK_ALIGN: u32 = 8;
 const GUEST_THREAD_SLICE_STEPS: usize = 4096;
 const GUEST_THREAD_SERVICE_INTERVAL: usize = 50_000;
+const MAIN_THREAD_WAIT_SPINS: usize = 1024;
+const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
 const GUEST_THREAD_SERVICE_HLE: &[&str] = &[
     "pthread_create",
     "pthread_cond_signal",
     "pthread_cond_broadcast",
     "pthread_cond_wait",
     "pthread_cond_timedwait",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
     "sched_yield",
     "sem_post",
     "sem_wait",
@@ -82,6 +89,8 @@ pub struct NativeRuntime {
     stack_size: u32,
     next_thread_stack_top: u32,
     guest_threads: VecDeque<GuestThread>,
+    guest_mutexes: Vec<GuestMutex>,
+    main_wait: GuestThreadWait,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,17 +196,57 @@ struct GuestThread {
     id: u32,
     cpu: Cpu,
     wait: GuestThreadWait,
+    trace_tail: VecDeque<NativeRuntimeTraceEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GuestThreadWait {
     Runnable,
-    Condvar { cond: u32 },
+    Condvar { cond: u32, mutex: u32 },
+    Mutex { mutex: u32 },
 }
 
 impl GuestThreadWait {
     fn is_runnable(self) -> bool {
         matches!(self, Self::Runnable)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestMutex {
+    addr: u32,
+    owner: Option<u32>,
+    recursion: u32,
+}
+
+fn push_trace_tail(tail: &mut VecDeque<NativeRuntimeTraceEntry>, cpu: &Cpu, max_len: usize) {
+    if tail.len() == max_len {
+        tail.pop_front();
+    }
+    tail.push_back(NativeRuntimeTraceEntry {
+        pc: cpu.pc(),
+        isa: cpu.isa(),
+        regs: core::array::from_fn(|idx| cpu.reg(idx)),
+    });
+}
+
+fn log_guest_thread_tail(thread: &GuestThread) {
+    if thread.trace_tail.is_empty() {
+        return;
+    }
+    eprintln!("THREAD recent id={} guest PCs:", thread.id);
+    for entry in &thread.trace_tail {
+        eprintln!(
+            "  {:?} pc={:#010x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} sp={:#010x} lr={:#010x}",
+            entry.isa,
+            entry.pc,
+            entry.regs[0],
+            entry.regs[1],
+            entry.regs[2],
+            entry.regs[3],
+            entry.regs[13],
+            entry.regs[14],
+        );
     }
 }
 
@@ -310,6 +359,7 @@ impl NativeRuntime {
             .ok_or(NativeRuntimeError::AddressOverflow)?;
         let mut hle = HleRuntime::new(errno_addr, config.heap_base, config.heap_size as u32);
         hle.set_apk_path(link.apk_path.clone());
+        hle.set_unwind_tables(collect_unwind_tables(&link));
 
         let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
 
@@ -324,6 +374,8 @@ impl NativeRuntime {
             stack_size,
             next_thread_stack_top: config.stack_base,
             guest_threads: VecDeque::new(),
+            guest_mutexes: Vec::new(),
+            main_wait: GuestThreadWait::Runnable,
         })
     }
 
@@ -385,7 +437,8 @@ impl NativeRuntime {
     pub fn run(&mut self, max_steps: usize) -> Result<(), NativeRuntimeError> {
         for _ in 0..max_steps {
             if let NativeRuntimeStep::HleCall { name, args, .. } = self.step()? {
-                self.handle_thread_sync_hle(&name, args);
+                self.handle_thread_sync_hle(1, &name, args)?;
+                self.wait_main_after_hle(&name, args)?;
             }
         }
         Err(NativeRuntimeError::Cpu(Trap::StepLimit))
@@ -802,7 +855,8 @@ impl NativeRuntime {
                     address: hle_address,
                     args,
                 }) => {
-                    self.handle_thread_sync_hle(&name, args);
+                    self.handle_thread_sync_hle(1, &name, args)?;
+                    self.wait_main_after_hle(&name, args)?;
                     let should_service_threads = self.hle.has_created_pthreads()
                         || (!self.guest_threads.is_empty()
                             && GUEST_THREAD_SERVICE_HLE.contains(&name.as_str()));
@@ -940,6 +994,7 @@ impl NativeRuntime {
             id: created.id,
             cpu,
             wait: GuestThreadWait::Runnable,
+            trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
         })
     }
 
@@ -963,36 +1018,277 @@ impl NativeRuntime {
         Ok(next_top & !(GUEST_THREAD_STACK_ALIGN - 1))
     }
 
-    fn handle_thread_sync_hle(&mut self, name: &str, args: [u32; 4]) {
+    fn handle_thread_sync_hle(
+        &mut self,
+        thread_id: u32,
+        name: &str,
+        args: [u32; 4],
+    ) -> Result<(), NativeRuntimeError> {
         match name {
             "pthread_cond_signal" => self.wake_cond_threads(args[0], false),
             "pthread_cond_broadcast" => self.wake_cond_threads(args[0], true),
+            "pthread_mutex_unlock" => self.unlock_mutex_for_thread(thread_id, args[0]),
+            "pthread_mutex_trylock" if args[0] != 0 => {
+                let result = if self.lock_mutex_for_thread(thread_id, args[0]) {
+                    0
+                } else {
+                    16
+                };
+                self.cpu.set_reg(0, result);
+            }
+            "pthread_once" => self.run_pthread_once(thread_id, args[0], args[1])?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn thread_wait_after_hle(
+        &mut self,
+        thread_id: u32,
+        name: &str,
+        args: [u32; 4],
+    ) -> Option<GuestThreadWait> {
+        match name {
+            "pthread_mutex_lock" if args[0] != 0 => (!self
+                .lock_mutex_for_thread(thread_id, args[0]))
+            .then_some(GuestThreadWait::Mutex { mutex: args[0] }),
+            "pthread_cond_wait" | "pthread_cond_timedwait" if args[0] != 0 => {
+                self.unlock_mutex_for_thread(thread_id, args[1]);
+                Some(GuestThreadWait::Condvar {
+                    cond: args[0],
+                    mutex: args[1],
+                })
+            }
+            _ => None,
         }
     }
 
-    fn thread_wait_after_hle(&self, name: &str, args: [u32; 4]) -> Option<GuestThreadWait> {
-        match name {
-            "pthread_cond_wait" if args[0] != 0 => Some(GuestThreadWait::Condvar { cond: args[0] }),
-            _ => None,
+    fn wait_main_after_hle(
+        &mut self,
+        name: &str,
+        args: [u32; 4],
+    ) -> Result<(), NativeRuntimeError> {
+        let Some(wait) = self.thread_wait_after_hle(1, name, args) else {
+            return Ok(());
+        };
+        self.main_wait = wait;
+        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+            eprintln!("THREAD wait id=1 {:?}", self.main_wait);
         }
+        for _ in 0..MAIN_THREAD_WAIT_SPINS {
+            if self.main_wait.is_runnable() {
+                return Ok(());
+            }
+            self.try_wake_main_mutex();
+            if self.main_wait.is_runnable() {
+                return Ok(());
+            }
+            self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+        }
+        Err(NativeRuntimeError::Memory(format!(
+            "main guest thread stalled waiting for {:?}",
+            self.main_wait
+        )))
     }
 
     fn wake_cond_threads(&mut self, cond: u32, broadcast: bool) {
         if cond == 0 {
             return;
         }
-        for thread in &mut self.guest_threads {
-            if thread.wait == (GuestThreadWait::Condvar { cond }) {
-                thread.wait = GuestThreadWait::Runnable;
+        if let GuestThreadWait::Condvar {
+            cond: main_cond,
+            mutex,
+        } = self.main_wait
+        {
+            if main_cond == cond {
+                self.main_wait = if mutex == 0 || self.lock_mutex_for_thread(1, mutex) {
+                    GuestThreadWait::Runnable
+                } else {
+                    GuestThreadWait::Mutex { mutex }
+                };
                 if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
-                    eprintln!("THREAD wake id={} cond={cond:#010x}", thread.id);
+                    eprintln!(
+                        "THREAD wake id=1 cond={cond:#010x} mutex={mutex:#010x} wait={:?}",
+                        self.main_wait
+                    );
+                }
+                if !broadcast {
+                    return;
+                }
+            }
+        }
+        for idx in 0..self.guest_threads.len() {
+            let wait = self.guest_threads[idx].wait;
+            if let GuestThreadWait::Condvar {
+                cond: thread_cond,
+                mutex,
+            } = wait
+            {
+                if thread_cond != cond {
+                    continue;
+                }
+                let thread_id = self.guest_threads[idx].id;
+                self.guest_threads[idx].wait =
+                    if mutex == 0 || self.lock_mutex_for_thread(thread_id, mutex) {
+                        GuestThreadWait::Runnable
+                    } else {
+                        GuestThreadWait::Mutex { mutex }
+                    };
+                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                    eprintln!(
+                        "THREAD wake id={} cond={cond:#010x} mutex={mutex:#010x} wait={:?}",
+                        self.guest_threads[idx].id, self.guest_threads[idx].wait
+                    );
                 }
                 if !broadcast {
                     break;
                 }
             }
         }
+    }
+
+    fn mutex_index(&mut self, mutex: u32) -> usize {
+        if let Some(idx) = self
+            .guest_mutexes
+            .iter()
+            .position(|guest_mutex| guest_mutex.addr == mutex)
+        {
+            return idx;
+        }
+        self.guest_mutexes.push(GuestMutex {
+            addr: mutex,
+            owner: None,
+            recursion: 0,
+        });
+        self.guest_mutexes.len() - 1
+    }
+
+    fn lock_mutex_for_thread(&mut self, thread_id: u32, mutex: u32) -> bool {
+        if mutex == 0 {
+            return true;
+        }
+        let idx = self.mutex_index(mutex);
+        let guest_mutex = &mut self.guest_mutexes[idx];
+        match guest_mutex.owner {
+            None => {
+                guest_mutex.owner = Some(thread_id);
+                guest_mutex.recursion = 1;
+                true
+            }
+            Some(owner) if owner == thread_id => {
+                guest_mutex.recursion = guest_mutex.recursion.saturating_add(1).max(1);
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    fn unlock_mutex_for_thread(&mut self, thread_id: u32, mutex: u32) {
+        if mutex == 0 {
+            return;
+        }
+        let Some(idx) = self
+            .guest_mutexes
+            .iter()
+            .position(|guest_mutex| guest_mutex.addr == mutex)
+        else {
+            return;
+        };
+        let guest_mutex = &mut self.guest_mutexes[idx];
+        if guest_mutex.owner != Some(thread_id) {
+            return;
+        }
+        if guest_mutex.recursion > 1 {
+            guest_mutex.recursion -= 1;
+            return;
+        }
+        guest_mutex.owner = None;
+        guest_mutex.recursion = 0;
+        self.try_wake_main_mutex();
+        self.wake_mutex_thread(mutex);
+    }
+
+    fn try_wake_main_mutex(&mut self) {
+        let GuestThreadWait::Mutex { mutex } = self.main_wait else {
+            return;
+        };
+        if self.lock_mutex_for_thread(1, mutex) {
+            self.main_wait = GuestThreadWait::Runnable;
+            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                eprintln!("THREAD wake id=1 mutex={mutex:#010x}");
+            }
+        }
+    }
+
+    fn wake_mutex_thread(&mut self, mutex: u32) {
+        let Some(idx) = self
+            .guest_threads
+            .iter()
+            .position(|thread| thread.wait == (GuestThreadWait::Mutex { mutex }))
+        else {
+            return;
+        };
+        let thread_id = self.guest_threads[idx].id;
+        if self.lock_mutex_for_thread(thread_id, mutex) {
+            self.guest_threads[idx].wait = GuestThreadWait::Runnable;
+            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                eprintln!("THREAD wake id={thread_id} mutex={mutex:#010x}");
+            }
+        }
+    }
+
+    fn run_pthread_once(
+        &mut self,
+        thread_id: u32,
+        once_control: u32,
+        init_routine: u32,
+    ) -> Result<(), NativeRuntimeError> {
+        if once_control == 0 || init_routine == 0 {
+            self.cpu.set_reg(0, 22);
+            return Ok(());
+        }
+        let state = self
+            .link
+            .memory
+            .load32(once_control)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        if state != 0 {
+            self.cpu.set_reg(0, 0);
+            return Ok(());
+        }
+
+        self.link
+            .memory
+            .store32(once_control, 1)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        let continuation = self.cpu.clone();
+        self.cpu.branch_exchange(init_routine);
+        self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
+
+        for _ in 0..PTHREAD_ONCE_INIT_STEPS {
+            if self.cpu.pc() == CALL_RETURN_SENTINEL {
+                self.cpu = continuation;
+                self.cpu.set_reg(0, 0);
+                return Ok(());
+            }
+            match self.step()? {
+                NativeRuntimeStep::GuestInstruction => {}
+                NativeRuntimeStep::HleCall { name, args, .. } => {
+                    self.handle_thread_sync_hle(thread_id, &name, args)?;
+                    if thread_id == 1 {
+                        self.wait_main_after_hle(&name, args)?;
+                    } else if let Some(wait) = self.thread_wait_after_hle(thread_id, &name, args) {
+                        return Err(NativeRuntimeError::Memory(format!(
+                            "pthread_once init routine for thread {thread_id} blocked on {wait:?}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        Err(NativeRuntimeError::Memory(format!(
+            "pthread_once init routine at {init_routine:#010x} exceeded step limit"
+        )))
     }
 
     fn run_guest_thread_slice(
@@ -1009,11 +1305,12 @@ impl NativeRuntime {
                 result = Ok(true);
                 break;
             }
+            push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
             match self.step() {
                 Ok(NativeRuntimeStep::GuestInstruction) => {}
                 Ok(NativeRuntimeStep::HleCall { name, args, .. }) => {
-                    self.handle_thread_sync_hle(&name, args);
-                    if let Some(wait) = self.thread_wait_after_hle(&name, args) {
+                    self.handle_thread_sync_hle(thread.id, &name, args)?;
+                    if let Some(wait) = self.thread_wait_after_hle(thread.id, &name, args) {
                         thread.wait = wait;
                         if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
                             eprintln!("THREAD wait id={} {wait:?}", thread.id);
@@ -1022,21 +1319,23 @@ impl NativeRuntime {
                     }
                 }
                 Err(err) => {
-                    if matches!(
-                        err,
-                        NativeRuntimeError::Hle {
-                            source: HleError::Abort(_),
-                            ..
-                        }
-                    ) {
+                    if let NativeRuntimeError::Hle {
+                        name,
+                        source: HleError::Abort(abort_name),
+                    } = &err
+                    {
                         if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
                             eprintln!(
-                                "THREAD abort id={} pc={:#010x} {:?} r0={:#010x}",
+                                "THREAD abort id={} name={} abort={} pc={:#010x} {:?} lr={:#010x} r0={:#010x}",
                                 thread.id,
+                                name,
+                                abort_name,
                                 self.cpu.pc(),
                                 self.cpu.isa(),
+                                self.cpu.reg(14),
                                 self.cpu.reg(0),
                             );
+                            log_guest_thread_tail(thread);
                         }
                         result = Ok(true);
                     } else {
@@ -1468,6 +1767,22 @@ fn collect_linked_runtime_hle_traps(link: &NativeLinkReport) -> Vec<RuntimeHleTr
         .collect()
 }
 
+fn collect_unwind_tables(link: &NativeLinkReport) -> Vec<HleUnwindTable> {
+    link.objects
+        .iter()
+        .filter_map(|object| {
+            let exidx = object.arm_exidx?;
+            let memory_end = object.memory_base.checked_add(object.memory_size)?;
+            Some(HleUnwindTable {
+                memory_base: object.memory_base,
+                memory_end,
+                exidx_addr: exidx.addr,
+                exidx_count: exidx.size / 8,
+            })
+        })
+        .collect()
+}
+
 fn parse_u32_env(raw: &str) -> Option<u32> {
     let raw = raw.trim();
     if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
@@ -1569,6 +1884,7 @@ mod tests {
                 relocation_count: 0,
                 init: Some(hle_address),
                 init_array: None,
+                arm_exidx: None,
             }],
             global_symbols: Vec::new(),
             hle_symbols: vec![HleSymbol {
@@ -1904,6 +2220,7 @@ mod tests {
             id: 7,
             cpu,
             wait: GuestThreadWait::Runnable,
+            trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
         });
 
         runtime.service_guest_threads(4).unwrap();
@@ -1911,7 +2228,7 @@ mod tests {
         assert_eq!(runtime.guest_threads.len(), 1);
         assert_eq!(
             runtime.guest_threads[0].wait,
-            GuestThreadWait::Condvar { cond }
+            GuestThreadWait::Condvar { cond, mutex }
         );
         assert_eq!(runtime.guest_threads[0].cpu.pc(), THREAD_RETURN_SENTINEL);
 
@@ -1923,11 +2240,201 @@ mod tests {
         let NativeRuntimeStep::HleCall { name, args, .. } = step else {
             panic!("expected pthread_cond_signal HLE call");
         };
-        runtime.handle_thread_sync_hle(&name, args);
+        runtime.handle_thread_sync_hle(1, &name, args).unwrap();
 
         assert_eq!(runtime.guest_threads[0].wait, GuestThreadWait::Runnable);
         runtime.service_guest_threads(4).unwrap();
         assert!(runtime.guest_threads.is_empty());
+    }
+
+    #[test]
+    fn blocks_main_thread_on_pthread_mutex_lock_until_guest_unlocks() {
+        let lock_addr = 0x6f00_0000;
+        let unlock_addr = 0x6f00_0004;
+        let mutex = 0x6000_0200;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x6f00_0000, 0x1000).unwrap();
+        memory.store32(lock_addr, HLE_TRAP_ARM_INSTR).unwrap();
+        memory.store32(unlock_addr, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![
+                HleSymbol {
+                    name: "pthread_mutex_lock".to_string(),
+                    address: lock_addr,
+                    kind: HleSymbolKind::Libc,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::ReturnZero,
+                },
+                HleSymbol {
+                    name: "pthread_mutex_unlock".to_string(),
+                    address: unlock_addr,
+                    kind: HleSymbolKind::Libc,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::ReturnZero,
+                },
+            ],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.guest_mutexes.push(GuestMutex {
+            addr: mutex,
+            owner: Some(7),
+            recursion: 1,
+        });
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_pc(unlock_addr);
+        cpu.set_reg(0, mutex);
+        cpu.set_reg(14, THREAD_RETURN_SENTINEL);
+        runtime.guest_threads.push_back(GuestThread {
+            id: 7,
+            cpu,
+            wait: GuestThreadWait::Runnable,
+            trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
+        });
+
+        runtime
+            .run_function_with_args(lock_addr, &[mutex], 8)
+            .unwrap();
+
+        assert!(runtime.guest_threads.is_empty());
+        assert_eq!(runtime.cpu.pc(), CALL_RETURN_SENTINEL);
+        assert_eq!(
+            runtime
+                .guest_mutexes
+                .iter()
+                .find(|guest_mutex| guest_mutex.addr == mutex)
+                .unwrap()
+                .owner,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn pthread_mutex_trylock_returns_busy_when_owned_by_another_thread() {
+        let trylock_addr = 0x6f00_0000;
+        let mutex = 0x6000_0200;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x6f00_0000, 0x1000).unwrap();
+        memory.store32(trylock_addr, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![HleSymbol {
+                name: "pthread_mutex_trylock".to_string(),
+                address: trylock_addr,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::ReturnZero,
+            }],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.guest_mutexes.push(GuestMutex {
+            addr: mutex,
+            owner: Some(7),
+            recursion: 1,
+        });
+
+        runtime
+            .run_function_with_args(trylock_addr, &[mutex], 4)
+            .unwrap();
+
+        assert_eq!(runtime.cpu.reg(0), 16);
+        assert_eq!(
+            runtime
+                .guest_mutexes
+                .iter()
+                .find(|guest_mutex| guest_mutex.addr == mutex)
+                .unwrap()
+                .owner,
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn pthread_once_runs_guest_init_routine_only_once() {
+        let once_addr = 0x6f00_0000;
+        let init_addr = 0x6f00_0100;
+        let once_control = 0x6f00_0200;
+        let counter = 0x6f00_0204;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x6f00_0000, 0x1000).unwrap();
+        memory.store32(once_addr, HLE_TRAP_ARM_INSTR).unwrap();
+        memory.store32(init_addr, 0xe59f_000c).unwrap(); // ldr r0, [pc, #12]
+        memory.store32(init_addr + 4, 0xe590_1000).unwrap(); // ldr r1, [r0]
+        memory.store32(init_addr + 8, 0xe281_1001).unwrap(); // add r1, r1, #1
+        memory.store32(init_addr + 12, 0xe580_1000).unwrap(); // str r1, [r0]
+        memory.store32(init_addr + 16, 0xe12f_ff1e).unwrap(); // bx lr
+        memory.store32(init_addr + 20, counter).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![HleSymbol {
+                name: "pthread_once".to_string(),
+                address: once_addr,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::ReturnZero,
+            }],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+
+        runtime
+            .run_function_with_args(once_addr, &[once_control, init_addr], 16)
+            .unwrap();
+        runtime
+            .run_function_with_args(once_addr, &[once_control, init_addr], 16)
+            .unwrap();
+
+        assert_eq!(runtime.link.memory.load32(once_control).unwrap(), 1);
+        assert_eq!(runtime.link.memory.load32(counter).unwrap(), 1);
+        assert_eq!(runtime.cpu.reg(0), 0);
     }
 
     #[test]
@@ -2053,6 +2560,7 @@ mod tests {
             relocation_count: 0,
             init: None,
             init_array: None,
+            arm_exidx: None,
         };
         let report = NativeLinkReport {
             apk_path: PathBuf::from("test.apk"),
@@ -2083,6 +2591,8 @@ mod tests {
             stack_size: 0x1000,
             next_thread_stack_top: 0x5000_1000,
             guest_threads: VecDeque::new(),
+            guest_mutexes: Vec::new(),
+            main_wait: GuestThreadWait::Runnable,
         };
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));
