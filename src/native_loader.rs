@@ -471,6 +471,13 @@ fn collect_hle_symbols(
                 by_name.entry(import.name.clone()).or_insert(descriptor);
             }
         }
+        for symbol in &object.defined_symbols {
+            if let Some(descriptor) = describe_hle_import(&symbol.name) {
+                if descriptor.kind == HleSymbolKind::Target {
+                    by_name.entry(symbol.name.clone()).or_insert(descriptor);
+                }
+            }
+        }
     }
 
     let mut out = Vec::with_capacity(by_name.len());
@@ -703,17 +710,26 @@ mod tests {
     #[test]
     fn hle_symbols_override_native_exports_for_selected_runtime_helpers() {
         let cxx_name = "_ZNSs14_M_replace_auxEjjjc";
+        let target_name = "_ZN8WebTokenC2ERKS_";
         let support = test_so(&[], &[], &[(cxx_name, 0x1200)], &[]);
         let game = test_so(
             &["libsupport.so"],
             &[cxx_name],
-            &[],
-            &[TestRelocation {
-                offset: 0x700,
-                symbol: Some(cxx_name),
-                kind: 21,
-                addend: 0,
-            }],
+            &[(target_name, 0x1400)],
+            &[
+                TestRelocation {
+                    offset: 0x700,
+                    symbol: Some(cxx_name),
+                    kind: 21,
+                    addend: 0,
+                },
+                TestRelocation {
+                    offset: 0x704,
+                    symbol: Some(target_name),
+                    kind: 21,
+                    addend: 0,
+                },
+            ],
         );
         let apk = zip_with_files(&[
             ("lib/armeabi/libgame.so", game),
@@ -740,6 +756,19 @@ mod tests {
             .unwrap()
             .address;
         assert_ne!(hle_addr, native_addr);
+        let native_target_addr = report
+            .global_symbols
+            .iter()
+            .find(|symbol| symbol.name == target_name)
+            .unwrap()
+            .address;
+        let hle_target_addr = report
+            .hle_symbols
+            .iter()
+            .find(|symbol| symbol.name == target_name)
+            .unwrap()
+            .address;
+        assert_ne!(hle_target_addr, native_target_addr);
 
         let game_bias = report
             .objects
@@ -748,6 +777,10 @@ mod tests {
             .unwrap()
             .load_bias;
         assert_eq!(report.memory.load32(game_bias + 0x700).unwrap(), hle_addr);
+        assert_eq!(
+            report.memory.load32(game_bias + 0x704).unwrap(),
+            hle_target_addr
+        );
         assert!(report.resolved_imports.iter().any(|import| {
             import.name == cxx_name
                 && matches!(

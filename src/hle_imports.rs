@@ -99,12 +99,25 @@ const EGL_OPENGL_ES2_BIT: u32 = 0x0004;
 const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
 const ACONFIGURATION_SIZE: u32 = 8;
 const AASSET_HANDLE_SIZE: u32 = 0x10;
+const FAKE_TEXTURE_PAIR_SIZE: u32 = 0x44;
+const FAKE_TEXTURE_SIDE: u32 = 256;
+const FAKE_TEXTURE_BYTES: u32 = FAKE_TEXTURE_SIDE * FAKE_TEXTURE_SIDE * 4;
 const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
 const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
 const GL_VENDOR: u32 = 0x1f00;
 const GL_RENDERER: u32 = 0x1f01;
 const GL_VERSION: u32 = 0x1f02;
 const GL_EXTENSIONS: u32 = 0x1f03;
+const GL_MAX_TEXTURE_SIZE: u32 = 0x0d33;
+const GL_MAX_TEXTURE_IMAGE_UNITS: u32 = 0x8872;
+const GL_MAX_VERTEX_ATTRIBS: u32 = 0x8869;
+const GL_COMPILE_STATUS: u32 = 0x8b81;
+const GL_LINK_STATUS: u32 = 0x8b82;
+const GL_INFO_LOG_LENGTH: u32 = 0x8b84;
+const GL_ACTIVE_UNIFORMS: u32 = 0x8b86;
+const GL_ACTIVE_UNIFORM_MAX_LENGTH: u32 = 0x8b87;
+const GL_ACTIVE_ATTRIBUTES: u32 = 0x8b89;
+const GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: u32 = 0x8b8a;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
 const WCTYPE_ALNUM: u32 = 1 << 0;
 const WCTYPE_ALPHA: u32 = 1 << 1;
@@ -118,6 +131,9 @@ const WCTYPE_PUNCT: u32 = 1 << 8;
 const WCTYPE_SPACE: u32 = 1 << 9;
 const WCTYPE_UPPER: u32 = 1 << 10;
 const WCTYPE_XDIGIT: u32 = 1 << 11;
+const CXX_STRING_REP_HEADER_SIZE: u32 = 12;
+const CXX_STRING_NPOS: u32 = u32::MAX;
+const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -132,6 +148,7 @@ pub enum HleSymbolKind {
     Zlib,
     CxxAbi,
     CxxStd,
+    Target,
 }
 
 impl fmt::Display for HleSymbolKind {
@@ -148,6 +165,7 @@ impl fmt::Display for HleSymbolKind {
             Self::Zlib => write!(f, "zlib"),
             Self::CxxAbi => write!(f, "cxxabi"),
             Self::CxxStd => write!(f, "c++std"),
+            Self::Target => write!(f, "target"),
         }
     }
 }
@@ -190,6 +208,9 @@ pub enum HleDataInit {
     Ctype,
     ToLower,
     ToUpper,
+    CxxStringEmptyRep,
+    CxxStringTerminal,
+    CxxStringMaxSize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,10 +269,13 @@ pub struct HleRuntime {
     assets: Vec<AndroidAsset>,
     next_gl_name: u32,
     next_fd: u32,
+    files: Vec<FakeFile>,
+    virtual_files: Vec<VirtualFile>,
     next_pthread_key: u32,
     pthread_specific: Vec<PthreadSpecific>,
     alooper_events: VecDeque<u32>,
     random_state: u32,
+    fake_texture_pair: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -266,6 +290,25 @@ struct AndroidAsset {
     buffer: u32,
     len: u32,
     closed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FakeFile {
+    fd: u32,
+    kind: FakeFileKind,
+    offset: u32,
+}
+
+#[derive(Debug, Clone)]
+enum FakeFileKind {
+    Random,
+    Virtual { path: String },
+}
+
+#[derive(Debug, Clone)]
+struct VirtualFile {
+    path: String,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,10 +328,13 @@ impl HleRuntime {
             assets: Vec::new(),
             next_gl_name: 1,
             next_fd: FIRST_FAKE_FD,
+            files: Vec::new(),
+            virtual_files: Vec::new(),
             next_pthread_key: 0,
             pthread_specific: Vec::new(),
             alooper_events: VecDeque::new(),
             random_state: 0x1234_5678,
+            fake_texture_pair: None,
         }
     }
 
@@ -372,18 +418,73 @@ impl HleRuntime {
             "ALooper_removeFd" | "ALooper_wake" | "ALooper_release" => Ok(self.return32(cpu, 0)),
             "fopen" => self.fopen_call(cpu, memory),
             "fdopen" => self.fdopen_call(cpu, memory),
-            "fclose" | "close" => Ok(self.return32(cpu, 0)),
+            "fclose" => self.fclose_call(cpu, memory),
+            "close" => self.close_call(cpu),
             "open" => self.open_call(cpu, memory),
             "pipe" => self.pipe_call(cpu, memory),
             "read" => self.read_call(cpu, memory),
             "fread" => self.fread_call(cpu, memory),
-            "write" => Ok(self.return32(cpu, cpu.reg(2))),
-            "fwrite" => Ok(self.return32(cpu, cpu.reg(2))),
+            "write" => self.write_call(cpu, memory),
+            "fwrite" => self.fwrite_call(cpu, memory),
             "pthread_create" => self.pthread_create(cpu, memory),
             "__cxa_guard_acquire" => self.cxa_guard_acquire(cpu, memory),
             "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
             "__cxa_guard_abort" => Ok(self.return32(cpu, 0)),
             "_ZNSs14_M_replace_auxEjjjc" => self.libstdcxx_string_replace_aux(cpu, memory),
+            "_ZNSsC1Ev" | "_ZNSsC2Ev" => self.libstdcxx_string_default_ctor(cpu, memory),
+            "_ZNSsC1ERKSs" | "_ZNSsC2ERKSs" => self.libstdcxx_string_copy_ctor(cpu, memory),
+            "_ZNSsC1EPKcRKSaIcE" | "_ZNSsC2EPKcRKSaIcE" => {
+                self.libstdcxx_string_cstr_ctor(cpu, memory)
+            }
+            "_ZNSsC1EPKcjRKSaIcE" | "_ZNSsC2EPKcjRKSaIcE" => {
+                self.libstdcxx_string_ptr_len_ctor(cpu, memory)
+            }
+            "_ZNSsC1EjcRKSaIcE" | "_ZNSsC2EjcRKSaIcE" => {
+                self.libstdcxx_string_fill_ctor(cpu, memory)
+            }
+            "_ZNSsC1ERKSsjj" | "_ZNSsC2ERKSsjj" => self.libstdcxx_string_substr_ctor(cpu, memory),
+            "_ZNSsD1Ev" | "_ZNSsD2Ev" => Ok(self.return32(cpu, 0)),
+            "_ZNSs4_Rep10_M_destroyERKSaIcE" => Ok(self.return32(cpu, 0)),
+            "_ZNSs4_Rep9_S_createEjjRKSaIcE" => self.libstdcxx_string_rep_create(cpu, memory),
+            "_ZNSs12_S_constructEjcRKSaIcE" => self.libstdcxx_string_construct_fill(cpu, memory),
+            "_ZNSs4swapERSs" => self.libstdcxx_string_swap(cpu, memory),
+            "_ZNKSs7compareEPKc" => self.libstdcxx_string_compare_cstr(cpu, memory),
+            "_ZNKSs7compareERKSs" => self.libstdcxx_string_compare_string(cpu, memory),
+            "_ZNKSs4findEPKcjj" => self.libstdcxx_string_find_cstr_len(cpu, memory),
+            "_ZNKSs4findEcj" => self.libstdcxx_string_find_char(cpu, memory),
+            "_ZNKSs5rfindEPKcjj" => self.libstdcxx_string_rfind_cstr_len(cpu, memory),
+            "_ZNKSs5rfindEcj" => self.libstdcxx_string_rfind_char(cpu, memory),
+            "_ZNKSs12find_last_ofEPKcjj" => self.libstdcxx_string_find_last_of(cpu, memory),
+            "_ZNKSs13find_first_ofEPKcjj" => self.libstdcxx_string_find_first_of(cpu, memory),
+            "_ZNKSs16find_last_not_ofEPKcjj" => self.libstdcxx_string_find_last_not_of(cpu, memory),
+            "_ZNKSs17find_first_not_ofEPKcjj" => {
+                self.libstdcxx_string_find_first_not_of(cpu, memory)
+            }
+            "_ZNSs6appendEPKcj" => self.libstdcxx_string_append_cstr_len(cpu, memory),
+            "_ZNSs6appendERKSs" => self.libstdcxx_string_append_string(cpu, memory),
+            "_ZNSs6appendEjc" => self.libstdcxx_string_append_fill(cpu, memory),
+            "_ZNSs6assignEPKcj" => self.libstdcxx_string_assign_cstr_len(cpu, memory),
+            "_ZNSs6assignERKSs" | "_ZNSsaSERKSs" => {
+                self.libstdcxx_string_assign_string(cpu, memory)
+            }
+            "_ZNSsaSEPKc" => self.libstdcxx_string_assign_cstr(cpu, memory),
+            "_ZNSs6resizeEjc" => self.libstdcxx_string_resize_fill(cpu, memory),
+            "_ZNSs7reserveEj" => self.libstdcxx_string_reserve(cpu, memory),
+            "_ZNSs9_M_mutateEjjj" => self.libstdcxx_string_mutate(cpu, memory),
+            "_ZNSs12_M_leak_hardEv" => self.libstdcxx_string_leak_hard(cpu, memory),
+            "_ZNSs15_M_replace_safeEjjPKcj" | "_ZNSs7replaceEjjPKcj" => {
+                self.libstdcxx_string_replace_safe(cpu, memory)
+            }
+            "_ZNSs6insertEjPKcj" => self.libstdcxx_string_insert_cstr_len(cpu, memory),
+            "_ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_" => {
+                self.libstdcxx_string_erase_range(cpu, memory)
+            }
+            "_ZN8WebTokenC1ERKS_" | "_ZN8WebTokenC2ERKS_" => {
+                self.minecraft_webtoken_copy_ctor(cpu, memory)
+            }
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
+                self.minecraft_texture_group_get_texture_pair(cpu, memory)
+            }
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
             }
@@ -817,18 +918,36 @@ impl HleRuntime {
 
     fn fopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let path = load_c_string(memory, cpu.reg(0), 256)?;
+        let mode = load_c_string(memory, cpu.reg(1), 16).unwrap_or_else(|_| String::new());
         if is_random_device_path(&path) {
-            let fd = self.alloc_fd();
-            let ptr = self.alloc_fake_file(memory, fd)?;
+            let ptr = self.open_fake_stream(memory, FakeFileKind::Random)?;
+            trace_hle_file(format_args!(
+                "fopen path={path:?} mode={mode:?} -> stream {ptr:#010x}"
+            ));
             return Ok(self.return32(cpu, ptr));
         }
+        if is_virtual_storage_path(&path) {
+            let wants_create = mode.contains('w') || mode.contains('a');
+            if wants_create {
+                self.create_virtual_file(&path, mode.contains('a'));
+            }
+            if wants_create || self.virtual_file_index(&path).is_some() {
+                let ptr =
+                    self.open_fake_stream(memory, FakeFileKind::Virtual { path: path.clone() })?;
+                trace_hle_file(format_args!(
+                    "fopen path={path:?} mode={mode:?} -> stream {ptr:#010x}"
+                ));
+                return Ok(self.return32(cpu, ptr));
+            }
+        }
         self.set_errno(memory, 2)?;
+        trace_hle_file(format_args!("fopen path={path:?} mode={mode:?} -> null"));
         Ok(self.return32(cpu, 0))
     }
 
     fn fdopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
-        if fd == u32::MAX {
+        if fd == u32::MAX || self.fake_file_index(fd).is_none() {
             self.set_errno(memory, 9)?;
             return Ok(self.return32(cpu, 0));
         }
@@ -836,13 +955,49 @@ impl HleRuntime {
         Ok(self.return32(cpu, ptr))
     }
 
+    fn fclose_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        if stream != 0 {
+            if let Ok(fd) = self.fake_file_fd(memory, stream) {
+                self.close_fd(fd);
+            }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn close_call(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        self.close_fd(cpu.reg(0));
+        Ok(self.return32(cpu, 0))
+    }
+
     fn open_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let path = load_c_string(memory, cpu.reg(0), 256)?;
+        let flags = cpu.reg(1);
+        let mode = cpu.reg(2);
         if is_random_device_path(&path) {
-            let fd = self.alloc_fd();
+            let fd = self.open_fake_fd(FakeFileKind::Random);
+            trace_hle_file(format_args!(
+                "open path={path:?} flags={flags:#x} mode={mode:#x} -> fd {fd}"
+            ));
             return Ok(self.return32(cpu, fd));
         }
+        if is_virtual_storage_path(&path) {
+            let wants_create = flags & 0x40 != 0 || flags & 0x200 != 0 || flags & 0x400 != 0;
+            if wants_create {
+                self.create_virtual_file(&path, false);
+            }
+            if wants_create || self.virtual_file_index(&path).is_some() {
+                let fd = self.open_fake_fd(FakeFileKind::Virtual { path: path.clone() });
+                trace_hle_file(format_args!(
+                    "open path={path:?} flags={flags:#x} mode={mode:#x} -> fd {fd}"
+                ));
+                return Ok(self.return32(cpu, fd));
+            }
+        }
         self.set_errno(memory, 2)?;
+        trace_hle_file(format_args!(
+            "open path={path:?} flags={flags:#x} mode={mode:#x} -> -1"
+        ));
         Ok(self.return32(cpu, u32::MAX))
     }
 
@@ -961,8 +1116,8 @@ impl HleRuntime {
             self.set_errno(memory, 9)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
-        self.fill_random(memory, buf, count)?;
-        Ok(self.return32(cpu, count))
+        let read = self.read_fake_fd(memory, fd, buf, count)?;
+        Ok(self.return32(cpu, read))
     }
 
     fn fread_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -970,19 +1125,71 @@ impl HleRuntime {
         let size = cpu.reg(1);
         let count = cpu.reg(2);
         let stream = cpu.reg(3);
-        if ptr == 0 || stream == 0 || self.fake_file_fd(memory, stream).is_err() {
+        if ptr == 0 || stream == 0 || size == 0 {
             return Ok(self.return32(cpu, 0));
         }
         let Some(total) = size.checked_mul(count) else {
             return Ok(self.return32(cpu, 0));
         };
-        self.fill_random(memory, ptr, total)?;
-        Ok(self.return32(cpu, count))
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let read = self.read_fake_fd(memory, fd, ptr, total)?;
+        Ok(self.return32(cpu, read / size))
+    }
+
+    fn write_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let buf = cpu.reg(1);
+        let count = cpu.reg(2);
+        if fd < FIRST_FAKE_FD || buf == 0 {
+            self.set_errno(memory, 9)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let written = self.write_fake_fd(memory, fd, buf, count)?;
+        Ok(self.return32(cpu, written))
+    }
+
+    fn fwrite_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let size = cpu.reg(1);
+        let count = cpu.reg(2);
+        let stream = cpu.reg(3);
+        if ptr == 0 || stream == 0 || size == 0 {
+            return Ok(self.return32(cpu, 0));
+        }
+        let Some(total) = size.checked_mul(count) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let written = self.write_fake_fd(memory, fd, ptr, total)?;
+        Ok(self.return32(cpu, written / size))
     }
 
     fn alloc_fd(&mut self) -> u32 {
         let fd = self.next_fd;
         self.next_fd = self.next_fd.wrapping_add(1).max(FIRST_FAKE_FD);
+        fd
+    }
+
+    fn open_fake_stream<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        kind: FakeFileKind,
+    ) -> Result<u32, HleError> {
+        let fd = self.open_fake_fd(kind);
+        self.alloc_fake_file(memory, fd)
+    }
+
+    fn open_fake_fd(&mut self, kind: FakeFileKind) -> u32 {
+        let fd = self.alloc_fd();
+        self.files.push(FakeFile {
+            fd,
+            kind,
+            offset: 0,
+        });
         fd
     }
 
@@ -1000,6 +1207,101 @@ impl HleRuntime {
             memory,
             stream.wrapping_add(FAKE_FILE_FD_OFFSET),
         )?))
+    }
+
+    fn fake_file_index(&self, fd: u32) -> Option<usize> {
+        self.files.iter().position(|file| file.fd == fd)
+    }
+
+    fn virtual_file_index(&self, path: &str) -> Option<usize> {
+        self.virtual_files.iter().position(|file| file.path == path)
+    }
+
+    fn create_virtual_file(&mut self, path: &str, append: bool) {
+        if let Some(idx) = self.virtual_file_index(path) {
+            if !append {
+                self.virtual_files[idx].data.clear();
+            }
+        } else {
+            self.virtual_files.push(VirtualFile {
+                path: path.to_string(),
+                data: Vec::new(),
+            });
+        }
+    }
+
+    fn close_fd(&mut self, fd: u32) {
+        self.files.retain(|file| file.fd != fd);
+    }
+
+    fn read_fake_fd<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        fd: u32,
+        buf: u32,
+        count: u32,
+    ) -> Result<u32, HleError> {
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return Ok(0);
+        };
+        match self.files[file_idx].kind.clone() {
+            FakeFileKind::Random => {
+                self.fill_random(memory, buf, count)?;
+                self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(count);
+                Ok(count)
+            }
+            FakeFileKind::Virtual { path } => {
+                let Some(virtual_idx) = self.virtual_file_index(&path) else {
+                    return Ok(0);
+                };
+                let offset = self.files[file_idx].offset as usize;
+                let data = &self.virtual_files[virtual_idx].data;
+                let available = data.len().saturating_sub(offset);
+                let read = available.min(count as usize);
+                for idx in 0..read {
+                    store8(memory, buf.wrapping_add(idx as u32), data[offset + idx])?;
+                }
+                self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(read as u32);
+                Ok(read as u32)
+            }
+        }
+    }
+
+    fn write_fake_fd<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        fd: u32,
+        buf: u32,
+        count: u32,
+    ) -> Result<u32, HleError> {
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return Ok(count);
+        };
+        match self.files[file_idx].kind.clone() {
+            FakeFileKind::Random => Ok(count),
+            FakeFileKind::Virtual { path } => {
+                let virtual_idx = if let Some(idx) = self.virtual_file_index(&path) {
+                    idx
+                } else {
+                    self.virtual_files.push(VirtualFile {
+                        path: path.clone(),
+                        data: Vec::new(),
+                    });
+                    self.virtual_files.len() - 1
+                };
+                let offset = self.files[file_idx].offset as usize;
+                let end = offset.saturating_add(count as usize);
+                if self.virtual_files[virtual_idx].data.len() < end {
+                    self.virtual_files[virtual_idx].data.resize(end, 0);
+                }
+                for idx in 0..count {
+                    self.virtual_files[virtual_idx].data[offset + idx as usize] =
+                        load8(memory, buf.wrapping_add(idx))?;
+                }
+                self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(count);
+                Ok(count)
+            }
+        }
     }
 
     fn libstdcxx_string_replace_aux<M: Memory>(
@@ -1066,6 +1368,561 @@ impl HleRuntime {
         }
 
         Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_default_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        self.store_cxx_string_bytes(memory, string, &[], 0)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_copy_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let bytes = load_cxx_string_bytes(memory, cpu.reg(1))?;
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_cstr_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let ptr = cpu.reg(1);
+        let len = if ptr == 0 { 0 } else { strlen(memory, ptr)? };
+        let bytes = load_bytes(memory, ptr, len)?;
+        self.store_cxx_string_bytes(memory, string, &bytes, len)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_ptr_len_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let ptr = cpu.reg(1);
+        let len = cpu.reg(2);
+        let bytes = load_bytes(memory, ptr, len)?;
+        self.store_cxx_string_bytes(memory, string, &bytes, len)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_fill_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let len = cpu.reg(1);
+        let ch = cpu.reg(2) as u8;
+        let bytes = vec![ch; len as usize];
+        self.store_cxx_string_bytes(memory, string, &bytes, len)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_substr_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let source = load_cxx_string_bytes(memory, cpu.reg(1))?;
+        let pos = (cpu.reg(2) as usize).min(source.len());
+        let requested = cpu.reg(3);
+        let available = source.len().saturating_sub(pos);
+        let len = if requested == CXX_STRING_NPOS {
+            available
+        } else {
+            (requested as usize).min(available)
+        };
+        self.store_cxx_string_bytes(memory, string, &source[pos..pos + len], len as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_rep_create<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let capacity = cpu.reg(0).max(1);
+        let rep = self.alloc_cxx_string_rep(memory, &[], capacity)?;
+        Ok(self.return32(cpu, rep))
+    }
+
+    fn libstdcxx_string_construct_fill<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let len = cpu.reg(0);
+        let ch = cpu.reg(1) as u8;
+        let bytes = vec![ch; len as usize];
+        let data = self.alloc_cxx_string_data(memory, &bytes, len)?;
+        Ok(self.return32(cpu, data))
+    }
+
+    fn libstdcxx_string_swap<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let lhs = cpu.reg(0);
+        let rhs = cpu.reg(1);
+        let lhs_data = load32(memory, lhs)?;
+        let rhs_data = load32(memory, rhs)?;
+        store32(memory, lhs, rhs_data)?;
+        store32(memory, rhs, lhs_data)?;
+        Ok(self.return32(cpu, lhs))
+    }
+
+    fn libstdcxx_string_compare_cstr<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let lhs = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let rhs_len = strlen(memory, cpu.reg(1))?;
+        let rhs = load_bytes(memory, cpu.reg(1), rhs_len)?;
+        Ok(self.return32(cpu, i32_to_u32(compare_bytes(&lhs, &rhs))))
+    }
+
+    fn libstdcxx_string_compare_string<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let lhs = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let rhs = load_cxx_string_bytes(memory, cpu.reg(1))?;
+        Ok(self.return32(cpu, i32_to_u32(compare_bytes(&lhs, &rhs))))
+    }
+
+    fn libstdcxx_string_find_cstr_len<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let needle = load_bytes(memory, cpu.reg(1), cpu.reg(3))?;
+        Ok(self.return32(cpu, find_subslice(&haystack, &needle, cpu.reg(2))))
+    }
+
+    fn libstdcxx_string_find_char<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        Ok(self.return32(cpu, find_byte(&haystack, cpu.reg(1) as u8, cpu.reg(2))))
+    }
+
+    fn libstdcxx_string_rfind_cstr_len<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let needle = load_bytes(memory, cpu.reg(1), cpu.reg(3))?;
+        Ok(self.return32(cpu, rfind_subslice(&haystack, &needle, cpu.reg(2))))
+    }
+
+    fn libstdcxx_string_rfind_char<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        Ok(self.return32(cpu, rfind_byte(&haystack, cpu.reg(1) as u8, cpu.reg(2))))
+    }
+
+    fn libstdcxx_string_find_last_of<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let needles = load_bytes(memory, cpu.reg(1), cpu.reg(3))?;
+        Ok(self.return32(cpu, find_last_of(&haystack, &needles, cpu.reg(2), true)))
+    }
+
+    fn libstdcxx_string_find_first_of<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let needles = load_bytes(memory, cpu.reg(1), cpu.reg(3))?;
+        Ok(self.return32(cpu, find_first_of(&haystack, &needles, cpu.reg(2), true)))
+    }
+
+    fn libstdcxx_string_find_last_not_of<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let needles = load_bytes(memory, cpu.reg(1), cpu.reg(3))?;
+        Ok(self.return32(cpu, find_last_of(&haystack, &needles, cpu.reg(2), false)))
+    }
+
+    fn libstdcxx_string_find_first_not_of<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let haystack = load_cxx_string_bytes(memory, cpu.reg(0))?;
+        let needles = load_bytes(memory, cpu.reg(1), cpu.reg(3))?;
+        Ok(self.return32(cpu, find_first_of(&haystack, &needles, cpu.reg(2), false)))
+    }
+
+    fn libstdcxx_string_append_cstr_len<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let mut bytes = load_cxx_string_bytes(memory, string)?;
+        bytes.extend(load_bytes(memory, cpu.reg(1), cpu.reg(2))?);
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_append_string<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let mut bytes = load_cxx_string_bytes(memory, string)?;
+        bytes.extend(load_cxx_string_bytes(memory, cpu.reg(1))?);
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_append_fill<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let mut bytes = load_cxx_string_bytes(memory, string)?;
+        let count = cpu.reg(1);
+        bytes.extend(std::iter::repeat(cpu.reg(2) as u8).take(count as usize));
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_assign_cstr_len<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let bytes = load_bytes(memory, cpu.reg(1), cpu.reg(2))?;
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_assign_string<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let bytes = load_cxx_string_bytes(memory, cpu.reg(1))?;
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_assign_cstr<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let len = strlen(memory, cpu.reg(1))?;
+        let bytes = load_bytes(memory, cpu.reg(1), len)?;
+        self.store_cxx_string_bytes(memory, string, &bytes, len)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_resize_fill<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let new_len = cpu.reg(1) as usize;
+        let mut bytes = load_cxx_string_bytes(memory, string)?;
+        bytes.resize(new_len, cpu.reg(2) as u8);
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_reserve<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let requested = cpu.reg(1);
+        let bytes = load_cxx_string_bytes(memory, string)?;
+        if cxx_string_capacity(memory, string)? < requested {
+            self.store_cxx_string_bytes(memory, string, &bytes, requested)?;
+        }
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_mutate<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let pos = cpu.reg(1) as usize;
+        let erase_len = cpu.reg(2) as usize;
+        let insert_len = cpu.reg(3) as usize;
+        let mut bytes = load_cxx_string_bytes(memory, string)?;
+        let pos = pos.min(bytes.len());
+        let end = pos.saturating_add(erase_len).min(bytes.len());
+        bytes.splice(pos..end, std::iter::repeat(0).take(insert_len));
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_leak_hard<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let data = load32(memory, string)?;
+        if data != 0 {
+            store32(memory, data.wrapping_sub(4), u32::MAX)?;
+        }
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_replace_safe<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let pos = cpu.reg(1) as usize;
+        let erase_len = cpu.reg(2) as usize;
+        let replacement_len = load32(memory, cpu.reg(13))?;
+        let replacement = load_bytes(memory, cpu.reg(3), replacement_len)?;
+        self.replace_cxx_string_range(memory, string, pos, erase_len, &replacement)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_insert_cstr_len<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let pos = cpu.reg(1) as usize;
+        let replacement = load_bytes(memory, cpu.reg(2), cpu.reg(3))?;
+        self.replace_cxx_string_range(memory, string, pos, 0, &replacement)?;
+        Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_erase_range<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let data = load32(memory, string)?;
+        let len = cxx_string_len_from_data(memory, data)? as usize;
+        let first = cpu.reg(1).saturating_sub(data).min(len as u32) as usize;
+        let last = cpu.reg(2).saturating_sub(data).min(len as u32) as usize;
+        let erase_len = last.saturating_sub(first);
+        let new_data = self.replace_cxx_string_range(memory, string, first, erase_len, &[])?;
+        Ok(self.return32(cpu, new_data.wrapping_add(first as u32)))
+    }
+
+    fn minecraft_webtoken_copy_ctor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let dest = cpu.reg(0);
+        let source = cpu.reg(1);
+
+        if source == 0 {
+            self.store_empty_webtoken(memory, dest)?;
+        } else {
+            let issuer = load_cxx_string_bytes(memory, source)?;
+            self.store_cxx_string_bytes(memory, dest, &issuer, 0)?;
+            self.store_json_value_copy(memory, dest.wrapping_add(0x08), source.wrapping_add(0x08))?;
+            let subject = load_cxx_string_bytes(memory, source.wrapping_add(0x18))?;
+            self.store_cxx_string_bytes(memory, dest.wrapping_add(0x18), &subject, 0)?;
+            self.store_json_value_copy(memory, dest.wrapping_add(0x20), source.wrapping_add(0x20))?;
+            let signature = load_cxx_string_bytes(memory, source.wrapping_add(0x30))?;
+            self.store_cxx_string_bytes(memory, dest.wrapping_add(0x30), &signature, 0)?;
+        }
+
+        Ok(self.return32(cpu, dest))
+    }
+
+    fn minecraft_texture_group_get_texture_pair<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let pair = match self.fake_texture_pair {
+            Some(pair) => pair,
+            None => {
+                let pair = self.alloc(FAKE_TEXTURE_PAIR_SIZE, 4)?;
+                for offset in 0..FAKE_TEXTURE_PAIR_SIZE {
+                    store8(memory, pair.wrapping_add(offset), 0)?;
+                }
+                store32(memory, pair.wrapping_add(0x38), FAKE_TEXTURE_SIDE)?;
+                store32(memory, pair.wrapping_add(0x3c), FAKE_TEXTURE_SIDE)?;
+                self.store_cxx_string_bytes(
+                    memory,
+                    pair.wrapping_add(0x40),
+                    &[],
+                    FAKE_TEXTURE_BYTES,
+                )?;
+                self.fake_texture_pair = Some(pair);
+                pair
+            }
+        };
+        Ok(self.return32(cpu, pair))
+    }
+
+    fn store_empty_webtoken<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        dest: u32,
+    ) -> Result<(), HleError> {
+        self.store_cxx_string_bytes(memory, dest, &[], 0)?;
+        store_json_null(memory, dest.wrapping_add(0x08))?;
+        self.store_cxx_string_bytes(memory, dest.wrapping_add(0x18), &[], 0)?;
+        store_json_null(memory, dest.wrapping_add(0x20))?;
+        self.store_cxx_string_bytes(memory, dest.wrapping_add(0x30), &[], 0)?;
+        Ok(())
+    }
+
+    fn store_json_value_copy<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        dest: u32,
+        source: u32,
+    ) -> Result<(), HleError> {
+        if source < 0x1000 {
+            return store_json_null(memory, dest);
+        }
+
+        let value_type = load8(memory, source.wrapping_add(0x08))?;
+        match value_type {
+            0 | 1 | 2 | 3 | 5 => {
+                for offset in 0..16 {
+                    let byte = load8(memory, source.wrapping_add(offset))?;
+                    store8(memory, dest.wrapping_add(offset), byte)?;
+                }
+                Ok(())
+            }
+            4 => {
+                let ptr = load32(memory, source)?;
+                let bytes = if ptr == 0 {
+                    Vec::new()
+                } else {
+                    let len = strlen(memory, ptr)?;
+                    load_bytes(memory, ptr, len)?
+                };
+                let allocation = self.alloc((bytes.len() as u32).saturating_add(1), 1)?;
+                for (idx, byte) in bytes.iter().copied().enumerate() {
+                    store8(memory, allocation.wrapping_add(idx as u32), byte)?;
+                }
+                store8(memory, allocation.wrapping_add(bytes.len() as u32), 0)?;
+                store32(memory, dest, allocation)?;
+                store32(memory, dest.wrapping_add(4), 0)?;
+                store16(memory, dest.wrapping_add(8), u16::from(value_type) | 0x100)?;
+                store16(memory, dest.wrapping_add(10), 0)?;
+                store32(memory, dest.wrapping_add(12), 0)?;
+                Ok(())
+            }
+            _ => store_json_null(memory, dest),
+        }
+    }
+
+    fn replace_cxx_string_range<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        string: u32,
+        pos: usize,
+        erase_len: usize,
+        replacement: &[u8],
+    ) -> Result<u32, HleError> {
+        let mut bytes = load_cxx_string_bytes(memory, string)?;
+        let pos = pos.min(bytes.len());
+        let end = pos.saturating_add(erase_len).min(bytes.len());
+        bytes.splice(pos..end, replacement.iter().copied());
+        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)
+    }
+
+    fn store_cxx_string_bytes<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        string: u32,
+        bytes: &[u8],
+        min_capacity: u32,
+    ) -> Result<u32, HleError> {
+        let data = self.alloc_cxx_string_data(memory, bytes, min_capacity)?;
+        store32(memory, string, data)?;
+        Ok(data)
+    }
+
+    fn alloc_cxx_string_data<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        bytes: &[u8],
+        min_capacity: u32,
+    ) -> Result<u32, HleError> {
+        Ok(self
+            .alloc_cxx_string_rep(memory, bytes, min_capacity)?
+            .wrapping_add(CXX_STRING_REP_HEADER_SIZE))
+    }
+
+    fn alloc_cxx_string_rep<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        bytes: &[u8],
+        min_capacity: u32,
+    ) -> Result<u32, HleError> {
+        let len = bytes.len() as u32;
+        let capacity = min_capacity.max(len);
+        let allocation = self.alloc(
+            capacity.checked_add(CXX_STRING_REP_HEADER_SIZE + 1).ok_or(
+                HleError::HeapExhausted {
+                    requested: capacity,
+                },
+            )?,
+            4,
+        )?;
+        store32(memory, allocation, len)?;
+        store32(memory, allocation.wrapping_add(4), capacity)?;
+        store32(memory, allocation.wrapping_add(8), 0)?;
+        let data = allocation.wrapping_add(CXX_STRING_REP_HEADER_SIZE);
+        for (idx, byte) in bytes.iter().copied().enumerate() {
+            store8(memory, data.wrapping_add(idx as u32), byte)?;
+        }
+        store8(memory, data.wrapping_add(len), 0)?;
+        Ok(allocation)
     }
 
     fn fill_random<M: Memory>(
@@ -1341,6 +2198,57 @@ impl HleRuntime {
                 Ok(self.return32(cpu, ptr))
             }
             "glGetError" => Ok(self.return32(cpu, 0)),
+            "glGetProgramiv" => {
+                let value = gl_program_iv(cpu.reg(1));
+                if cpu.reg(2) != 0 {
+                    store32(memory, cpu.reg(2), value)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "glGetShaderiv" => {
+                let value = gl_shader_iv(cpu.reg(1));
+                if cpu.reg(2) != 0 {
+                    store32(memory, cpu.reg(2), value)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "glGetIntegerv" => {
+                let value = gl_integer(cpu.reg(0));
+                if cpu.reg(1) != 0 {
+                    store32(memory, cpu.reg(1), value)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "glGetActiveUniform" | "glGetActiveAttrib" => {
+                let length_ptr = cpu.reg(3);
+                let size_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
+                let type_ptr = load32(memory, cpu.reg(13).wrapping_add(4)).unwrap_or(0);
+                let name_ptr = load32(memory, cpu.reg(13).wrapping_add(8)).unwrap_or(0);
+                if length_ptr != 0 {
+                    store32(memory, length_ptr, 0)?;
+                }
+                if size_ptr != 0 {
+                    store32(memory, size_ptr, 0)?;
+                }
+                if type_ptr != 0 {
+                    store32(memory, type_ptr, 0)?;
+                }
+                if name_ptr != 0 && cpu.reg(2) != 0 {
+                    store8(memory, name_ptr, 0)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "glGetProgramInfoLog" | "glGetShaderInfoLog" => {
+                let length_ptr = cpu.reg(2);
+                let info_log_ptr = cpu.reg(3);
+                if length_ptr != 0 {
+                    store32(memory, length_ptr, 0)?;
+                }
+                if info_log_ptr != 0 {
+                    store8(memory, info_log_ptr, 0)?;
+                }
+                Ok(self.return32(cpu, 0))
+            }
             "glGetAttribLocation" | "glGetUniformLocation" => Ok(self.return32(cpu, 0)),
             "glIsTexture" => Ok(self.return32(cpu, 0)),
             _ => Ok(self.return32(cpu, 0)),
@@ -1423,6 +2331,9 @@ pub fn initialize_hle_symbol<M: Memory>(
                 HleDataInit::Ctype => init_ctype(memory, address, false)?,
                 HleDataInit::ToLower => init_case_table(memory, address, false)?,
                 HleDataInit::ToUpper => init_case_table(memory, address, true)?,
+                HleDataInit::CxxStringEmptyRep => init_cxx_string_empty_rep(memory, address)?,
+                HleDataInit::CxxStringTerminal => store8(memory, address, 0)?,
+                HleDataInit::CxxStringMaxSize => store32(memory, address, CXX_STRING_MAX_SIZE)?,
             }
             Ok(())
         }
@@ -1468,6 +2379,9 @@ fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
     if is_libstdcxx_symbol(name) {
         return Some(HleSymbolKind::CxxStd);
     }
+    if is_target_symbol(name) {
+        return Some(HleSymbolKind::Target);
+    }
     if is_libc_symbol(name) {
         return Some(HleSymbolKind::Libc);
     }
@@ -1496,6 +2410,18 @@ fn hle_shape(name: &str) -> HleSymbolShape {
             size: 0x400,
             init: HleDataInit::ToUpper,
         },
+        "_ZNSs4_Rep20_S_empty_rep_storageE" => HleSymbolShape::Data {
+            size: CXX_STRING_REP_HEADER_SIZE + 4,
+            init: HleDataInit::CxxStringEmptyRep,
+        },
+        "_ZNSs4_Rep11_S_terminalE" => HleSymbolShape::Data {
+            size: 1,
+            init: HleDataInit::CxxStringTerminal,
+        },
+        "_ZNSs4_Rep11_S_max_sizeE" => HleSymbolShape::Data {
+            size: 4,
+            init: HleDataInit::CxxStringMaxSize,
+        },
         _ => HleSymbolShape::Function,
     }
 }
@@ -1510,6 +2436,8 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
     if kind == HleSymbolKind::Libm
         || kind == HleSymbolKind::Gles
         || kind == HleSymbolKind::Egl
+        || kind == HleSymbolKind::CxxStd
+        || kind == HleSymbolKind::Target
         || matches!(
             name,
             "memcpy"
@@ -1679,6 +2607,15 @@ fn is_null_stub(name: &str) -> bool {
             | "dlopen"
             | "dlsym"
             | "dlerror"
+    )
+}
+
+fn is_target_symbol(name: &str) -> bool {
+    matches!(
+        name,
+        "_ZN8WebTokenC1ERKS_"
+            | "_ZN8WebTokenC2ERKS_"
+            | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
     )
 }
 
@@ -2014,7 +2951,56 @@ fn is_cxxabi_symbol(name: &str) -> bool {
 }
 
 fn is_libstdcxx_symbol(name: &str) -> bool {
-    matches!(name, "_ZNSs14_M_replace_auxEjjjc")
+    matches!(
+        name,
+        "_ZNSs4_Rep11_S_max_sizeE"
+            | "_ZNSs4_Rep11_S_terminalE"
+            | "_ZNSs4_Rep20_S_empty_rep_storageE"
+            | "_ZNSs4_Rep10_M_destroyERKSaIcE"
+            | "_ZNSs4_Rep9_S_createEjjRKSaIcE"
+            | "_ZNSs12_S_constructEjcRKSaIcE"
+            | "_ZNSs14_M_replace_auxEjjjc"
+            | "_ZNSs15_M_replace_safeEjjPKcj"
+            | "_ZNSs12_M_leak_hardEv"
+            | "_ZNSs4swapERSs"
+            | "_ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_"
+            | "_ZNSs6appendEPKcj"
+            | "_ZNSs6appendERKSs"
+            | "_ZNSs6appendEjc"
+            | "_ZNSs6assignEPKcj"
+            | "_ZNSs6assignERKSs"
+            | "_ZNSs6insertEjPKcj"
+            | "_ZNSs6resizeEjc"
+            | "_ZNSs7replaceEjjPKcj"
+            | "_ZNSs7reserveEj"
+            | "_ZNSs9_M_mutateEjjj"
+            | "_ZNSsaSEPKc"
+            | "_ZNSsaSERKSs"
+            | "_ZNSsC1EPKcRKSaIcE"
+            | "_ZNSsC2EPKcRKSaIcE"
+            | "_ZNSsC1EPKcjRKSaIcE"
+            | "_ZNSsC2EPKcjRKSaIcE"
+            | "_ZNSsC1ERKSs"
+            | "_ZNSsC2ERKSs"
+            | "_ZNSsC1ERKSsjj"
+            | "_ZNSsC2ERKSsjj"
+            | "_ZNSsC1EjcRKSaIcE"
+            | "_ZNSsC2EjcRKSaIcE"
+            | "_ZNSsC1Ev"
+            | "_ZNSsC2Ev"
+            | "_ZNSsD1Ev"
+            | "_ZNSsD2Ev"
+            | "_ZNKSs4findEPKcjj"
+            | "_ZNKSs4findEcj"
+            | "_ZNKSs5rfindEPKcjj"
+            | "_ZNKSs5rfindEcj"
+            | "_ZNKSs7compareEPKc"
+            | "_ZNKSs7compareERKSs"
+            | "_ZNKSs12find_last_ofEPKcjj"
+            | "_ZNKSs13find_first_ofEPKcjj"
+            | "_ZNKSs16find_last_not_ofEPKcjj"
+            | "_ZNKSs17find_first_not_ofEPKcjj"
+    )
 }
 
 fn init_ctype<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Result<(), HleError> {
@@ -2043,6 +3029,14 @@ fn init_case_table<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Resu
             u16::from(mapped),
         )?;
     }
+    Ok(())
+}
+
+fn init_cxx_string_empty_rep<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    store32(memory, address, 0)?;
+    store32(memory, address.wrapping_add(4), 0)?;
+    store32(memory, address.wrapping_add(8), 0)?;
+    store8(memory, address.wrapping_add(CXX_STRING_REP_HEADER_SIZE), 0)?;
     Ok(())
 }
 
@@ -2180,6 +3174,129 @@ fn load_c_string<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> Result<St
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+fn load_bytes<M: Memory>(memory: &mut M, ptr: u32, len: u32) -> Result<Vec<u8>, HleError> {
+    let mut bytes = Vec::with_capacity(len as usize);
+    for idx in 0..len {
+        bytes.push(load8(memory, ptr.wrapping_add(idx))?);
+    }
+    Ok(bytes)
+}
+
+fn load_cxx_string_bytes<M: Memory>(memory: &mut M, string: u32) -> Result<Vec<u8>, HleError> {
+    if string == 0 {
+        return Ok(Vec::new());
+    }
+    let data = load32(memory, string)?;
+    let len = cxx_string_len_from_data(memory, data)?;
+    load_bytes(memory, data, len)
+}
+
+fn cxx_string_len_from_data<M: Memory>(memory: &mut M, data: u32) -> Result<u32, HleError> {
+    if data == 0 {
+        Ok(0)
+    } else {
+        load32(memory, data.wrapping_sub(CXX_STRING_REP_HEADER_SIZE))
+    }
+}
+
+fn cxx_string_capacity<M: Memory>(memory: &mut M, string: u32) -> Result<u32, HleError> {
+    if string == 0 {
+        return Ok(0);
+    }
+    let data = load32(memory, string)?;
+    if data == 0 {
+        Ok(0)
+    } else {
+        load32(memory, data.wrapping_sub(8))
+    }
+}
+
+fn compare_bytes(lhs: &[u8], rhs: &[u8]) -> i32 {
+    for (left, right) in lhs.iter().copied().zip(rhs.iter().copied()) {
+        if left != right {
+            return i32::from(left) - i32::from(right);
+        }
+    }
+    lhs.len().cmp(&rhs.len()) as i32
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8], pos: u32) -> u32 {
+    let pos = pos as usize;
+    if needle.is_empty() {
+        return if pos <= haystack.len() {
+            pos as u32
+        } else {
+            CXX_STRING_NPOS
+        };
+    }
+    if pos > haystack.len() || needle.len() > haystack.len().saturating_sub(pos) {
+        return CXX_STRING_NPOS;
+    }
+    haystack[pos..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|idx| (pos + idx) as u32)
+        .unwrap_or(CXX_STRING_NPOS)
+}
+
+fn find_byte(haystack: &[u8], needle: u8, pos: u32) -> u32 {
+    haystack
+        .get(pos as usize..)
+        .and_then(|tail| tail.iter().position(|&byte| byte == needle))
+        .map(|idx| pos.wrapping_add(idx as u32))
+        .unwrap_or(CXX_STRING_NPOS)
+}
+
+fn rfind_subslice(haystack: &[u8], needle: &[u8], pos: u32) -> u32 {
+    if needle.is_empty() {
+        return (pos as usize).min(haystack.len()) as u32;
+    }
+    if needle.len() > haystack.len() {
+        return CXX_STRING_NPOS;
+    }
+    let start = (pos as usize).min(haystack.len() - needle.len());
+    haystack[..=start]
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+        .map(|idx| idx as u32)
+        .unwrap_or(CXX_STRING_NPOS)
+}
+
+fn rfind_byte(haystack: &[u8], needle: u8, pos: u32) -> u32 {
+    if haystack.is_empty() {
+        return CXX_STRING_NPOS;
+    }
+    let start = (pos as usize).min(haystack.len() - 1);
+    haystack[..=start]
+        .iter()
+        .rposition(|&byte| byte == needle)
+        .map(|idx| idx as u32)
+        .unwrap_or(CXX_STRING_NPOS)
+}
+
+fn find_first_of(haystack: &[u8], needles: &[u8], pos: u32, want_match: bool) -> u32 {
+    haystack
+        .get(pos as usize..)
+        .and_then(|tail| {
+            tail.iter()
+                .position(|byte| needles.contains(byte) == want_match)
+        })
+        .map(|idx| pos.wrapping_add(idx as u32))
+        .unwrap_or(CXX_STRING_NPOS)
+}
+
+fn find_last_of(haystack: &[u8], needles: &[u8], pos: u32, want_match: bool) -> u32 {
+    if haystack.is_empty() {
+        return CXX_STRING_NPOS;
+    }
+    let start = (pos as usize).min(haystack.len() - 1);
+    haystack[..=start]
+        .iter()
+        .rposition(|byte| needles.contains(byte) == want_match)
+        .map(|idx| idx as u32)
+        .unwrap_or(CXX_STRING_NPOS)
+}
+
 fn android_asset_entry_candidates(path: &str) -> Vec<String> {
     let mut clean = path.trim_start_matches('/');
     while let Some(stripped) = clean.strip_prefix("./") {
@@ -2213,8 +3330,18 @@ fn trace_android_asset(args: fmt::Arguments<'_>) {
     }
 }
 
+fn trace_hle_file(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_HLE_FILE").is_some() {
+        eprintln!("HLE file {args}");
+    }
+}
+
 fn is_random_device_path(path: &str) -> bool {
     matches!(path, "/dev/urandom" | "/dev/random")
+}
+
+fn is_virtual_storage_path(path: &str) -> bool {
+    path.starts_with("/sdcard/") || path.starts_with("/storage/") || path.starts_with("/data/data/")
 }
 
 fn strcmp<M: Memory>(memory: &mut M, a: u32, b: u32, max_len: u32) -> Result<i32, HleError> {
@@ -2262,6 +3389,13 @@ fn store32<M: Memory>(memory: &mut M, addr: u32, value: u32) -> Result<(), HleEr
     memory
         .store32(addr, value)
         .map_err(|err| HleError::Memory(err.to_string()))
+}
+
+fn store_json_null<M: Memory>(memory: &mut M, addr: u32) -> Result<(), HleError> {
+    for offset in 0..16 {
+        store8(memory, addr.wrapping_add(offset), 0)?;
+    }
+    Ok(())
 }
 
 fn write_android_locale_code<M: Memory>(
@@ -2360,6 +3494,35 @@ fn gl_query_string(name: u32) -> Option<&'static str> {
     }
 }
 
+fn gl_program_iv(name: u32) -> u32 {
+    match name {
+        GL_LINK_STATUS => 1,
+        GL_INFO_LOG_LENGTH
+        | GL_ACTIVE_UNIFORMS
+        | GL_ACTIVE_UNIFORM_MAX_LENGTH
+        | GL_ACTIVE_ATTRIBUTES
+        | GL_ACTIVE_ATTRIBUTE_MAX_LENGTH => 0,
+        _ => 0,
+    }
+}
+
+fn gl_shader_iv(name: u32) -> u32 {
+    match name {
+        GL_COMPILE_STATUS => 1,
+        GL_INFO_LOG_LENGTH => 0,
+        _ => 0,
+    }
+}
+
+fn gl_integer(name: u32) -> u32 {
+    match name {
+        GL_MAX_TEXTURE_SIZE => 4096,
+        GL_MAX_TEXTURE_IMAGE_UNITS => 8,
+        GL_MAX_VERTEX_ATTRIBS => 16,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2369,6 +3532,12 @@ mod tests {
     use crate::guest_memory::MappedMemory;
 
     use super::*;
+
+    fn load_test_cxx_string(memory: &mut MappedMemory, string: u32) -> Vec<u8> {
+        let data = memory.load32(string).unwrap();
+        let len = memory.load32(data - CXX_STRING_REP_HEADER_SIZE).unwrap();
+        memory.load_bytes_for_test(data, len as usize).to_vec()
+    }
 
     #[test]
     fn describes_current_minecraft_system_imports() {
@@ -2383,7 +3552,11 @@ mod tests {
             "_ctype_",
             "roundf",
             "__gnu_Unwind_Find_exidx",
+            "_ZNSs4_Rep20_S_empty_rep_storageE",
+            "_ZNSsC1ERKSs",
             "_ZNSs14_M_replace_auxEjjjc",
+            "_ZN8WebTokenC2ERKS_",
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
         ] {
             assert!(describe_hle_import(name).is_some(), "{name}");
         }
@@ -2401,6 +3574,11 @@ mod tests {
         let guard = describe_hle_import("__stack_chk_guard").unwrap();
         initialize_hle_symbol(&mut memory, guard, 0x1100).unwrap();
         assert_eq!(memory.load32(0x1100).unwrap(), 0x00c0_ffee);
+
+        let empty_rep = describe_hle_import("_ZNSs4_Rep20_S_empty_rep_storageE").unwrap();
+        initialize_hle_symbol(&mut memory, empty_rep, 0x1200).unwrap();
+        assert_eq!(memory.load32(0x1200).unwrap(), 0);
+        assert_eq!(memory.load8(0x120c).unwrap(), 0);
     }
 
     #[test]
@@ -2605,6 +3783,63 @@ mod tests {
         hle.dispatch("glGetString", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
         assert_eq!(cpu.pc(), 0x2008);
+    }
+
+    #[test]
+    fn dispatches_gles_shader_query_facade_outputs() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x5000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(13, 0x1800);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x2000);
+
+        memory.store32(0x1100, 0xcccc_cccc).unwrap();
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(1, GL_ACTIVE_UNIFORMS);
+        cpu.set_reg(2, 0x1100);
+        hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1100).unwrap(), 0);
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(1, GL_LINK_STATUS);
+        cpu.set_reg(2, 0x1104);
+        hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1104).unwrap(), 1);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(1, GL_COMPILE_STATUS);
+        cpu.set_reg(2, 0x1108);
+        hle.dispatch("glGetShaderiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1108).unwrap(), 1);
+
+        memory.store32(0x1800, 0x1110).unwrap();
+        memory.store32(0x1804, 0x1114).unwrap();
+        memory.store32(0x1808, 0x1118).unwrap();
+        memory.store8(0x1118, b'x').unwrap();
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(2, 4);
+        cpu.set_reg(3, 0x110c);
+        hle.dispatch("glGetActiveUniform", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x110c).unwrap(), 0);
+        assert_eq!(memory.load32(0x1110).unwrap(), 0);
+        assert_eq!(memory.load32(0x1114).unwrap(), 0);
+        assert_eq!(memory.load8(0x1118).unwrap(), 0);
+
+        memory.store32(0x1120, 0xcccc_cccc).unwrap();
+        memory.store8(0x1124, b'x').unwrap();
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(2, 0x1120);
+        cpu.set_reg(3, 0x1124);
+        hle.dispatch("glGetProgramInfoLog", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1120).unwrap(), 0);
+        assert_eq!(memory.load8(0x1124).unwrap(), 0);
     }
 
     #[test]
@@ -3009,6 +4244,153 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_libstdcxx_string_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x8000).unwrap();
+        memory.load_bytes(0x1100, b"stone\0").unwrap();
+        memory.load_bytes(0x1110, b"craft\0").unwrap();
+        memory.load_bytes(0x1120, b"pick\0").unwrap();
+        memory.store32(0x1300, 4).unwrap();
+
+        let first = 0x1200;
+        let second = 0x1204;
+        let third = 0x1208;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(13, 0x1300);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x4000);
+
+        cpu.set_reg(0, first);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 0);
+        hle.dispatch("_ZNSsC1EPKcRKSaIcE", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, first), b"stone");
+
+        cpu.set_reg(0, second);
+        cpu.set_reg(1, first);
+        hle.dispatch("_ZNSsC1ERKSs", &mut cpu, &mut memory).unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, second), b"stone");
+
+        cpu.set_reg(0, third);
+        cpu.set_reg(1, 0);
+        hle.dispatch("_ZNSsC1ERKSs", &mut cpu, &mut memory).unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, third), b"");
+
+        cpu.set_reg(0, second);
+        cpu.set_reg(1, 0x1110);
+        cpu.set_reg(2, 5);
+        hle.dispatch("_ZNSs6appendEPKcj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, second), b"stonecraft");
+
+        cpu.set_reg(0, second);
+        cpu.set_reg(1, 0x1110);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 5);
+        hle.dispatch("_ZNKSs4findEPKcjj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 5);
+
+        cpu.set_reg(0, third);
+        cpu.set_reg(1, second);
+        cpu.set_reg(2, 5);
+        cpu.set_reg(3, 5);
+        hle.dispatch("_ZNSsC1ERKSsjj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, third), b"craft");
+
+        cpu.set_reg(0, second);
+        cpu.set_reg(1, 5);
+        cpu.set_reg(2, 5);
+        cpu.set_reg(3, 0x1120);
+        hle.dispatch("_ZNSs15_M_replace_safeEjjPKcj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, second), b"stonepick");
+
+        let data = memory.load32(second).unwrap();
+        cpu.set_reg(0, second);
+        cpu.set_reg(1, data + 5);
+        cpu.set_reg(2, data + 9);
+        hle.dispatch(
+            "_ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, second), b"stone");
+    }
+
+    #[test]
+    fn dispatches_minecraft_webtoken_copy_ctor_for_null_source() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x5000).unwrap();
+
+        let dest = 0x1200;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, dest);
+        cpu.set_reg(1, 0);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x2000);
+
+        hle.dispatch("_ZN8WebTokenC2ERKS_", &mut cpu, &mut memory)
+            .unwrap();
+
+        assert_eq!(load_test_cxx_string(&mut memory, dest), b"");
+        assert_eq!(load_test_cxx_string(&mut memory, dest + 0x18), b"");
+        assert_eq!(load_test_cxx_string(&mut memory, dest + 0x30), b"");
+        assert_eq!(memory.load_bytes_for_test(dest + 0x08, 16), &[0; 16]);
+        assert_eq!(memory.load_bytes_for_test(dest + 0x20, 16), &[0; 16]);
+        assert_eq!(cpu.reg(0), dest);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
+    fn dispatches_minecraft_texture_group_pair_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x50000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x48000);
+
+        hle.dispatch(
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        let pair = cpu.reg(0);
+        assert_ne!(pair, 0);
+        assert_eq!(memory.load32(pair + 0x38).unwrap(), FAKE_TEXTURE_SIDE);
+        assert_eq!(memory.load32(pair + 0x3c).unwrap(), FAKE_TEXTURE_SIDE);
+        let pixels = memory.load32(pair + 0x40).unwrap();
+        assert_ne!(pixels, 0);
+        assert_eq!(
+            memory.load32(pixels - CXX_STRING_REP_HEADER_SIZE).unwrap(),
+            0
+        );
+        assert_eq!(memory.load32(pixels - 8).unwrap(), FAKE_TEXTURE_BYTES);
+        assert_eq!(memory.load8(pixels).unwrap(), 0);
+        assert_eq!(cpu.pc(), 0x2000);
+
+        cpu.set_reg(14, 0x2004);
+        hle.dispatch(
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), pair);
+        assert_eq!(cpu.pc(), 0x2004);
+    }
+
+    #[test]
     fn dispatches_random_device_stdio_hle_calls() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x2000).unwrap();
@@ -3043,6 +4425,47 @@ mod tests {
         hle.dispatch("fread", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 3);
         assert_ne!(memory.load_bytes_for_test(0x1210, 6), [0, 0, 0, 0, 0, 0]);
+
+        memory
+            .load_bytes(
+                0x1140,
+                b"/sdcard/games/com.mojang/minecraftpe/resource_packs.txt\0",
+            )
+            .unwrap();
+        memory.load_bytes(0x1180, b"w\0").unwrap();
+        memory.load_bytes(0x1188, b"r+\0").unwrap();
+        memory.load_bytes(0x1220, b"pack").unwrap();
+
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 0x1180);
+        hle.dispatch("fopen", &mut cpu, &mut memory).unwrap();
+        let writable = cpu.reg(0);
+        assert_ne!(writable, 0);
+
+        cpu.set_reg(0, 0x1220);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 4);
+        cpu.set_reg(3, writable);
+        hle.dispatch("fwrite", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+
+        cpu.set_reg(0, writable);
+        hle.dispatch("fclose", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 0x1188);
+        hle.dispatch("fopen", &mut cpu, &mut memory).unwrap();
+        let readable = cpu.reg(0);
+        assert_ne!(readable, 0);
+
+        cpu.set_reg(0, 0x1230);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 4);
+        cpu.set_reg(3, readable);
+        hle.dispatch("fread", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+        assert_eq!(memory.load_bytes_for_test(0x1230, 4), b"pack");
     }
 
     #[test]
