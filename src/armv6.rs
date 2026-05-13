@@ -458,6 +458,12 @@ impl Cpu {
             return self.exec_arm_neon_2reg_misc(instr, pc);
         }
 
+        if (instr & 0xfe80_0050) == 0xf280_0040 {
+            if self.exec_arm_neon_2reg_scalar(instr, pc)? {
+                return Ok(true);
+            }
+        }
+
         Ok(false)
     }
 
@@ -2012,6 +2018,164 @@ impl Cpu {
         Ok(true)
     }
 
+    fn exec_arm_neon_2reg_scalar(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let q_or_u = instr & (1 << 24) != 0;
+        let size = ((instr >> 20) & 0x3) as usize;
+        let vd = vfp_double_d(instr);
+        let vn = vfp_double_n(instr);
+        let vm = vfp_double_m(instr);
+        let opcode = ((instr >> 8) & 0xf) as u8;
+
+        if (instr & 0xfe80_0a50) == 0xf280_0040
+            || (instr & 0xfe80_0e50) == 0xf280_0840
+            || (instr & 0xfe80_0f50) == 0xf280_0c40
+            || (instr & 0xfe80_0f50) == 0xf280_0d40
+        {
+            return self.exec_arm_neon_scalar_mul(instr, pc, q_or_u, size, opcode, vd, vn, vm);
+        }
+
+        if (instr & 0xfe80_0b50) == 0xf280_0240
+            || (instr & 0xff80_0f50) == 0xf280_0340
+            || (instr & 0xff80_0f50) == 0xf280_0740
+            || (instr & 0xfe80_0f50) == 0xf280_0a40
+            || (instr & 0xff80_0f50) == 0xf280_0b40
+        {
+            return self.exec_arm_neon_scalar_long_mul(instr, pc, q_or_u, size, opcode, vd, vn, vm);
+        }
+
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_scalar_mul(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        q: bool,
+        size: usize,
+        opcode: u8,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if size == 0 || size == 3 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if q && (vd & 1 != 0 || vn & 1 != 0) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vn)?;
+        if q {
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vn + 1)?;
+        }
+
+        let float = matches!(opcode, 1 | 5 | 9);
+        if float && size != 2 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if matches!(opcode, 12 | 13) && size == 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
+        let (scalar_reg, scalar_lane) = neon_scalar_location(size, vm);
+        self.check_dreg(scalar_reg)?;
+        let scalar_src = self.neon_reg_bytes(scalar_reg, false);
+        let scalar = neon_read_elem(&scalar_src, scalar_lane, size);
+        let src = self.neon_reg_bytes(vn, q);
+        let old = self.neon_reg_bytes(vd, q);
+        let mut out = [0u8; 16];
+        let lanes = neon_lanes(q, size);
+        let mask = neon_elem_mask(size);
+
+        for lane in 0..lanes {
+            let n = neon_read_elem(&src, lane, size);
+            let d = neon_read_elem(&old, lane, size);
+            let result = if float {
+                let n = f32::from_bits(n as u32);
+                let s = f32::from_bits(scalar as u32);
+                let product = n * s;
+                let d = f32::from_bits(d as u32);
+                match opcode {
+                    1 => (d + product).to_bits() as u64,
+                    5 => (d - product).to_bits() as u64,
+                    9 => product.to_bits() as u64,
+                    _ => unreachable!(),
+                }
+            } else {
+                match opcode {
+                    0 => d.wrapping_add(n.wrapping_mul(scalar)) & mask,
+                    4 => d.wrapping_sub(n.wrapping_mul(scalar)) & mask,
+                    8 => n.wrapping_mul(scalar) & mask,
+                    12 => self.neon_saturating_doubling_mul_high(n, scalar, size, false),
+                    13 => self.neon_saturating_doubling_mul_high(n, scalar, size, true),
+                    _ => return Ok(false),
+                }
+            };
+            neon_write_elem(&mut out, lane, size, result);
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_scalar_long_mul(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        unsigned: bool,
+        size: usize,
+        opcode: u8,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if size == 0 || size == 3 || vd & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vd + 1)?;
+        self.check_dreg(vn)?;
+
+        let (scalar_reg, scalar_lane) = neon_scalar_location(size, vm);
+        self.check_dreg(scalar_reg)?;
+        let scalar_src = self.neon_reg_bytes(scalar_reg, false);
+        let scalar = neon_read_elem(&scalar_src, scalar_lane, size);
+        let src = self.neon_reg_bytes(vn, false);
+        let old = self.neon_reg_bytes(vd, true);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        let mask = neon_elem_mask(wide_size);
+        let signed = !unsigned;
+
+        for lane in 0..(8 >> size) {
+            let n = neon_read_elem(&src, lane, size);
+            let product = match opcode {
+                3 | 7 | 11 => self.neon_saturating_doubling_mul_long(n, scalar, size),
+                _ => {
+                    let lhs = neon_extend_i128(n, size, signed);
+                    let rhs = neon_extend_i128(scalar, size, signed);
+                    neon_mask_i128(lhs * rhs, wide_size)
+                }
+            };
+            let acc = neon_read_elem(&old, lane, wide_size);
+            let result = match opcode {
+                2 => acc.wrapping_add(product) & mask,
+                3 => self.neon_saturating_add_sub_wide(acc, product, wide_size, false),
+                6 => acc.wrapping_sub(product) & mask,
+                7 => self.neon_saturating_add_sub_wide(acc, product, wide_size, true),
+                10 | 11 => product,
+                _ => return Ok(false),
+            };
+            neon_write_elem(&mut out, lane, wide_size, result);
+        }
+
+        self.set_neon_reg_bytes(vd, true, out);
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn exec_arm_neon_3same_f32(
         &mut self,
@@ -2234,6 +2398,108 @@ impl Cpu {
                 return Ok(true);
             }
             _ => {}
+        }
+
+        if (instr & 0x0fd0_0f3f) == 0x0e00_0b30 {
+            let rt = ((instr >> 12) & 0xf) as usize;
+            if rt == 15 {
+                return Err(Trap::Unpredictable("VFP VMOV from PC"));
+            }
+            let dn = vfp_double_n(instr);
+            let index = (((instr >> 21) & 1) << 1) | ((instr >> 6) & 1);
+            let mut bytes = self.neon_reg_bytes(dn, false);
+            neon_write_elem(&mut bytes, index as usize, 1, u64::from(self.regs[rt]));
+            self.set_dreg_bits(
+                dn,
+                u64::from_le_bytes(bytes[..8].try_into().expect("VMOV i16 dreg")),
+            );
+            return Ok(true);
+        }
+
+        if (instr & 0x0fd0_0f1f) == 0x0e40_0b10 {
+            let rt = ((instr >> 12) & 0xf) as usize;
+            if rt == 15 {
+                return Err(Trap::Unpredictable("VFP VMOV from PC"));
+            }
+            let dn = vfp_double_n(instr);
+            let index = (((instr >> 21) & 1) << 2) | ((instr >> 5) & 0x3);
+            let mut bytes = self.neon_reg_bytes(dn, false);
+            neon_write_elem(&mut bytes, index as usize, 0, u64::from(self.regs[rt]));
+            self.set_dreg_bits(
+                dn,
+                u64::from_le_bytes(bytes[..8].try_into().expect("VMOV i8 dreg")),
+            );
+            return Ok(true);
+        }
+
+        if (instr & 0x0f50_0f3f) == 0x0e10_0b30 {
+            let rt = ((instr >> 12) & 0xf) as usize;
+            if rt == 15 {
+                return Err(Trap::Unpredictable("VFP VMOV to PC"));
+            }
+            let dn = vfp_double_n(instr);
+            let index = (((instr >> 21) & 1) << 1) | ((instr >> 6) & 1);
+            let bytes = self.neon_reg_bytes(dn, false);
+            let value = neon_read_elem(&bytes, index as usize, 1);
+            self.write_reg_arm(
+                rt,
+                if instr & (1 << 23) != 0 {
+                    value as u32
+                } else {
+                    sign_extend(value as u32, 16) as u32
+                },
+            );
+            return Ok(true);
+        }
+
+        if (instr & 0x0f50_0f1f) == 0x0e50_0b10 {
+            let rt = ((instr >> 12) & 0xf) as usize;
+            if rt == 15 {
+                return Err(Trap::Unpredictable("VFP VMOV to PC"));
+            }
+            let dn = vfp_double_n(instr);
+            let index = (((instr >> 21) & 1) << 2) | ((instr >> 5) & 0x3);
+            let bytes = self.neon_reg_bytes(dn, false);
+            let value = neon_read_elem(&bytes, index as usize, 0);
+            self.write_reg_arm(
+                rt,
+                if instr & (1 << 23) != 0 {
+                    value as u32
+                } else {
+                    sign_extend(value as u32, 8) as u32
+                },
+            );
+            return Ok(true);
+        }
+
+        if (instr & 0x0f90_0f5f) == 0x0e80_0b10 {
+            let rt = ((instr >> 12) & 0xf) as usize;
+            if rt == 15 {
+                return Err(Trap::Unpredictable("VFP VDUP from PC"));
+            }
+            let vd = vfp_double_n(instr);
+            let q = instr & (1 << 21) != 0;
+            let be = ((instr >> 21) & 0x2) | ((instr >> 5) & 1);
+            if be == 3 || (q && vd & 1 != 0) {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd)?;
+            if q {
+                self.check_dreg(vd + 1)?;
+            }
+            let size = match be {
+                0 => 2,
+                1 => 1,
+                2 => 0,
+                _ => unreachable!(),
+            };
+            let mask = neon_elem_mask(size);
+            let mut out = [0u8; 16];
+            for lane in 0..neon_lanes(q, size) {
+                neon_write_elem(&mut out, lane, size, u64::from(self.regs[rt]) & mask);
+            }
+            self.set_neon_reg_bytes(vd, q, out);
+            return Ok(true);
         }
 
         if (instr & 0x0fb0_0f7f) == 0x0e00_0a10 {
@@ -6877,6 +7143,14 @@ fn neon_lanes(q: bool, size: usize) -> usize {
     neon_reg_bytes(q) >> size
 }
 
+fn neon_scalar_location(size: usize, vm: usize) -> (usize, usize) {
+    match size {
+        1 => (vm & 0x7, ((vm >> 4) << 1) | ((vm >> 3) & 1)),
+        2 => (vm & 0xf, vm >> 4),
+        _ => (vm, 0),
+    }
+}
+
 fn neon_read_elem(bytes: &[u8; 16], lane: usize, size: usize) -> u64 {
     let off = lane << size;
     match size {
@@ -8304,6 +8578,50 @@ mod tests {
         cpu.execute_thumb32(first, second, 0, &mut mem).unwrap(); // vld1.8 {d0[0]}, [r0], r2
         assert_eq!(cpu.dreg(0), 0x8877_6655_4433_22fe);
         assert_eq!(cpu.reg(0), 0x10e3);
+    }
+
+    #[test]
+    fn neon_core_lane_moves_and_scalar_multiply_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_reg(0, 0x1122_3344);
+        cpu.execute_arm(0xee88_0b10, 0, &mut mem).unwrap(); // vdup.32 d8, r0
+        assert_eq!(cpu.dreg(8), 0x1122_3344_1122_3344);
+
+        cpu.execute_arm(0xee88_0b30, 0, &mut mem).unwrap(); // vdup.16 d8, r0
+        assert_eq!(cpu.dreg(8), 0x3344_3344_3344_3344);
+
+        cpu.set_dreg(8, 0);
+        cpu.set_reg(0, 0xffff_ffaa);
+        cpu.execute_arm(0xee48_0b30, 0, &mut mem).unwrap(); // vmov.8 d8[1], r0
+        assert_eq!(cpu.dreg(8), 0x0000_0000_0000_aa00);
+
+        cpu.execute_arm(0xeed8_1b30, 0, &mut mem).unwrap(); // vmov.u8 r1, d8[1]
+        assert_eq!(cpu.reg(1), 0xaa);
+        cpu.execute_arm(0xee58_2b30, 0, &mut mem).unwrap(); // vmov.s8 r2, d8[1]
+        assert_eq!(cpu.reg(2), 0xffff_ffaa);
+
+        cpu.set_dreg(8, 0);
+        cpu.set_reg(0, 0xffff_8765);
+        cpu.execute_arm(0xee28_0b30, 0, &mut mem).unwrap(); // vmov.16 d8[2], r0
+        assert_eq!(cpu.dreg(8), 0x0000_8765_0000_0000);
+
+        cpu.execute_arm(0xeeb8_3b30, 0, &mut mem).unwrap(); // vmov.u16 r3, d8[2]
+        assert_eq!(cpu.reg(3), 0x8765);
+        cpu.execute_arm(0xee38_4b30, 0, &mut mem).unwrap(); // vmov.s16 r4, d8[2]
+        assert_eq!(cpu.reg(4), 0xffff_8765);
+
+        cpu.set_dreg(0, 0x0000_0007_0000_0005);
+        cpu.set_dreg(12, 0x0000_0004_0000_0003);
+        cpu.execute_arm(0xf2ec_6840, 0, &mut mem).unwrap(); // vmul.i32 d22, d12, d0[0]
+        assert_eq!(cpu.dreg(22), 0x0000_0014_0000_000f);
+
+        cpu.set_dreg(2, 0x0004_0003_0002_0001);
+        cpu.set_dreg(4, 0x000a_0009_0008_0007);
+        cpu.set_dreg(19, 0x0190_012c_00c8_0064);
+        cpu.execute_arm(0xf2d2_306c, 0, &mut mem).unwrap(); // vmla.i16 d19, d2, d4[3]
+        assert_eq!(cpu.dreg(19), 0x01b8_014a_00dc_006e);
     }
 
     #[test]
