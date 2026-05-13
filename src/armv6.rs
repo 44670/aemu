@@ -1158,6 +1158,10 @@ impl Cpu {
                 self.set_neon_reg_bytes(vd, q, out);
                 Ok(true)
             }
+            (2, 4) if q => {
+                self.exec_arm_neon_2reg_saturating_narrow(instr, pc, size, true, true, vd, vm)
+            }
+            (2, 5) => self.exec_arm_neon_2reg_saturating_narrow(instr, pc, size, !q, false, vd, vm),
             (2, 4) if !q => {
                 if size == 3 || vm & 1 != 0 {
                     return Err(Trap::UndefinedArm { pc, instr });
@@ -1200,9 +1204,7 @@ impl Cpu {
                 Ok(true)
             }
             (2, 0..=3) => self.exec_arm_neon_2reg_permute(instr, pc, size, op2, q, vd, vm),
-            (3, 10 | 11) => {
-                self.exec_arm_neon_2reg_recip_estimate(instr, pc, size, op2 == 11, q, vd, vm)
-            }
+            (3, 8..=11) => self.exec_arm_neon_2reg_recip_estimate(instr, pc, size, op2, q, vd, vm),
             (3, 12..=15) => {
                 self.exec_arm_neon_2reg_convert_integer(instr, pc, size, op2, q, vd, vm)
             }
@@ -1278,7 +1280,7 @@ impl Cpu {
         instr: u32,
         pc: u32,
         size: usize,
-        rsqrt: bool,
+        op2: u32,
         q: bool,
         vd: usize,
         vm: usize,
@@ -1296,18 +1298,67 @@ impl Cpu {
             self.check_dreg(vm + 1)?;
         }
 
+        let float = op2 >= 10;
+        let rsqrt = op2 & 1 != 0;
         let src = self.neon_reg_bytes(vm, q);
         let mut out = [0u8; 16];
         for lane in 0..(if q { 4 } else { 2 }) {
-            let value = f32::from_bits(neon_read_elem(&src, lane, 2) as u32);
-            let result = if rsqrt {
-                1.0f32 / value.sqrt()
+            let value = neon_read_elem(&src, lane, 2) as u32;
+            let result = if float {
+                let value = f32::from_bits(value);
+                if rsqrt {
+                    (1.0f32 / value.sqrt()).to_bits()
+                } else {
+                    (1.0f32 / value).to_bits()
+                }
+            } else if rsqrt {
+                neon_rsqrte_u32(value)
             } else {
-                1.0f32 / value
+                neon_recpe_u32(value)
             };
-            neon_write_elem(&mut out, lane, 2, u64::from(result.to_bits()));
+            neon_write_elem(&mut out, lane, 2, u64::from(result));
         }
         self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_2reg_saturating_narrow(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        size: usize,
+        signed_input: bool,
+        unsigned_result: bool,
+        vd: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if size == 3 || vm & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        self.check_dreg(vm + 1)?;
+
+        let src = self.neon_reg_bytes(vm, true);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        for lane in 0..(8 >> size) {
+            let value = neon_read_elem(&src, lane, wide_size);
+            let result = if unsigned_result {
+                self.neon_saturating_narrow_to_unsigned(value, size, signed_input)
+            } else if signed_input {
+                self.neon_saturating_narrow_to_signed(value, size)
+            } else {
+                self.neon_saturating_narrow_unsigned_to_signed(value, size)
+            };
+            neon_write_elem(&mut out, lane, size, result);
+        }
+
+        self.set_dreg_bits(
+            vd,
+            u64::from_le_bytes(out[..8].try_into().expect("saturating narrow dreg")),
+        );
         Ok(true)
     }
 
@@ -2351,11 +2402,39 @@ impl Cpu {
         }
 
         let subop = size >> 1;
+        if q && ((opcode == 13 && u && subop == 0 && !op) || (opcode == 15 && u && !op)) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
         let lhs = self.neon_reg_bytes(vn, q);
         let rhs = self.neon_reg_bytes(vm, q);
         let old_dst = self.neon_reg_bytes(vd, q);
         let mut out = [0u8; 16];
         let lanes = if q { 4 } else { 2 };
+
+        if opcode == 13 && u && subop == 0 && !op {
+            let left0 = f32::from_bits(neon_read_elem(&lhs, 0, 2) as u32);
+            let left1 = f32::from_bits(neon_read_elem(&lhs, 1, 2) as u32);
+            let right0 = f32::from_bits(neon_read_elem(&rhs, 0, 2) as u32);
+            let right1 = f32::from_bits(neon_read_elem(&rhs, 1, 2) as u32);
+            neon_write_elem(&mut out, 0, 2, u64::from((left0 + left1).to_bits()));
+            neon_write_elem(&mut out, 1, 2, u64::from((right0 + right1).to_bits()));
+            self.set_neon_reg_bytes(vd, false, out);
+            return Ok(true);
+        }
+
+        if opcode == 15 && u && !op {
+            let max = subop == 0;
+            let pair = |a: f32, b: f32| if max { a.max(b) } else { a.min(b) };
+            let left0 = f32::from_bits(neon_read_elem(&lhs, 0, 2) as u32);
+            let left1 = f32::from_bits(neon_read_elem(&lhs, 1, 2) as u32);
+            let right0 = f32::from_bits(neon_read_elem(&rhs, 0, 2) as u32);
+            let right1 = f32::from_bits(neon_read_elem(&rhs, 1, 2) as u32);
+            neon_write_elem(&mut out, 0, 2, u64::from(pair(left0, left1).to_bits()));
+            neon_write_elem(&mut out, 1, 2, u64::from(pair(right0, right1).to_bits()));
+            self.set_neon_reg_bytes(vd, false, out);
+            return Ok(true);
+        }
 
         for lane in 0..lanes {
             let a_bits = neon_read_elem(&lhs, lane, 2) as u32;
@@ -2372,6 +2451,7 @@ impl Cpu {
                 (13, false, 0, true) => (d + a * b).to_bits(),
                 (13, false, 1, true) => (d - a * b).to_bits(),
                 (13, true, 0, true) => (a * b).to_bits(),
+                (13, true, 1, false) => (a - b).abs().to_bits(),
                 (14, false, 0, false) => neon_f32_compare(a == b),
                 (14, true, 0, false) => neon_f32_compare(a >= b),
                 (14, true, 1, false) => neon_f32_compare(a > b),
@@ -6162,6 +6242,16 @@ impl Cpu {
         (raw.clamp(min, max) as i64 as u64) & neon_elem_mask(size)
     }
 
+    fn neon_saturating_narrow_unsigned_to_signed(&mut self, value: u64, size: usize) -> u64 {
+        let bits = neon_elem_bits(size);
+        let max = (1u128 << (bits - 1)) - 1;
+        let raw = u128::from(value & neon_elem_mask(size + 1));
+        if raw > max {
+            self.cpsr.q = true;
+        }
+        raw.min(max) as u64
+    }
+
     fn checked_dreg_bits(&self, idx: usize) -> Result<u64> {
         self.check_dreg(idx)?;
         Ok(self.dreg_bits(idx))
@@ -7925,6 +8015,44 @@ fn neon_f32_compare(value: bool) -> u32 {
     if value { u32::MAX } else { 0 }
 }
 
+fn neon_recip_estimate(input: u32) -> u32 {
+    debug_assert!((256..512).contains(&input));
+    let a = input * 2 + 1;
+    let b = (1 << 19) / a;
+    (b + 1) >> 1
+}
+
+fn neon_recip_sqrt_estimate(mut input: u32) -> u32 {
+    debug_assert!((128..512).contains(&input));
+    if input < 256 {
+        input = input * 2 + 1;
+    } else {
+        input = ((input >> 1) << 1).wrapping_add(1) * 2;
+    }
+
+    let mut b = 512u32;
+    while u64::from(input) * u64::from(b + 1) * u64::from(b + 1) < (1u64 << 28) {
+        b += 1;
+    }
+    (b + 1) / 2
+}
+
+fn neon_recpe_u32(value: u32) -> u32 {
+    if value & 0x8000_0000 == 0 {
+        return u32::MAX;
+    }
+
+    neon_recip_estimate((value >> 23) & 0x1ff) << 23
+}
+
+fn neon_rsqrte_u32(value: u32) -> u32 {
+    if value & 0xc000_0000 == 0 {
+        return u32::MAX;
+    }
+
+    neon_recip_sqrt_estimate((value >> 23) & 0x1ff) << 23
+}
+
 fn thumb_is_32bit_prefix(instr: u16) -> bool {
     matches!(instr & 0xf800, 0xe800 | 0xf000 | 0xf800)
 }
@@ -8972,6 +9100,44 @@ mod tests {
         .unwrap(); // vmla.f32 d6, d4, d5
         assert_eq!(f32::from_bits(cpu.sreg(12)), 13.75);
         assert_eq!(f32::from_bits(cpu.sreg(13)), 4.0);
+
+        cpu.set_dreg(4, pack2(1.0, 2.5));
+        cpu.set_dreg(5, pack2(10.0, -3.0));
+        cpu.execute_arm(
+            enc_neon_3same(true, 0, 4, 7, 13, false, false, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vpadd.f32 d7, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(14)), 3.5);
+        assert_eq!(f32::from_bits(cpu.sreg(15)), 7.0);
+
+        cpu.execute_arm(
+            enc_neon_3same(true, 2, 4, 8, 13, false, false, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vabd.f32 d8, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(16)), 9.0);
+        assert_eq!(f32::from_bits(cpu.sreg(17)), 5.5);
+
+        cpu.execute_arm(
+            enc_neon_3same(true, 0, 4, 9, 15, false, false, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vpmax.f32 d9, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(18)), 2.5);
+        assert_eq!(f32::from_bits(cpu.sreg(19)), 10.0);
+
+        cpu.execute_arm(
+            enc_neon_3same(true, 2, 4, 10, 15, false, false, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vpmin.f32 d10, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(20)), 1.0);
+        assert_eq!(f32::from_bits(cpu.sreg(21)), -3.0);
     }
 
     #[test]
@@ -9316,6 +9482,28 @@ mod tests {
 
         cpu.set_dreg(
             14,
+            u64::from(0x8000_0000u32) | (u64::from(0x4000_0000u32) << 32),
+        );
+        cpu.execute_arm(enc_neon_2reg_misc(15, 2, 3, 8, false, 14), 0, &mut mem)
+            .unwrap(); // vrecpe.u32 d15, d14
+        assert_eq!(
+            cpu.dreg(15),
+            u64::from(0xff80_0000u32) | (u64::from(u32::MAX) << 32)
+        );
+
+        cpu.set_dreg(
+            16,
+            u64::from(0x8000_0000u32) | (u64::from(0x2000_0000u32) << 32),
+        );
+        cpu.execute_arm(enc_neon_2reg_misc(17, 2, 3, 9, false, 16), 0, &mut mem)
+            .unwrap(); // vrsqrte.u32 d17, d16
+        assert_eq!(
+            cpu.dreg(17),
+            u64::from(0xb480_0000u32) | (u64::from(u32::MAX) << 32)
+        );
+
+        cpu.set_dreg(
+            14,
             u64::from(2.0f32.to_bits()) | (u64::from(4.0f32.to_bits()) << 32),
         );
         cpu.execute_arm(enc_neon_2reg_misc(15, 2, 3, 10, false, 14), 0, &mut mem)
@@ -9354,6 +9542,49 @@ mod tests {
             cpu.dreg(21),
             u64::from((-3.0f32).to_bits()) | (u64::from(10.0f32.to_bits()) << 32)
         );
+
+        let pack_i16x8 = |values: [i16; 8]| {
+            let mut bytes = [0u8; 16];
+            for (idx, value) in values.into_iter().enumerate() {
+                bytes[idx * 2..idx * 2 + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            [
+                u64::from_le_bytes(bytes[..8].try_into().expect("low q half")),
+                u64::from_le_bytes(bytes[8..].try_into().expect("high q half")),
+            ]
+        };
+        let q = pack_i16x8([-1, 0, 127, 128, 255, 300, -300, i16::MIN]);
+        cpu.cpsr.q = false;
+        cpu.set_dreg(24, q[0]);
+        cpu.set_dreg(25, q[1]);
+        cpu.execute_arm(enc_neon_2reg_misc(22, 0, 2, 4, true, 24), 0, &mut mem)
+            .unwrap(); // vqmovun.s16 d22, q12
+        assert_eq!(
+            cpu.dreg(22),
+            u64::from_le_bytes([0, 0, 127, 128, 255, 255, 0, 0])
+        );
+        assert!(cpu.cpsr.q);
+
+        cpu.cpsr.q = false;
+        cpu.execute_arm(enc_neon_2reg_misc(23, 0, 2, 5, false, 24), 0, &mut mem)
+            .unwrap(); // vqmovn.s16 d23, q12
+        assert_eq!(
+            cpu.dreg(23),
+            u64::from_le_bytes([0xff, 0, 0x7f, 0x7f, 0x7f, 0x7f, 0x80, 0x80])
+        );
+        assert!(cpu.cpsr.q);
+
+        let q = pack_i16x8([0, 1, 127, 128, 255, 300, -1, 42]);
+        cpu.cpsr.q = false;
+        cpu.set_dreg(24, q[0]);
+        cpu.set_dreg(25, q[1]);
+        cpu.execute_arm(enc_neon_2reg_misc(24, 0, 2, 5, true, 24), 0, &mut mem)
+            .unwrap(); // vqmovn.u16 d24, q12
+        assert_eq!(
+            cpu.dreg(24),
+            u64::from_le_bytes([0, 1, 127, 127, 127, 127, 127, 42])
+        );
+        assert!(cpu.cpsr.q);
 
         cpu.cpsr.q = false;
         cpu.set_dreg(6, u64::from_le_bytes([0x80, 0xff, 0x7f, 0x01, 0, 0, 0, 0]));
