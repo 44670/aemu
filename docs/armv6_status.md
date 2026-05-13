@@ -127,7 +127,7 @@ CPU work.
   saturating doubling multiply-long forms, pairwise integer min/max,
   64-bit-lane `VQADD`/`VQSUB`, `VQDMULH`/`VQRDMULH`, ARM-style
   `VRECPE`/`VRSQRTE` reciprocal estimates, `VRECPS`/`VRSQRTS` reciprocal
-  step operations, vector `VABS`/`VNEG`, and
+  step operations, vector `VABS`/`VNEG`, vector `VFMA`/`VFMS`, and
   MCPE-hot F32 scalar-lane `VMLA`/`VMLS`/`VMUL` Thumb-2 encodings with QEMU
   oracle coverage
 - Runtime HLE now reports ARMv7 NEON/VFPv3/VFP-D32 capability through

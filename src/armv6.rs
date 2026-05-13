@@ -2466,8 +2466,8 @@ impl Cpu {
             let b = f32::from_bits(b_bits);
             let d = f32::from_bits(d_bits);
             let bits = match (opcode, u, subop, op) {
-                (12, false, 0, true) => d.mul_add(a, b).to_bits(),
-                (12, false, 1, true) => d.mul_add(a, -b).to_bits(),
+                (12, false, 0, true) => a.mul_add(b, d).to_bits(),
+                (12, false, 1, true) => (-a).mul_add(b, d).to_bits(),
                 (13, false, 0, false) => (a + b).to_bits(),
                 (13, false, 1, false) => (a - b).to_bits(),
                 (13, false, 0, true) => (d + a * b).to_bits(),
@@ -9481,6 +9481,26 @@ mod tests {
         .unwrap(); // vmla.f32 d6, d4, d5
         assert_eq!(f32::from_bits(cpu.sreg(12)), 13.75);
         assert_eq!(f32::from_bits(cpu.sreg(13)), 4.0);
+
+        cpu.set_dreg(6, pack2(10.0, 10.0));
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 4, 6, 12, false, true, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vfma.f32 d6, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(12)), 13.75);
+        assert_eq!(f32::from_bits(cpu.sreg(13)), 4.0);
+
+        cpu.set_dreg(6, pack2(10.0, 10.0));
+        cpu.execute_arm(
+            enc_neon_3same(false, 2, 4, 6, 12, false, true, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vfms.f32 d6, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(12)), 6.25);
+        assert_eq!(f32::from_bits(cpu.sreg(13)), 16.0);
 
         cpu.set_dreg(4, pack2(1.0, 2.5));
         cpu.set_dreg(5, pack2(10.0, -3.0));

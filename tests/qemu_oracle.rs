@@ -6120,6 +6120,62 @@ fn qemu_oracle_neon_reciprocal_estimate_f32_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_neon_vfma_vfms_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_vfma\n\
+         ldr r6, =out_vfma\n\
+         vld1.32 {d4}, [r5]!\n\
+         vld1.32 {d5}, [r5]!\n\
+         vld1.32 {d6}, [r5]!\n\
+         .inst 0xf2046c15\n\
+         vst1.32 {d6}, [r6]!\n\
+         vld1.32 {d4}, [r5]!\n\
+         vld1.32 {d5}, [r5]!\n\
+         vld1.32 {d6}, [r5]\n\
+         .inst 0xf2246c15\n\
+         vst1.32 {d6}, [r6]\n\
+         ldr r5, =out_vfma\n\
+         mov r0, #0\n\
+         .rept 4\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_vfma: .word 0x3fc00000, 0x40000000, 0x40200000, 0xc0400000, 0x41200000, 0x41200000\n\
+                      .word 0x3fc00000, 0x40000000, 0x40200000, 0xc0400000, 0x41200000, 0x41200000\n\
+         out_vfma: .space 16\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(4, pack2(1.5, 2.0));
+    cpu.set_dreg(5, pack2(2.5, -3.0));
+    cpu.set_dreg(6, pack2(10.0, 10.0));
+    cpu.execute_arm(0xf204_6c15, 0, &mut mem).unwrap(); // vfma.f32 d6, d4, d5
+    let vfma = cpu.dreg(6);
+
+    cpu.set_dreg(4, pack2(1.5, 2.0));
+    cpu.set_dreg(5, pack2(2.5, -3.0));
+    cpu.set_dreg(6, pack2(10.0, 10.0));
+    cpu.execute_arm(0xf224_6c15, 0, &mut mem).unwrap(); // vfms.f32 d6, d4, d5
+    let vfms = cpu.dreg(6);
+
+    assert_eq!(f32::from_bits(vfma as u32), 13.75);
+    assert_eq!(f32::from_bits((vfma >> 32) as u32), 4.0);
+    assert_eq!(f32::from_bits(vfms as u32), 6.25);
+    assert_eq!(f32::from_bits((vfms >> 32) as u32), 16.0);
+
+    let folded = (vfma as u32) ^ ((vfma >> 32) as u32) ^ (vfms as u32) ^ ((vfms >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_neon_vcvt_fpscr_flags_match_interpreter() {
     let asm = neon_oracle_program(
         "mov r3, #0\n\
