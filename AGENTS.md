@@ -200,6 +200,8 @@ Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,
 client attribute/index staging, framebuffer readback, and GL error accounting.
+`HleRuntime::set_apk_bytes` lets browser-fed APK bytes satisfy Android asset
+reads without relying on a host filesystem path.
 
 ## Guest Addressing
 

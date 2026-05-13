@@ -127,7 +127,9 @@ useful, but it does not replace the browser WebGL backend.
    host replays the first-swap stream, submits all 744 indexed draws, reads back
    nonzero RGB/alpha pixels, and reports zero host GL errors. A wasm-only WebGL
    replay host now compiles and mirrors the SDL2 guest object/state mapping; a
-   full browser harness is still pending.
+   full browser harness is still pending. APK linking and Android asset reads
+   both have byte-backed paths, so browser code does not need a host filesystem
+   path for native libraries or `AAssetManager_open`.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach

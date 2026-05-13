@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::armv6::{Cpu, Memory};
-use crate::zip_probe::read_zip_entry;
+use crate::zip_probe::{extract_zip_entry, read_zip_entry};
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 
@@ -322,6 +322,7 @@ pub struct HleRuntime {
     allocations: Vec<HleAllocation>,
     freed: Vec<HleAllocation>,
     apk_path: Option<PathBuf>,
+    apk_bytes: Option<Vec<u8>>,
     assets: Vec<AndroidAsset>,
     next_gl_name: u32,
     gl_shaders: Vec<GlShader>,
@@ -729,6 +730,7 @@ impl HleRuntime {
             allocations: Vec::new(),
             freed: Vec::new(),
             apk_path: None,
+            apk_bytes: None,
             assets: Vec::new(),
             next_gl_name: 1,
             gl_shaders: Vec::new(),
@@ -757,6 +759,10 @@ impl HleRuntime {
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
+    }
+
+    pub fn set_apk_bytes(&mut self, apk_bytes: Vec<u8>) {
+        self.apk_bytes = Some(apk_bytes);
     }
 
     pub fn set_unwind_tables(&mut self, unwind_tables: Vec<HleUnwindTable>) {
@@ -2965,16 +2971,16 @@ impl HleRuntime {
         match name {
             "AAssetManager_open" => {
                 let path = load_c_string(memory, cpu.reg(1), 1024)?;
-                let Some(apk_path) = self.apk_path.as_ref() else {
+                if self.apk_path.is_none() && self.apk_bytes.is_none() {
                     trace_android_asset(format_args!(
-                        "AAssetManager_open path={path:?} failed: no APK path"
+                        "AAssetManager_open path={path:?} failed: no APK path or bytes"
                     ));
                     return Ok(self.return32(cpu, 0));
-                };
+                }
                 let mut last_err = None;
                 let mut loaded = None;
                 for entry_name in android_asset_entry_candidates(&path) {
-                    match read_zip_entry(apk_path, &entry_name) {
+                    match self.read_apk_asset_entry(&entry_name) {
                         Ok(bytes) => {
                             loaded = Some((entry_name, bytes));
                             break;
@@ -3041,6 +3047,16 @@ impl HleRuntime {
             }
             _ => self.dispatch_stub(name, HleCallBehavior::ReturnZero, cpu, memory),
         }
+    }
+
+    fn read_apk_asset_entry(&self, entry_name: &str) -> Result<Vec<u8>, String> {
+        if let Some(apk_bytes) = self.apk_bytes.as_deref() {
+            return extract_zip_entry(apk_bytes, entry_name).map_err(|err| err.to_string());
+        }
+        let Some(apk_path) = self.apk_path.as_ref() else {
+            return Err("no APK path or bytes".to_string());
+        };
+        read_zip_entry(apk_path, entry_name).map_err(|err| err.to_string())
     }
 
     fn egl<M: Memory>(
@@ -7631,6 +7647,39 @@ mod tests {
         assert_eq!(cpu.reg(0), 0);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dispatches_android_asset_manager_reads_in_memory_apk_entries() {
+        let apk_bytes = stored_zip_with_one_file("assets/config/options.txt", b"gfx=webgl");
+
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        memory.load_bytes(0x1100, b"config/options.txt\0").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+        hle.set_apk_bytes(apk_bytes);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 3);
+        hle.dispatch("AAssetManager_open", &mut cpu, &mut memory)
+            .unwrap();
+        let asset = cpu.reg(0);
+        assert_ne!(asset, 0);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, asset);
+        hle.dispatch("AAsset_getBuffer", &mut cpu, &mut memory)
+            .unwrap();
+        let buffer = cpu.reg(0);
+        let mut loaded = Vec::new();
+        for idx in 0..9 {
+            loaded.push(memory.load8(buffer + idx).unwrap());
+        }
+        assert_eq!(loaded, b"gfx=webgl");
     }
 
     #[test]
