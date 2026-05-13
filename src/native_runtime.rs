@@ -1967,6 +1967,7 @@ fn trace_bytes_match_env(name: &str, bytes: &[u8]) -> bool {
 enum HleTraceFilter {
     All,
     Contains(String),
+    Any(Vec<String>),
 }
 
 impl HleTraceFilter {
@@ -1974,19 +1975,34 @@ impl HleTraceFilter {
         match self {
             Self::All => true,
             Self::Contains(needle) => name.contains(needle),
+            Self::Any(needles) => needles.iter().any(|needle| name.contains(needle)),
         }
     }
 }
 
 fn parse_trace_hle_filter() -> Option<HleTraceFilter> {
     let raw = std::env::var("AEMU_TRACE_HLE").ok()?;
+    parse_trace_hle_filter_raw(&raw)
+}
+
+fn parse_trace_hle_filter_raw(raw: &str) -> Option<HleTraceFilter> {
     let raw = raw.trim();
     if raw.is_empty() {
         None
     } else if raw == "*" {
         Some(HleTraceFilter::All)
     } else {
-        Some(HleTraceFilter::Contains(raw.to_string()))
+        let needles = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        match needles.as_slice() {
+            [] => None,
+            [needle] => Some(HleTraceFilter::Contains(needle.clone())),
+            _ => Some(HleTraceFilter::Any(needles)),
+        }
     }
 }
 
@@ -2071,6 +2087,14 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_multi_hle_trace_filter() {
+        let filter = parse_trace_hle_filter_raw("glDraw, eglSwap").unwrap();
+        assert!(filter.matches("glDrawElements"));
+        assert!(filter.matches("eglSwapBuffers"));
+        assert!(!filter.matches("glBindTexture"));
     }
 
     #[test]
