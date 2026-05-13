@@ -121,10 +121,10 @@ CPU work.
   operations, modified immediates, multiple-structure `VLD`/`VST`,
   single-structure lane and all-lanes `VLD`/`VST`, `VTBL`/`VTBX`, `VEXT`,
   `VDUP`, `VREV`, `VTRN`/`VUZP`/`VZIP`, immediate and register shifts,
-  narrowing shifts, widening/narrowing moves, 3-different-length
-  add/sub/absolute-difference/multiply-long families, saturating doubling
-  multiply-long forms, pairwise integer min/max, `VQDMULH`/`VQRDMULH`, and
-  vector `VABS`/`VNEG`
+  rounded and saturating narrowing shifts, widening/narrowing moves,
+  3-different-length add/sub/absolute-difference/multiply-long families,
+  saturating doubling multiply-long forms, pairwise integer min/max,
+  `VQDMULH`/`VQRDMULH`, and vector `VABS`/`VNEG`
 - Runtime HLE now reports ARMv7 NEON/VFPv3/VFP-D32 capability through
   `getauxval(AT_HWCAP)` while keeping `AT_HWCAP2` zero to avoid selecting
   ARMv8 crypto instructions before those are implemented.

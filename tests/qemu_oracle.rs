@@ -5278,6 +5278,37 @@ fn qemu_oracle_neon_register_shift_counts_use_low_byte() {
 }
 
 #[test]
+fn qemu_oracle_neon_rounding_narrow_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_qrshrun\n\
+         vld1.64 {d20, d21}, [r5]\n\
+         vqrshrun.s64 d23, q10, #1\n\
+         ldr r5, =out_neon_qrshrun\n\
+         vst1.64 {d23}, [r5]\n\
+         ldr r0, [r5]\n\
+         ldr r1, [r5, #4]\n\
+         eor r0, r0, r1\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_qrshrun: .quad -3, 0x00000001ffffffff\n\
+         out_neon_qrshrun: .space 8\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(20, (-3i64) as u64);
+    cpu.set_dreg(21, 0x0000_0001_ffff_ffff);
+    cpu.execute_arm(0xf3ff_7874, 0, &mut mem).unwrap(); // vqrshrun.s64 d23, q10, #1
+
+    let folded = (cpu.dreg(23) as u32) ^ ((cpu.dreg(23) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_neon_unsigned_halving_subtract_matches_interpreter() {
     let asm = neon_oracle_program(
         "ldr r5, =values_hsub_a\n\

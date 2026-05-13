@@ -787,7 +787,7 @@ impl Cpu {
         }
 
         if matches!(opcode, 8 | 9) {
-            return self.exec_arm_neon_2reg_shift_narrow(instr, pc, u, imm6, vd, opcode, l, q, vm);
+            return self.exec_arm_neon_2reg_shift_narrow(instr, pc, u, imm6, vd, opcode, q, vm);
         }
 
         let right_shift = matches!(opcode, 0..=4);
@@ -901,12 +901,8 @@ impl Cpu {
         vd: usize,
         opcode: u8,
         rounding: bool,
-        q: bool,
         vm: usize,
     ) -> Result<bool> {
-        if q {
-            return Ok(false);
-        }
         let Some((size, shift)) = neon_decode_shift_imm(true, false, imm6) else {
             return Ok(false);
         };
@@ -9906,6 +9902,13 @@ mod tests {
         )
         .unwrap(); // vqshrun.s64 d7, q8, #1
         assert_eq!(cpu.dreg(7), 1);
+        assert!(cpu.cpsr.q);
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(20, (-3i64) as u64);
+        cpu.set_dreg(21, 0x0000_0001_ffff_ffff);
+        cpu.execute_arm(0xf3ff_7874, 0, &mut mem).unwrap(); // vqrshrun.s64 d23, q10, #1
+        assert_eq!(cpu.dreg(23), 0xffff_ffff_0000_0000);
         assert!(cpu.cpsr.q);
 
         let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
