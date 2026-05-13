@@ -1792,7 +1792,7 @@ impl Cpu {
         if matches!(opcode, 3 | 6 | 7) && size == 3 {
             return Err(Trap::UndefinedArm { pc, instr });
         }
-        if matches!(opcode, 0 | 2) && size == 3 {
+        if matches!(opcode, 0 | 2) && !op && size == 3 {
             return Err(Trap::UndefinedArm { pc, instr });
         }
         if opcode == 10 && (size == 3 || q) {
@@ -9213,6 +9213,44 @@ mod tests {
         assert_eq!(cpu.dreg(0), 0x7f7f_8080_0406_1011);
         assert!(cpu.cpsr.q);
 
+        cpu.cpsr.q = false;
+        cpu.set_dreg(1, 0x7fff_ffff_ffff_fffe);
+        cpu.set_dreg(2, 2);
+        cpu.execute_arm(
+            enc_neon_3same(false, 3, 1, 0, 0, false, true, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqadd.s64 d0, d1, d2
+        assert_eq!(cpu.dreg(0), 0x7fff_ffff_ffff_ffff);
+        assert!(cpu.cpsr.q);
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(3, u64::MAX - 1);
+        cpu.set_dreg(4, 5);
+        cpu.execute_arm(
+            enc_neon_3same(true, 3, 3, 5, 0, false, true, 4),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqadd.u64 d5, d3, d4
+        assert_eq!(cpu.dreg(5), u64::MAX);
+        assert!(cpu.cpsr.q);
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(6, 1);
+        cpu.set_dreg(7, 3);
+        cpu.execute_arm(
+            enc_neon_3same(true, 3, 6, 8, 2, false, true, 7),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqsub.u64 d8, d6, d7
+        assert_eq!(cpu.dreg(8), 0);
+        assert!(cpu.cpsr.q);
+
+        cpu.set_dreg(1, 0x7f78_8081_0102_f0f1);
+        cpu.set_dreg(2, 0x010a_ff80_0304_2020);
         cpu.execute_arm(
             enc_neon_3same(false, 0, 1, 3, 3, false, false, 2),
             0,
