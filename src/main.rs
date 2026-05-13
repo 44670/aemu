@@ -96,18 +96,18 @@ fn main() {
             }
         }
         Some("run-apk-native") => {
-            let (path, config, max_steps, launch) = match parse_run_apk_native_args(args.collect())
+            let (path, config, max_steps, options) = match parse_run_apk_native_args(args.collect())
             {
                 Ok(parsed) => parsed,
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap]"
                     );
                     std::process::exit(2);
                 }
             };
-            if let Err(err) = run_apk_native(&path, &config, max_steps, launch) {
+            if let Err(err) = run_apk_native(&path, &config, max_steps, options) {
                 eprintln!("native run failed: {err}");
                 std::process::exit(1);
             }
@@ -121,7 +121,9 @@ fn main() {
             eprintln!("  aemu imports-so <lib.so> [--limit N|--all]");
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
-            eprintln!("  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch]");
+            eprintln!(
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap]"
+            );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -503,9 +505,23 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunApkNativeOptions {
+    launch: bool,
+    until_swap: bool,
+}
+
 fn parse_run_apk_native_args(
     args: Vec<String>,
-) -> Result<(PathBuf, aemu::native_loader::NativeLoadConfig, usize, bool), String> {
+) -> Result<
+    (
+        PathBuf,
+        aemu::native_loader::NativeLoadConfig,
+        usize,
+        RunApkNativeOptions,
+    ),
+    String,
+> {
     let mut iter = args.into_iter();
     let Some(path) = iter.next() else {
         return Err("missing APK path".to_string());
@@ -513,7 +529,10 @@ fn parse_run_apk_native_args(
 
     let mut config = aemu::native_loader::NativeLoadConfig::default();
     let mut max_steps = 100_000usize;
-    let mut launch = false;
+    let mut options = RunApkNativeOptions {
+        launch: false,
+        until_swap: false,
+    };
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--abi" => {
@@ -529,19 +548,23 @@ fn parse_run_apk_native_args(
                     .parse()
                     .map_err(|_| format!("invalid --steps value: {value}"))?;
             }
-            "--launch" => launch = true,
+            "--launch" => options.launch = true,
+            "--until-swap" => {
+                options.launch = true;
+                options.until_swap = true;
+            }
             _ => return Err(format!("unknown run-apk-native argument: {arg}")),
         }
     }
 
-    Ok((PathBuf::from(path), config, max_steps, launch))
+    Ok((PathBuf::from(path), config, max_steps, options))
 }
 
 fn run_apk_native(
     path: &Path,
     config: &aemu::native_loader::NativeLoadConfig,
     max_steps: usize,
-    launch: bool,
+    options: RunApkNativeOptions,
 ) -> Result<(), String> {
     let report = aemu::native_loader::load_apk_native_libraries_with_config(path, config)
         .map_err(|err| format!("link failed: {err}"))?;
@@ -578,8 +601,8 @@ fn run_apk_native(
             })?;
     }
     println!("native constructors completed");
-    if launch {
-        run_native_activity_launch(&mut runtime, max_steps)?;
+    if options.launch {
+        run_native_activity_launch(&mut runtime, max_steps, options.until_swap)?;
     }
     Ok(())
 }
@@ -587,6 +610,7 @@ fn run_apk_native(
 fn run_native_activity_launch(
     runtime: &mut aemu::native_runtime::NativeRuntime,
     max_steps: usize,
+    until_swap: bool,
 ) -> Result<(), String> {
     const ACTIVITY_LIBRARY: &str = "libminecraftpe.so";
     let on_create = runtime
@@ -664,6 +688,25 @@ fn run_native_activity_launch(
         .or_else(|| runtime.symbol_address("android_main"))
         .ok_or_else(|| "missing android_main export".to_string())?;
     println!("launch: android_main {android_main:#010x} android_app {app:#010x}");
+    if until_swap {
+        let outcome = runtime
+            .run_function_with_args_until_hle(
+                android_main,
+                &[app],
+                max_steps,
+                Some("eglSwapBuffers"),
+            )
+            .map_err(|err| format!("android_main failed: {err}"))?;
+        return match outcome {
+            aemu::native_runtime::NativeRuntimeFunctionExit::HleCall { name, step, .. } => {
+                println!("native activity reached {name} at step {step}");
+                Ok(())
+            }
+            aemu::native_runtime::NativeRuntimeFunctionExit::Returned => {
+                Err("android_main returned before eglSwapBuffers".to_string())
+            }
+        };
+    }
     runtime
         .run_function_with_args(android_main, &[app], max_steps)
         .map_err(|err| format!("android_main failed: {err}"))?;

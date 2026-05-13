@@ -142,6 +142,17 @@ pub enum NativeRuntimeStep {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeRuntimeFunctionExit {
+    Returned,
+    HleCall {
+        name: String,
+        address: u32,
+        args: [u32; 4],
+        step: usize,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeRuntimeTraceEntry {
     pub pc: u32,
@@ -855,6 +866,19 @@ impl NativeRuntime {
         args: &[u32],
         max_steps: usize,
     ) -> Result<(), NativeRuntimeError> {
+        match self.run_function_with_args_until_hle(address, args, max_steps, None)? {
+            NativeRuntimeFunctionExit::Returned => Ok(()),
+            NativeRuntimeFunctionExit::HleCall { .. } => Ok(()),
+        }
+    }
+
+    pub fn run_function_with_args_until_hle(
+        &mut self,
+        address: u32,
+        args: &[u32],
+        max_steps: usize,
+        stop_hle_name: Option<&str>,
+    ) -> Result<NativeRuntimeFunctionExit, NativeRuntimeError> {
         for (idx, &value) in args.iter().take(4).enumerate() {
             self.cpu.set_reg(idx, value);
         }
@@ -876,7 +900,7 @@ impl NativeRuntime {
         let mut trace_hle_count = 0usize;
         for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
-                return Ok(());
+                return Ok(NativeRuntimeFunctionExit::Returned);
             }
             if tail.len() == RUN_FUNCTION_TRACE_LEN {
                 tail.pop_front();
@@ -982,6 +1006,14 @@ impl NativeRuntime {
                     }
                     if should_service_threads {
                         self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+                    }
+                    if stop_hle_name.is_some_and(|stop| stop == name) {
+                        return Ok(NativeRuntimeFunctionExit::HleCall {
+                            name,
+                            address: hle_address,
+                            args,
+                            step: step_idx,
+                        });
                     }
                 }
                 Err(source) => {
@@ -2321,6 +2353,54 @@ mod tests {
         );
         assert_eq!(runtime.cpu.reg(0), 5);
         assert_eq!(runtime.cpu.pc(), 0x1234);
+    }
+
+    #[test]
+    fn run_function_can_stop_on_named_hle_call() {
+        let hle_address = 0x6f00_0000;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(hle_address, 0x1000).unwrap();
+        memory.store32(hle_address, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![HleSymbol {
+                name: "eglSwapBuffers".to_string(),
+                address: hle_address,
+                kind: HleSymbolKind::Egl,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::Implemented,
+            }],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+
+        assert_eq!(
+            runtime
+                .run_function_with_args_until_hle(hle_address, &[1, 4], 8, Some("eglSwapBuffers"))
+                .unwrap(),
+            NativeRuntimeFunctionExit::HleCall {
+                name: "eglSwapBuffers".to_string(),
+                address: hle_address,
+                args: [1, 4, 0, 0],
+                step: 0,
+            }
+        );
     }
 
     #[test]

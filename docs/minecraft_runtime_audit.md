@@ -11,6 +11,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 - Native constructors run under the interpreter without unsupported
   instruction traps.
 - The Android lifecycle/native entrypoint can be invoked.
+- A bounded MCPE first-frame probe can stop successfully on the first present.
 - EGL/GLES calls reach a host/WebGL-facing implementation instead of no-op
   placeholders.
 - Input, assets, filesystem, and audio have enough HLE behavior for first
@@ -26,9 +27,11 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | 1:1 guest address map | `src/native_loader.rs`, `src/guest_memory.rs`, `AGENTS.md`. | Satisfied |
 | APK native load/link | `cargo run -- link-apk ... --abi armeabi-v7a` reports loaded and relocated. | Satisfied for local ARMv7 research APK |
 | System import HLE | `src/hle_imports.rs`; local MCPE probe resolves 906 imports with zero unresolved. GLES object-name generation writes texture/buffer/framebuffer/renderbuffer names back to guest memory, GLES shader/program HLE now reflects active uniforms and attributes from MCPE shader source, and the current target facades cover libstdc++ hash helpers, GLES precision/texture-parameter queries, profiler ticks, no-input/gamepad polling, transform interpolation, render-context texture unbind, and no-network social/auth ticks. | Initial coverage |
-| HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address and linked runtime HLE entries such as `__dynamic_cast`. | Initial coverage |
+| HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address and linked runtime HLE entries such as `__dynamic_cast`; `run_function_with_args_until_hle` can now turn a selected HLE call into a bounded success condition. | Initial coverage |
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
-| ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, and MCPE UI render setup without an undefined NEON trap. | Initial coverage |
+| ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
+| Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits successfully after `native activity reached eglSwapBuffers at step 254925219`. | Satisfied for local ARMv7 research APK |
+| Host/WebGL drawing backend | GLES/EGL calls are still HLE facades in `src/hle_imports.rs`; SDL2 shell is not wired to guest GL command replay. | Not satisfied |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
 | Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked for ARMv6 |
@@ -135,14 +138,20 @@ takes the WebGL/GLES2 side of `#if __VERSION__ >= 300`, and filters
 declared-but-unused uniforms so MCPE does not crash in
 `mce::ShaderOGL::reflectShaderUniforms()` on optimized-out metadata.
 
-After this shader reflection work, a swap-filtered 140M-step probe still
-reaches repeated `eglSwapInterval` and `eglSwapBuffers` beginning at about
-82.63M guest steps. A `glDraw`-filtered 220M-step probe does not crash, but it
-still reaches the step cap without any traced `glDrawArrays` or
-`glDrawElements`. The current blocker is therefore advancing from clear/swap
-presentation to real draw submission, not vector instruction decode, import
-resolution, EGL startup, shader reflection, or the former worker-pool coroutine
-loop.
+After adding the MCPE resource bridge, `GameRenderer::render(float)` detects
+the `MinecraftClient + 0x23e` resource-ready gate and calls the target
+`MinecraftClient::onResourcesLoaded()` routine when needed. That native call now
+executes many `glDrawElements` HLE calls, returns, and sets the ready byte to
+`0x01`. The main Android loop then reaches repeated `eglSwapInterval` and
+`eglSwapBuffers` calls. `run-apk-native --until-swap` turns this into a bounded
+exit-0 first-frame probe instead of treating the endless game loop's step cap as
+the only terminator.
+
+The current blocker is no longer instruction decode, import resolution, EGL
+startup, shader reflection, resource readiness, or reaching draw/swap calls. The
+remaining gap is a real host/WebGL-facing GLES command backend; the current
+GLES/EGL path is sufficient for guest control flow, but it does not yet replay
+MCPE draw commands into SDL2 or WebGL pixels.
 
 ## Latest Verification
 
@@ -159,13 +168,11 @@ loop.
 - `cargo test dispatches_minecraft_transform_interpolation`
 - `cargo test dispatches_minecraft_ogl_unbind_all_textures`
 - `cargo test dispatches_no_network_social_tick_facades`
-- `cargo test` with 140 unit/integration-facing tests and 111 QEMU oracle tests
+- `cargo test` with 152 unit/integration-facing tests and 113 QEMU oracle tests
 - `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
 - `cargo check --features sdl2`
-- `AEMU_TRACE_HLE=Swap ... --steps 140000000 --launch` reaches repeated
-  `eglSwapInterval`/`eglSwapBuffers` at about 82.63M guest steps
-- `AEMU_TRACE_HLE=glDraw ... --steps 220000000 --launch` reaches the step cap
-  without a crash and without traced `glDraw*`
+- `cargo build --release`
+- `AEMU_TRACE_MCPE_RESOURCE_BRIDGE=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits 0 after setting `MinecraftClient + 0x23e` to `0x01` and reaching `eglSwapBuffers` at step `254925219`
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
   reports 579 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
 
