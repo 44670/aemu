@@ -84,7 +84,8 @@ Interpreter baseline:
 - ARMv5TE plus ARMv6 user-mode integer instructions
 - ARM state and Thumb-1 state with interworking
 - Target-driven ARMv7-A, Thumb-2, VFPv3, and NEON coverage for local
-  `armeabi-v7a` Minecraft PE probes
+  `armeabi-v7a` Minecraft PE probes, including Thumb-2 NEON decode transforms
+  into the shared A32-style NEON handlers
 - little-endian ARM EABI
 - user-mode condition flags and exceptions needed by native app code
 - helper paths for unaligned memory behavior as target games require

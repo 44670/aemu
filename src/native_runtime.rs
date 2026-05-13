@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 
 use crate::armv6::{Cpu, Isa, Memory, Trap};
@@ -14,6 +15,7 @@ pub const DEFAULT_HEAP_SIZE: usize = 0x0400_0000;
 const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
+const RUN_FUNCTION_TRACE_LEN: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeConfig {
@@ -63,15 +65,35 @@ pub enum NativeRuntimeStep {
     HleCall { name: String, address: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeRuntimeTraceEntry {
+    pub pc: u32,
+    pub isa: Isa,
+    pub lr: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRuntimeError {
     MemoryMap(MappedMemoryError),
     Memory(String),
     AddressOverflow,
     Cpu(Trap),
-    CpuAt { pc: u32, isa: Isa, source: Trap },
-    UnknownHleTrap { pc: u32 },
-    Hle { name: String, source: HleError },
+    CpuAt {
+        pc: u32,
+        isa: Isa,
+        source: Trap,
+    },
+    Traced {
+        source: Box<NativeRuntimeError>,
+        tail: Vec<NativeRuntimeTraceEntry>,
+    },
+    UnknownHleTrap {
+        pc: u32,
+    },
+    Hle {
+        name: String,
+        source: HleError,
+    },
 }
 
 impl fmt::Display for NativeRuntimeError {
@@ -83,6 +105,20 @@ impl fmt::Display for NativeRuntimeError {
             Self::Cpu(err) => write!(f, "{err}"),
             Self::CpuAt { pc, isa, source } => {
                 write!(f, "{source} while executing {isa:?} at {pc:#010x}")
+            }
+            Self::Traced { source, tail } => {
+                write!(f, "{source}")?;
+                if !tail.is_empty() {
+                    write!(f, "\nrecent guest PCs:")?;
+                    for entry in tail {
+                        write!(
+                            f,
+                            "\n  {:?} pc={:#010x} lr={:#010x}",
+                            entry.isa, entry.pc, entry.lr
+                        )?;
+                    }
+                }
+                Ok(())
             }
             Self::UnknownHleTrap { pc } => write!(f, "unknown HLE trap at {pc:#010x}"),
             Self::Hle { name, source } => write!(f, "HLE {name} failed: {source}"),
@@ -209,11 +245,25 @@ impl NativeRuntime {
     ) -> Result<(), NativeRuntimeError> {
         self.cpu.branch_exchange(address);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
+        let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         for _ in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
                 return Ok(());
             }
-            self.step()?;
+            if tail.len() == RUN_FUNCTION_TRACE_LEN {
+                tail.pop_front();
+            }
+            tail.push_back(NativeRuntimeTraceEntry {
+                pc: self.cpu.pc(),
+                isa: self.cpu.isa(),
+                lr: self.cpu.reg(14),
+            });
+            if let Err(source) = self.step() {
+                return Err(NativeRuntimeError::Traced {
+                    source: Box::new(source),
+                    tail: tail.into_iter().collect(),
+                });
+            }
         }
         Err(NativeRuntimeError::Cpu(Trap::StepLimit))
     }

@@ -117,11 +117,14 @@ CPU work.
   `PUSH.W`/`POP.W`, `STM.W`, `STRD`, and common wide `LDR.W`/`STR.W`
   immediate forms
 - Target-driven NEON coverage for the local Minecraft PE probe: D0-D31 vector
-  state, 3-same integer/logic/f32 operations, modified immediates,
-  multiple-structure `VLD`/`VST`, `VTBL`/`VTBX`, `VEXT`, `VDUP`, `VREV`,
-  immediate and register shifts, narrowing shifts, widening/narrowing moves,
-  3-different-length add/sub/absolute-difference/multiply-long families,
-  pairwise integer min/max, `VQDMULH`/`VQRDMULH`, and vector `VABS`/`VNEG`
+  state, Thumb-2-to-A32 NEON decode transforms, 3-same integer/logic/f32
+  operations, modified immediates, multiple-structure `VLD`/`VST`,
+  single-structure lane and all-lanes `VLD`/`VST`, `VTBL`/`VTBX`, `VEXT`,
+  `VDUP`, `VREV`, `VTRN`/`VUZP`/`VZIP`, immediate and register shifts,
+  narrowing shifts, widening/narrowing moves, 3-different-length
+  add/sub/absolute-difference/multiply-long families, saturating doubling
+  multiply-long forms, pairwise integer min/max, `VQDMULH`/`VQRDMULH`, and
+  vector `VABS`/`VNEG`
 - Thumb-1 common instruction set: shifts, ALU ops, high-register ops,
   literal loads, load/store forms, push/pop, multiple load/store,
   including `LDMIA` base-in-list writeback suppression,
@@ -176,7 +179,8 @@ baseline but is now the active ARMv7/NEON research target.
 
 The native constructor probe currently reaches `libminecraftpe.so` init array
 entry `0x70af5491` after completing the earlier `libfmod.so` and
-`libgnustl_shared.so` constructors. The current blocker is a null guest-memory
+`libgnustl_shared.so` constructors. After the Thumb-2 NEON decode and
+structure-transfer milestone, the current blocker remains a null guest-memory
 access while executing Thumb at `0x71ae01fe`, which falls in the
 `libminecraftpe.so` data/vtable region rather than an undefined NEON opcode.
 
