@@ -31,7 +31,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
 | Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits successfully after `native activity reached eglSwapBuffers at step 254925219`. | Satisfied for local ARMv7 research APK |
-| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` replays the first MCPE frame into an SDL2 GLES2 context, submits all 744 captured indexed draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and reports zero host GL errors. WebGL replay is not wired yet. | SDL2 first-frame visual replay satisfied; WebGL pending |
+| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` replays the first MCPE frame into an SDL2 GLES2 context, submits all 744 captured indexed draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and reports zero host GL errors. `src/wasm_webgl.rs` now has a wasm-only WebGL host that mirrors the SDL2 replay state model and compiles for the browser target. | SDL2 first-frame visual replay satisfied; browser harness pending |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
 | Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked for ARMv6 |
@@ -150,9 +150,9 @@ the only terminator.
 The current blocker is no longer instruction decode, import resolution, EGL
 startup, shader reflection, resource readiness, reaching draw/swap calls,
 submitting the first captured MCPE draw stream through SDL2, or producing
-nonblack first-swap host pixels. The remaining graphics gap is a
-browser/WebGL-facing replay backend and visual validation beyond first-swap
-SDL2 readback.
+nonblack first-swap host pixels. The remaining graphics gap is wiring the
+wasm-only WebGL replay host into a browser harness and validating browser
+readback against the same first-swap stream.
 
 The GLES HLE now records frame-relevant calls into a bounded `GlesEvent` queue:
 shader/program creation and linking, active/bound textures, texture upload

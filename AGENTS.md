@@ -196,8 +196,10 @@ first-swap GLES event stream into the SDL2 context after the first guest
 `eglSwapBuffers`. For the local MCPE ARMv7 probe this includes shader/program
 replay, payload-backed textures/buffers/uniforms, client-side vertex attribute
 staging, and all captured indexed draw submissions.
-Browser/WebGL scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains the
-default target for GLES2 guest rendering.
+Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
+the default target for GLES2 guest rendering. The wasm-only host mirrors the
+SDL2 replay state model with guest-to-host GL object maps, payload upload,
+client attribute/index staging, framebuffer readback, and GL error accounting.
 
 ## Guest Addressing
 

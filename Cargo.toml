@@ -6,8 +6,16 @@ edition = "2024"
 [features]
 default = []
 sdl2 = ["dep:sdl2"]
-webgl = []
+webgl = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+js-sys = { version = "0.3", optional = true }
 sdl2 = { version = "0.38", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
