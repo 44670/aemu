@@ -20,6 +20,7 @@ pub enum HleSymbolKind {
     OpenSl,
     Zlib,
     CxxAbi,
+    CxxStd,
 }
 
 impl fmt::Display for HleSymbolKind {
@@ -35,6 +36,7 @@ impl fmt::Display for HleSymbolKind {
             Self::OpenSl => write!(f, "OpenSL"),
             Self::Zlib => write!(f, "zlib"),
             Self::CxxAbi => write!(f, "cxxabi"),
+            Self::CxxStd => write!(f, "c++std"),
         }
     }
 }
@@ -206,6 +208,7 @@ impl HleRuntime {
             "__cxa_guard_acquire" => self.cxa_guard_acquire(cpu, memory),
             "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
             "__cxa_guard_abort" => Ok(self.return32(cpu, 0)),
+            "_ZNSs14_M_replace_auxEjjjc" => self.libstdcxx_string_replace_aux(cpu, memory),
             name if name.starts_with("gl") => self.gles(name, cpu, memory),
             name if name.starts_with("egl") => self.egl(name, cpu, memory),
             _ => self.dispatch_stub(name, descriptor.behavior, cpu, memory),
@@ -587,6 +590,72 @@ impl HleRuntime {
         )?))
     }
 
+    fn libstdcxx_string_replace_aux<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let string = cpu.reg(0);
+        let pos = cpu.reg(1);
+        let erase_len = cpu.reg(2);
+        let insert_len = cpu.reg(3);
+        let ch = load8(memory, cpu.reg(13))?;
+        let data = load32(memory, string)?;
+        let old_len = load32(memory, data.wrapping_sub(12))?;
+        let old_capacity = load32(memory, data.wrapping_sub(8))?;
+        let old_refcount = load32(memory, data.wrapping_sub(4))? as i32;
+
+        let pos = pos.min(old_len);
+        let erase_len = erase_len.min(old_len.saturating_sub(pos));
+        let suffix_pos = pos.wrapping_add(erase_len);
+        let new_len = old_len
+            .checked_sub(erase_len)
+            .and_then(|len| len.checked_add(insert_len))
+            .ok_or(HleError::HeapExhausted {
+                requested: insert_len,
+            })?;
+
+        let mut bytes = Vec::with_capacity(new_len as usize);
+        for idx in 0..pos {
+            bytes.push(load8(memory, data.wrapping_add(idx))?);
+        }
+        bytes.extend(std::iter::repeat(ch).take(insert_len as usize));
+        for idx in suffix_pos..old_len {
+            bytes.push(load8(memory, data.wrapping_add(idx))?);
+        }
+
+        let reuse = old_capacity >= new_len && old_refcount <= 0;
+        let out_data = if reuse {
+            data
+        } else {
+            let doubled = old_capacity.saturating_mul(2);
+            let capacity = new_len.max(doubled).max(15);
+            let allocation = self.alloc(
+                capacity.checked_add(13).ok_or(HleError::HeapExhausted {
+                    requested: capacity,
+                })?,
+                4,
+            )?;
+            store32(memory, allocation, new_len)?;
+            store32(memory, allocation.wrapping_add(4), capacity)?;
+            store32(memory, allocation.wrapping_add(8), 0)?;
+            let out_data = allocation.wrapping_add(12);
+            store32(memory, string, out_data)?;
+            out_data
+        };
+
+        for (idx, byte) in bytes.into_iter().enumerate() {
+            store8(memory, out_data.wrapping_add(idx as u32), byte)?;
+        }
+        store8(memory, out_data.wrapping_add(new_len), 0)?;
+        store32(memory, out_data.wrapping_sub(12), new_len)?;
+        if reuse {
+            store32(memory, out_data.wrapping_sub(4), 0)?;
+        }
+
+        Ok(self.return32(cpu, string))
+    }
+
     fn fill_random<M: Memory>(
         &mut self,
         memory: &mut M,
@@ -816,6 +885,9 @@ fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
     if is_cxxabi_symbol(name) {
         return Some(HleSymbolKind::CxxAbi);
     }
+    if is_libstdcxx_symbol(name) {
+        return Some(HleSymbolKind::CxxStd);
+    }
     if is_libc_symbol(name) {
         return Some(HleSymbolKind::Libc);
     }
@@ -901,6 +973,7 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "__cxa_guard_acquire"
                 | "__cxa_guard_release"
                 | "__cxa_guard_abort"
+                | "_ZNSs14_M_replace_auxEjjjc"
         )
     {
         return HleCallBehavior::Implemented;
@@ -1316,6 +1389,10 @@ fn is_cxxabi_symbol(name: &str) -> bool {
         )
 }
 
+fn is_libstdcxx_symbol(name: &str) -> bool {
+    matches!(name, "_ZNSs14_M_replace_auxEjjjc")
+}
+
 fn init_ctype<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Result<(), HleError> {
     for value in 0..=255u32 {
         let flags = ctype_flags(value as u8, upper);
@@ -1486,6 +1563,7 @@ mod tests {
             "_ctype_",
             "roundf",
             "__gnu_Unwind_Find_exidx",
+            "_ZNSs14_M_replace_auxEjjjc",
         ] {
             assert!(describe_hle_import(name).is_some(), "{name}");
         }
@@ -1537,6 +1615,54 @@ mod tests {
         let new_ptr = cpu.reg(0);
         assert_ne!(new_ptr, old_ptr);
         assert_eq!(memory.load_bytes_for_test(new_ptr, 4), b"rust");
+    }
+
+    #[test]
+    fn dispatches_libstdcxx_string_replace_aux() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+
+        let string = 0x1100;
+        let empty_rep = 0x1200;
+        let empty_data = empty_rep + 12;
+        memory.store32(empty_rep, 0).unwrap();
+        memory.store32(empty_rep + 4, 0).unwrap();
+        memory.store32(empty_rep + 8, 0).unwrap();
+        memory.store32(string, empty_data).unwrap();
+        memory.store8(0x1300, b'4').unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(13, 0x1300);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, string);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 1);
+        let mut hle = HleRuntime::new(0x1000, 0x2000, 0x1000);
+
+        hle.dispatch("_ZNSs14_M_replace_auxEjjjc", &mut cpu, &mut memory)
+            .unwrap();
+        let data = memory.load32(string).unwrap();
+        assert_ne!(data, empty_data);
+        assert_eq!(memory.load32(data - 12).unwrap(), 1);
+        assert_eq!(memory.load32(data - 8).unwrap(), 15);
+        assert_eq!(memory.load_bytes_for_test(data, 2), b"4\0");
+        assert_eq!(cpu.reg(0), string);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+
+        memory.store8(0x1300, b'9').unwrap();
+        cpu.set_reg(14, 0x3001);
+        cpu.set_reg(0, string);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 1);
+        hle.dispatch("_ZNSs14_M_replace_auxEjjjc", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(string).unwrap(), data);
+        assert_eq!(memory.load32(data - 12).unwrap(), 2);
+        assert_eq!(memory.load_bytes_for_test(data, 3), b"94\0");
     }
 
     #[test]

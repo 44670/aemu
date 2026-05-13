@@ -540,7 +540,14 @@ fn resolve_imports(
             if !seen.insert((object.library_name.clone(), import.name.clone())) {
                 continue;
             }
-            if let Some(symbol) = native_by_name.get(import.name.as_str()) {
+            if let Some(symbol) = hle_by_name.get(import.name.as_str()) {
+                resolved.push(ResolvedNativeImport {
+                    library_name: object.library_name.clone(),
+                    name: import.name.clone(),
+                    address: symbol.address,
+                    source: NativeSymbolSource::Hle { kind: symbol.kind },
+                });
+            } else if let Some(symbol) = native_by_name.get(import.name.as_str()) {
                 resolved.push(ResolvedNativeImport {
                     library_name: object.library_name.clone(),
                     name: import.name.clone(),
@@ -548,13 +555,6 @@ fn resolve_imports(
                     source: NativeSymbolSource::Native {
                         library_name: symbol.library_name.clone(),
                     },
-                });
-            } else if let Some(symbol) = hle_by_name.get(import.name.as_str()) {
-                resolved.push(ResolvedNativeImport {
-                    library_name: object.library_name.clone(),
-                    name: import.name.clone(),
-                    address: symbol.address,
-                    source: NativeSymbolSource::Hle { kind: symbol.kind },
                 });
             } else {
                 unresolved.push(UnresolvedNativeImport {
@@ -698,6 +698,65 @@ mod tests {
             report.memory.load32(game_bias + 0x708).unwrap(),
             game_bias + 0x44
         );
+    }
+
+    #[test]
+    fn hle_symbols_override_native_exports_for_selected_runtime_helpers() {
+        let cxx_name = "_ZNSs14_M_replace_auxEjjjc";
+        let support = test_so(&[], &[], &[(cxx_name, 0x1200)], &[]);
+        let game = test_so(
+            &["libsupport.so"],
+            &[cxx_name],
+            &[],
+            &[TestRelocation {
+                offset: 0x700,
+                symbol: Some(cxx_name),
+                kind: 21,
+                addend: 0,
+            }],
+        );
+        let apk = zip_with_files(&[
+            ("lib/armeabi/libgame.so", game),
+            ("lib/armeabi/libsupport.so", support),
+        ]);
+
+        let mut report = load_apk_native_libraries_bytes(
+            PathBuf::from("game.apk"),
+            &apk,
+            &NativeLoadConfig::default(),
+        )
+        .unwrap();
+
+        let native_addr = report
+            .global_symbols
+            .iter()
+            .find(|symbol| symbol.name == cxx_name)
+            .unwrap()
+            .address;
+        let hle_addr = report
+            .hle_symbols
+            .iter()
+            .find(|symbol| symbol.name == cxx_name)
+            .unwrap()
+            .address;
+        assert_ne!(hle_addr, native_addr);
+
+        let game_bias = report
+            .objects
+            .iter()
+            .find(|object| object.library_name == "libgame.so")
+            .unwrap()
+            .load_bias;
+        assert_eq!(report.memory.load32(game_bias + 0x700).unwrap(), hle_addr);
+        assert!(report.resolved_imports.iter().any(|import| {
+            import.name == cxx_name
+                && matches!(
+                    import.source,
+                    NativeSymbolSource::Hle {
+                        kind: HleSymbolKind::CxxStd
+                    }
+                )
+        }));
     }
 
     #[test]
