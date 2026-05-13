@@ -523,6 +523,7 @@ impl HleRuntime {
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
                 self.minecraft_texture_group_get_texture_pair(cpu, memory)
             }
+            "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation" => Ok(self.return32(cpu, 1)),
             "_ZN13GeometryGroup11getGeometryERKSs" | "_ZN13GeometryGroup14tryGetGeometryERKSs" => {
                 self.minecraft_geometry_group_get_geometry(cpu, memory)
             }
@@ -3026,6 +3027,7 @@ fn is_target_symbol(name: &str) -> bool {
         "_ZN8WebTokenC1ERKS_"
             | "_ZN8WebTokenC2ERKS_"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
+            | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
             | "_ZN13GeometryGroup11getGeometryERKSs"
             | "_ZN13GeometryGroup14tryGetGeometryERKSs"
             | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
@@ -5239,6 +5241,34 @@ mod tests {
         .unwrap();
         assert_eq!(cpu.reg(0), pair);
         assert_eq!(cpu.pc(), 0x2004);
+    }
+
+    #[test]
+    fn dispatches_minecraft_texture_group_is_loaded_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 0x1200);
+        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
+
+        let descriptor =
+            describe_hle_import("_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation").unwrap();
+        assert_eq!(descriptor.kind, HleSymbolKind::Target);
+        assert_eq!(descriptor.behavior, HleCallBehavior::Implemented);
+
+        hle.dispatch(
+            "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
     }
 
     #[test]
