@@ -125,11 +125,14 @@ const GL_RGBA: u32 = 0x1908;
 const GL_LUMINANCE: u32 = 0x1909;
 const GL_LUMINANCE_ALPHA: u32 = 0x190a;
 const GL_DEPTH_COMPONENT: u32 = 0x1902;
+const GL_BYTE: u32 = 0x1400;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_SHORT: u32 = 0x1402;
 const GL_UNSIGNED_SHORT: u32 = 0x1403;
 const GL_UNSIGNED_INT: u32 = 0x1405;
 const GL_FLOAT: u32 = 0x1406;
 const GL_INT: u32 = 0x1404;
+const GL_FIXED: u32 = 0x140c;
 const GL_UNSIGNED_SHORT_4_4_4_4: u32 = 0x8033;
 const GL_UNSIGNED_SHORT_5_5_5_1: u32 = 0x8034;
 const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
@@ -157,6 +160,8 @@ const GL_FLOAT_MAT4: u32 = 0x8b5c;
 const GL_SAMPLER_2D: u32 = 0x8b5e;
 const GL_SAMPLER_CUBE: u32 = 0x8b60;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
+const GL_ARRAY_BUFFER: u32 = 0x8892;
+const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const GL_LOW_FLOAT: u32 = 0x8df0;
 const GL_MEDIUM_FLOAT: u32 = 0x8df1;
 const GL_HIGH_FLOAT: u32 = 0x8df2;
@@ -321,6 +326,10 @@ pub struct HleRuntime {
     next_gl_name: u32,
     gl_shaders: Vec<GlShader>,
     gl_programs: Vec<GlProgram>,
+    gl_bound_array_buffer: u32,
+    gl_bound_element_array_buffer: u32,
+    gl_buffers: Vec<GuestGlBuffer>,
+    gl_vertex_attribs: Vec<GuestVertexAttrib>,
     gles_events: VecDeque<GlesEvent>,
     next_fd: u32,
     files: Vec<FakeFile>,
@@ -354,7 +363,41 @@ pub struct HleUnwindTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlesActive {
+    pub name: String,
+    pub size: u32,
+    pub ty: u32,
+    pub location: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlesClientAttribPayload {
+    pub index: u32,
+    pub payload: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GlesEvent {
+    CreateProgram {
+        program: u32,
+    },
+    CreateShader {
+        shader: u32,
+        shader_type: u32,
+    },
+    ShaderSource {
+        shader: u32,
+        source: String,
+    },
+    AttachShader {
+        program: u32,
+        shader: u32,
+    },
+    LinkProgram {
+        program: u32,
+        uniforms: Vec<GlesActive>,
+        attributes: Vec<GlesActive>,
+    },
     ActiveTexture {
         texture: u32,
     },
@@ -503,6 +546,7 @@ pub enum GlesEvent {
         mode: u32,
         first: i32,
         count: i32,
+        client_attribs: Vec<GlesClientAttribPayload>,
     },
     DrawElements {
         mode: u32,
@@ -510,6 +554,7 @@ pub enum GlesEvent {
         ty: u32,
         indices: u32,
         index_payload: Option<Vec<u8>>,
+        client_attribs: Vec<GlesClientAttribPayload>,
     },
     Flush,
     SwapBuffers {
@@ -521,6 +566,11 @@ pub enum GlesEvent {
 impl GlesEvent {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::CreateProgram { .. } => "CreateProgram",
+            Self::CreateShader { .. } => "CreateShader",
+            Self::ShaderSource { .. } => "ShaderSource",
+            Self::AttachShader { .. } => "AttachShader",
+            Self::LinkProgram { .. } => "LinkProgram",
             Self::ActiveTexture { .. } => "ActiveTexture",
             Self::BindBuffer { .. } => "BindBuffer",
             Self::BufferData { .. } => "BufferData",
@@ -563,9 +613,29 @@ impl GlesEvent {
             | Self::TexSubImage2D { payload, .. }
             | Self::UniformVector { payload, .. }
             | Self::UniformMatrix { payload, .. } => payload.as_ref().map_or(0, Vec::len),
-            Self::DrawElements { index_payload, .. } => index_payload.as_ref().map_or(0, Vec::len),
+            Self::DrawArrays { client_attribs, .. } => client_attribs
+                .iter()
+                .map(GlesClientAttribPayload::payload_len)
+                .sum(),
+            Self::DrawElements {
+                index_payload,
+                client_attribs,
+                ..
+            } => {
+                index_payload.as_ref().map_or(0, Vec::len)
+                    + client_attribs
+                        .iter()
+                        .map(GlesClientAttribPayload::payload_len)
+                        .sum::<usize>()
+            }
             _ => 0,
         }
+    }
+}
+
+impl GlesClientAttribPayload {
+    fn payload_len(&self) -> usize {
+        self.payload.as_ref().map_or(0, Vec::len)
     }
 }
 
@@ -595,16 +665,25 @@ struct GlShader {
 struct GlProgram {
     name: u32,
     shaders: Vec<u32>,
-    uniforms: Vec<GlActive>,
-    attributes: Vec<GlActive>,
+    uniforms: Vec<GlesActive>,
+    attributes: Vec<GlesActive>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GlActive {
-    name: String,
-    size: u32,
+struct GuestGlBuffer {
+    name: u32,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestVertexAttrib {
+    index: u32,
+    size: i32,
     ty: u32,
-    location: u32,
+    stride: i32,
+    pointer: u32,
+    array_buffer: u32,
+    enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -654,6 +733,10 @@ impl HleRuntime {
             next_gl_name: 1,
             gl_shaders: Vec::new(),
             gl_programs: Vec::new(),
+            gl_bound_array_buffer: 0,
+            gl_bound_element_array_buffer: 0,
+            gl_buffers: Vec::new(),
+            gl_vertex_attribs: Vec::new(),
             gles_events: VecDeque::new(),
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
@@ -3050,14 +3133,20 @@ impl HleRuntime {
                     uniforms: Vec::new(),
                     attributes: Vec::new(),
                 });
+                self.push_gles_event(GlesEvent::CreateProgram { program: value });
                 Ok(self.return32(cpu, value))
             }
             "glCreateShader" => {
                 let value = self.alloc_gl_name();
+                let shader_type = cpu.reg(0);
                 self.gl_shaders.push(GlShader {
                     name: value,
-                    shader_type: cpu.reg(0),
+                    shader_type,
                     source: String::new(),
+                });
+                self.push_gles_event(GlesEvent::CreateShader {
+                    shader: value,
+                    shader_type,
                 });
                 Ok(self.return32(cpu, value))
             }
@@ -3074,10 +3163,24 @@ impl HleRuntime {
                         program.shaders.push(shader);
                     }
                 }
+                self.push_gles_event(GlesEvent::AttachShader { program, shader });
                 Ok(self.return32(cpu, 0))
             }
             "glLinkProgram" => {
-                self.gl_link_program(cpu.reg(0));
+                let program_name = cpu.reg(0);
+                self.gl_link_program(program_name);
+                if let Some((uniforms, attributes)) = self
+                    .gl_programs
+                    .iter()
+                    .find(|program| program.name == program_name)
+                    .map(|program| (program.uniforms.clone(), program.attributes.clone()))
+                {
+                    self.push_gles_event(GlesEvent::LinkProgram {
+                        program: program_name,
+                        uniforms,
+                        attributes,
+                    });
+                }
                 Ok(self.return32(cpu, 0))
             }
             "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
@@ -3090,6 +3193,22 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBindBuffer" => {
+                match cpu.reg(0) {
+                    GL_ARRAY_BUFFER => self.gl_bound_array_buffer = cpu.reg(1),
+                    GL_ELEMENT_ARRAY_BUFFER => self.gl_bound_element_array_buffer = cpu.reg(1),
+                    _ => {}
+                }
+                if cpu.reg(1) != 0
+                    && !self
+                        .gl_buffers
+                        .iter()
+                        .any(|buffer| buffer.name == cpu.reg(1))
+                {
+                    self.gl_buffers.push(GuestGlBuffer {
+                        name: cpu.reg(1),
+                        data: Vec::new(),
+                    });
+                }
                 self.push_gles_event(GlesEvent::BindBuffer {
                     target: cpu.reg(0),
                     buffer: cpu.reg(1),
@@ -3100,6 +3219,7 @@ impl HleRuntime {
                 let usage = self.stack_arg(cpu, memory, 4)?;
                 let payload = gles_u32_len(cpu.reg(1))
                     .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
+                self.set_guest_buffer_data(cpu.reg(0), cpu.reg(1), payload.as_deref());
                 self.push_gles_event(GlesEvent::BufferData {
                     target: cpu.reg(0),
                     size: cpu.reg(1),
@@ -3112,6 +3232,12 @@ impl HleRuntime {
             "glBufferSubData" => {
                 let payload = gles_u32_len(cpu.reg(2))
                     .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
+                self.set_guest_buffer_sub_data(
+                    cpu.reg(0),
+                    cpu.reg(1),
+                    cpu.reg(2),
+                    payload.as_deref(),
+                );
                 self.push_gles_event(GlesEvent::BufferSubData {
                     target: cpu.reg(0),
                     offset: cpu.reg(1),
@@ -3225,6 +3351,15 @@ impl HleRuntime {
             "glVertexAttribPointer" => {
                 let stride = self.stack_arg(cpu, memory, 4)?;
                 let pointer = self.stack_arg(cpu, memory, 5)?;
+                self.set_guest_vertex_attrib(GuestVertexAttrib {
+                    index: cpu.reg(0),
+                    size: cpu.reg(1) as i32,
+                    ty: cpu.reg(2),
+                    stride: stride as i32,
+                    pointer,
+                    array_buffer: self.gl_bound_array_buffer,
+                    enabled: self.guest_vertex_attrib_enabled(cpu.reg(0)),
+                });
                 self.push_gles_event(GlesEvent::VertexAttribPointer {
                     index: cpu.reg(0),
                     size: cpu.reg(1) as i32,
@@ -3236,6 +3371,7 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glEnableVertexAttribArray" => {
+                self.set_guest_vertex_attrib_enabled(cpu.reg(0), true);
                 self.push_gles_event(GlesEvent::EnableVertexAttribArray { index: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
@@ -3325,22 +3461,42 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glDrawArrays" => {
+                let client_attribs = self.gles_client_attrib_payloads_for_arrays(
+                    memory,
+                    cpu.reg(1) as i32,
+                    cpu.reg(2) as i32,
+                );
                 self.push_gles_event(GlesEvent::DrawArrays {
                     mode: cpu.reg(0),
                     first: cpu.reg(1) as i32,
                     count: cpu.reg(2) as i32,
+                    client_attribs,
                 });
                 Ok(self.return32(cpu, 0))
             }
             "glDrawElements" => {
                 let index_payload = gles_draw_index_payload_len(cpu.reg(1) as i32, cpu.reg(2))
                     .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
+                let element_buffer_index_payload = self.gles_element_buffer_index_payload(
+                    cpu.reg(1) as i32,
+                    cpu.reg(2),
+                    cpu.reg(3),
+                );
+                let client_attribs = self.gles_client_attrib_payloads_for_elements(
+                    memory,
+                    cpu.reg(1) as i32,
+                    cpu.reg(2),
+                    index_payload
+                        .as_deref()
+                        .or(element_buffer_index_payload.as_deref()),
+                );
                 self.push_gles_event(GlesEvent::DrawElements {
                     mode: cpu.reg(0),
                     count: cpu.reg(1) as i32,
                     ty: cpu.reg(2),
                     indices: cpu.reg(3),
                     index_payload,
+                    client_attribs,
                 });
                 Ok(self.return32(cpu, 0))
             }
@@ -3431,6 +3587,178 @@ impl HleRuntime {
         self.gles_events.push_back(event);
     }
 
+    fn set_guest_vertex_attrib(&mut self, attrib: GuestVertexAttrib) {
+        if let Some(slot) = self
+            .gl_vertex_attribs
+            .iter_mut()
+            .find(|item| item.index == attrib.index)
+        {
+            *slot = attrib;
+        } else {
+            self.gl_vertex_attribs.push(attrib);
+        }
+    }
+
+    fn set_guest_vertex_attrib_enabled(&mut self, index: u32, enabled: bool) {
+        if let Some(attrib) = self
+            .gl_vertex_attribs
+            .iter_mut()
+            .find(|item| item.index == index)
+        {
+            attrib.enabled = enabled;
+        } else {
+            self.gl_vertex_attribs.push(GuestVertexAttrib {
+                index,
+                size: 4,
+                ty: GL_FLOAT,
+                stride: 0,
+                pointer: 0,
+                array_buffer: 0,
+                enabled,
+            });
+        }
+    }
+
+    fn guest_vertex_attrib_enabled(&self, index: u32) -> bool {
+        self.gl_vertex_attribs
+            .iter()
+            .find(|item| item.index == index)
+            .is_some_and(|attrib| attrib.enabled)
+    }
+
+    fn bound_guest_buffer(&self, target: u32) -> u32 {
+        match target {
+            GL_ARRAY_BUFFER => self.gl_bound_array_buffer,
+            GL_ELEMENT_ARRAY_BUFFER => self.gl_bound_element_array_buffer,
+            _ => 0,
+        }
+    }
+
+    fn set_guest_buffer_data(&mut self, target: u32, size: u32, payload: Option<&[u8]>) {
+        let name = self.bound_guest_buffer(target);
+        if name == 0 {
+            return;
+        }
+        let Some(size) = usize::try_from(size)
+            .ok()
+            .filter(|size| *size <= GLES_EVENT_PAYLOAD_LIMIT)
+        else {
+            return;
+        };
+        let mut data = vec![0_u8; size];
+        if let Some(payload) = payload {
+            let copy_len = payload.len().min(data.len());
+            data[..copy_len].copy_from_slice(&payload[..copy_len]);
+        }
+        self.set_guest_buffer_storage(name, data);
+    }
+
+    fn set_guest_buffer_sub_data(
+        &mut self,
+        target: u32,
+        offset: u32,
+        size: u32,
+        payload: Option<&[u8]>,
+    ) {
+        let name = self.bound_guest_buffer(target);
+        let Some(payload) = payload else {
+            return;
+        };
+        let Some((offset, size)) = usize::try_from(offset).ok().zip(usize::try_from(size).ok())
+        else {
+            return;
+        };
+        let Some(buffer) = self
+            .gl_buffers
+            .iter_mut()
+            .find(|buffer| buffer.name == name)
+        else {
+            return;
+        };
+        let Some(end) = offset.checked_add(size) else {
+            return;
+        };
+        if end > buffer.data.len() || size > payload.len() {
+            return;
+        }
+        buffer.data[offset..end].copy_from_slice(&payload[..size]);
+    }
+
+    fn set_guest_buffer_storage(&mut self, name: u32, data: Vec<u8>) {
+        if let Some(buffer) = self
+            .gl_buffers
+            .iter_mut()
+            .find(|buffer| buffer.name == name)
+        {
+            buffer.data = data;
+        } else {
+            self.gl_buffers.push(GuestGlBuffer { name, data });
+        }
+    }
+
+    fn guest_buffer_slice(&self, name: u32, offset: u32, len: usize) -> Option<&[u8]> {
+        let offset = usize::try_from(offset).ok()?;
+        let end = offset.checked_add(len)?;
+        self.gl_buffers
+            .iter()
+            .find(|buffer| buffer.name == name)
+            .and_then(|buffer| buffer.data.get(offset..end))
+    }
+
+    fn gles_client_attrib_payloads_for_arrays<M: Memory>(
+        &self,
+        memory: &mut M,
+        first: i32,
+        count: i32,
+    ) -> Vec<GlesClientAttribPayload> {
+        let Some(vertex_count) = gles_draw_arrays_vertex_count(first, count) else {
+            return Vec::new();
+        };
+        self.gles_client_attrib_payloads(memory, vertex_count)
+    }
+
+    fn gles_client_attrib_payloads_for_elements<M: Memory>(
+        &self,
+        memory: &mut M,
+        count: i32,
+        ty: u32,
+        index_payload: Option<&[u8]>,
+    ) -> Vec<GlesClientAttribPayload> {
+        let Some(vertex_count) =
+            index_payload.and_then(|payload| gles_index_payload_vertex_count(count, ty, payload))
+        else {
+            return Vec::new();
+        };
+        self.gles_client_attrib_payloads(memory, vertex_count)
+    }
+
+    fn gles_element_buffer_index_payload(
+        &self,
+        count: i32,
+        ty: u32,
+        indices: u32,
+    ) -> Option<Vec<u8>> {
+        let len = gles_draw_index_payload_len(count, ty)?;
+        self.guest_buffer_slice(self.gl_bound_element_array_buffer, indices, len)
+            .map(<[u8]>::to_vec)
+    }
+
+    fn gles_client_attrib_payloads<M: Memory>(
+        &self,
+        memory: &mut M,
+        vertex_count: u32,
+    ) -> Vec<GlesClientAttribPayload> {
+        self.gl_vertex_attribs
+            .iter()
+            .filter(|attrib| attrib.enabled && attrib.array_buffer == 0)
+            .map(|attrib| GlesClientAttribPayload {
+                index: attrib.index,
+                payload: gles_client_attrib_payload_len(attrib, vertex_count)
+                    .and_then(|len| gles_copy_payload(memory, attrib.pointer, len)),
+            })
+            .collect()
+    }
+
     fn stack_arg<M: Memory>(&self, cpu: &Cpu, memory: &mut M, index: u32) -> Result<u32, HleError> {
         load32(
             memory,
@@ -3483,8 +3811,12 @@ impl HleRuntime {
             .iter_mut()
             .find(|shader| shader.name == shader_name)
         {
-            shader.source = source;
+            shader.source = source.clone();
         }
+        self.push_gles_event(GlesEvent::ShaderSource {
+            shader: shader_name,
+            source,
+        });
         Ok(self.return32(cpu, 0))
     }
 
@@ -5747,7 +6079,7 @@ fn egl_surface_attrib(attr: u32) -> u32 {
     }
 }
 
-fn active_max_name_len(active: &[GlActive]) -> Option<u32> {
+fn active_max_name_len(active: &[GlesActive]) -> Option<u32> {
     active.iter().map(|item| item.name.len() as u32 + 1).max()
 }
 
@@ -5774,7 +6106,7 @@ fn active_name_matches(active: &str, query: &str) -> bool {
     active == query || active.strip_suffix("[0]").is_some_and(|base| base == query)
 }
 
-fn reflect_glsl_uniforms(sources: &[(u32, &str)]) -> Vec<GlActive> {
+fn reflect_glsl_uniforms(sources: &[(u32, &str)]) -> Vec<GlesActive> {
     let mut active = Vec::new();
     for (_, source) in sources {
         let source = glsl_es2_visible_source(source);
@@ -5783,7 +6115,7 @@ fn reflect_glsl_uniforms(sources: &[(u32, &str)]) -> Vec<GlActive> {
     active
 }
 
-fn reflect_glsl_attributes(sources: &[(u32, &str)]) -> Vec<GlActive> {
+fn reflect_glsl_attributes(sources: &[(u32, &str)]) -> Vec<GlesActive> {
     let mut active = Vec::new();
     for (_, source) in sources {
         let source = glsl_es2_visible_source(source);
@@ -5792,7 +6124,7 @@ fn reflect_glsl_attributes(sources: &[(u32, &str)]) -> Vec<GlActive> {
     active
 }
 
-fn reflect_glsl_declarations(source: &str, keyword: &str, active: &mut Vec<GlActive>) {
+fn reflect_glsl_declarations(source: &str, keyword: &str, active: &mut Vec<GlesActive>) {
     let tokens = glsl_tokens(source);
     let mut idx = 0usize;
     while idx < tokens.len() {
@@ -5857,14 +6189,14 @@ fn glsl_token_occurrences(tokens: &[String], name: &str) -> usize {
     tokens.iter().filter(|token| token.as_str() == name).count()
 }
 
-fn push_gl_active(active: &mut Vec<GlActive>, name: String, size: u32, ty: u32) {
+fn push_gl_active(active: &mut Vec<GlesActive>, name: String, size: u32, ty: u32) {
     if active
         .iter()
         .any(|item| active_name_matches(&item.name, &name))
     {
         return;
     }
-    active.push(GlActive {
+    active.push(GlesActive {
         name,
         size,
         ty,
@@ -6194,6 +6526,69 @@ fn gles_draw_index_payload_len(count: i32, ty: u32) -> Option<usize> {
         _ => return None,
     };
     gles_i32_count_len(count, elem_size)
+}
+
+fn gles_draw_arrays_vertex_count(first: i32, count: i32) -> Option<u32> {
+    let first = u32::try_from(first).ok()?;
+    let count = u32::try_from(count).ok()?;
+    first.checked_add(count)
+}
+
+fn gles_index_payload_vertex_count(count: i32, ty: u32, payload: &[u8]) -> Option<u32> {
+    let bytes = gles_draw_index_payload_len(count, ty)?;
+    if payload.len() < bytes {
+        return None;
+    }
+    let mut max_index = 0u32;
+    match ty {
+        GL_UNSIGNED_BYTE => {
+            for byte in payload.iter().take(bytes).copied() {
+                max_index = max_index.max(u32::from(byte));
+            }
+        }
+        GL_UNSIGNED_SHORT => {
+            for chunk in payload[..bytes].chunks_exact(2) {
+                max_index = max_index.max(u32::from(u16::from_le_bytes([chunk[0], chunk[1]])));
+            }
+        }
+        GL_UNSIGNED_INT => {
+            for chunk in payload[..bytes].chunks_exact(4) {
+                max_index =
+                    max_index.max(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            }
+        }
+        _ => return None,
+    }
+    max_index.checked_add(1)
+}
+
+fn gles_client_attrib_payload_len(attrib: &GuestVertexAttrib, vertex_count: u32) -> Option<usize> {
+    let vertex_count = usize::try_from(vertex_count).ok()?;
+    if vertex_count == 0 {
+        return Some(0);
+    }
+    let element_size = gles_vertex_attrib_element_size(attrib.size, attrib.ty)?;
+    let stride = if attrib.stride == 0 {
+        element_size
+    } else {
+        usize::try_from(attrib.stride).ok()?
+    };
+    vertex_count
+        .checked_sub(1)?
+        .checked_mul(stride)?
+        .checked_add(element_size)
+        .filter(|len| *len <= GLES_EVENT_PAYLOAD_LIMIT)
+}
+
+fn gles_vertex_attrib_element_size(size: i32, ty: u32) -> Option<usize> {
+    let components = usize::try_from(size).ok()?;
+    let component_size = match ty {
+        GL_BYTE | GL_UNSIGNED_BYTE => 1,
+        GL_SHORT | GL_UNSIGNED_SHORT => 2,
+        GL_FLOAT | GL_FIXED => 4,
+        _ => return None,
+    };
+    components.checked_mul(component_size)
 }
 
 fn gles_image_payload_len(width: i32, height: i32, format: u32, ty: u32) -> Option<usize> {
@@ -6925,6 +7320,7 @@ mod tests {
                     ty: 0x1403,
                     indices: 0x1400,
                     index_payload: Some(vec![0, 0, 1, 0, 2, 0, 2, 0, 3, 0, 0, 0]),
+                    client_attribs: Vec::new(),
                 },
                 GlesEvent::SwapBuffers {
                     display: EGL_DISPLAY_HANDLE,
@@ -7124,6 +7520,7 @@ mod tests {
                     mode: 4,
                     first: 0,
                     count: 6,
+                    client_attribs: Vec::new(),
                 },
             ]
         );

@@ -160,11 +160,13 @@ declared-but-unused uniforms that real GLES would optimize out.
 After adding the MCPE resource bridge, `GameRenderer::render(float)` calls
 `MinecraftClient::onResourcesLoaded()` when the `MinecraftClient + 0x23e`
 ready byte is still unset. The bounded first-frame probe now reaches
-`eglSwapBuffers` at step `254925219` and, with `--gles-summary`, reports 20,758
+`eglSwapBuffers` at step `254925219` and, with `--gles-summary`, reports 21,674
 captured GLES events before the first swap, including 744 `glDrawElements`
-calls and 3,726,912 copied payload bytes. The run does not stop on an undefined
-NEON opcode. An older APK with `lib/armeabi/libminecraftpe.so` is still required
-to validate the ARMv6 Minecraft PE path.
+calls and 3,811,776 copied payload bytes. The SDL2 replay submits all 744
+captured indexed draws with zero skipped client-attribute or missing-index
+draws. The run does not stop on an undefined NEON opcode. An older APK with
+`lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
+Minecraft PE path.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:

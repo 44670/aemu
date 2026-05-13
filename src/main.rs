@@ -671,6 +671,14 @@ fn replay_sdl2_gles_events(
     println!("sdl2: replaying {} GLES events", events.len());
     host.replay_gles_events(events)
         .map_err(|err| format!("SDL2 GLES replay failed: {err}"))?;
+    let stats = host.replay_stats();
+    println!(
+        "sdl2: submitted draws arrays={} elements={} skipped_client_attrib={} skipped_missing_indices={}",
+        stats.draw_arrays,
+        stats.draw_elements,
+        stats.skipped_client_attrib_draws,
+        stats.skipped_missing_index_draws
+    );
 
     let deadline = Instant::now() + Duration::from_millis(hold_ms);
     while Instant::now() < deadline {

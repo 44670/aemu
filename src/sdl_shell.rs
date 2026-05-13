@@ -1,4 +1,4 @@
-use crate::hle_imports::GlesEvent;
+use crate::hle_imports::{GlesActive, GlesClientAttribPayload, GlesEvent};
 use crate::host::{
     HostBackend, HostConfig, HostError, HostEvent, HostKey, HostResult, PointerPhase,
 };
@@ -6,8 +6,22 @@ use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
 use sdl2::video::GLProfile;
+use std::collections::HashMap;
+use std::ffi::{CString, c_char, c_void};
+use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
+
+const GL_FALSE: u8 = 0;
+const GL_TRUE: u8 = 1;
+const GL_ARRAY_BUFFER: u32 = 0x8892;
+const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
+const GL_STATIC_DRAW: u32 = 0x88e4;
+const GL_TEXTURE0: u32 = 0x84c0;
+const GL_COMPILE_STATUS: u32 = 0x8b81;
+const GL_LINK_STATUS: u32 = 0x8b82;
+const GL_INFO_LOG_LENGTH: u32 = 0x8b84;
+const GL_UNPACK_ALIGNMENT: u32 = 0x0cf5;
 
 pub struct Sdl2Host {
     _sdl: sdl2::Sdl,
@@ -16,18 +30,157 @@ pub struct Sdl2Host {
     _gl_context: sdl2::video::GLContext,
     event_pump: sdl2::EventPump,
     gl: SdlGl,
+    replay: SdlGlesReplay,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SdlGlesReplayStats {
+    pub draw_arrays: usize,
+    pub draw_elements: usize,
+    pub skipped_client_attrib_draws: usize,
+    pub skipped_missing_index_draws: usize,
 }
 
 type GlClear = unsafe extern "C" fn(u32);
 type GlClearColor = unsafe extern "C" fn(f32, f32, f32, f32);
 type GlClearDepthf = unsafe extern "C" fn(f32);
 type GlViewport = unsafe extern "C" fn(i32, i32, i32, i32);
+type GlCreateShader = unsafe extern "C" fn(u32) -> u32;
+type GlShaderSource = unsafe extern "C" fn(u32, i32, *const *const c_char, *const i32);
+type GlCompileShader = unsafe extern "C" fn(u32);
+type GlGetShaderiv = unsafe extern "C" fn(u32, u32, *mut i32);
+type GlGetShaderInfoLog = unsafe extern "C" fn(u32, i32, *mut i32, *mut c_char);
+type GlCreateProgram = unsafe extern "C" fn() -> u32;
+type GlAttachShader = unsafe extern "C" fn(u32, u32);
+type GlBindAttribLocation = unsafe extern "C" fn(u32, u32, *const c_char);
+type GlLinkProgram = unsafe extern "C" fn(u32);
+type GlGetProgramiv = unsafe extern "C" fn(u32, u32, *mut i32);
+type GlGetProgramInfoLog = unsafe extern "C" fn(u32, i32, *mut i32, *mut c_char);
+type GlUseProgram = unsafe extern "C" fn(u32);
+type GlGetUniformLocation = unsafe extern "C" fn(u32, *const c_char) -> i32;
+type GlGenBuffers = unsafe extern "C" fn(i32, *mut u32);
+type GlBindBuffer = unsafe extern "C" fn(u32, u32);
+type GlBufferData = unsafe extern "C" fn(u32, isize, *const c_void, u32);
+type GlBufferSubData = unsafe extern "C" fn(u32, isize, isize, *const c_void);
+type GlGenTextures = unsafe extern "C" fn(i32, *mut u32);
+type GlBindTexture = unsafe extern "C" fn(u32, u32);
+type GlTexParameteri = unsafe extern "C" fn(u32, u32, i32);
+type GlTexImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+type GlTexSubImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+type GlActiveTexture = unsafe extern "C" fn(u32);
+type GlUniform1i = unsafe extern "C" fn(i32, i32);
+type GlUniform1fv = unsafe extern "C" fn(i32, i32, *const f32);
+type GlUniform2fv = unsafe extern "C" fn(i32, i32, *const f32);
+type GlUniform3fv = unsafe extern "C" fn(i32, i32, *const f32);
+type GlUniform4fv = unsafe extern "C" fn(i32, i32, *const f32);
+type GlUniform1iv = unsafe extern "C" fn(i32, i32, *const i32);
+type GlUniform2iv = unsafe extern "C" fn(i32, i32, *const i32);
+type GlUniform3iv = unsafe extern "C" fn(i32, i32, *const i32);
+type GlUniform4iv = unsafe extern "C" fn(i32, i32, *const i32);
+type GlUniformMatrix2fv = unsafe extern "C" fn(i32, i32, u8, *const f32);
+type GlUniformMatrix3fv = unsafe extern "C" fn(i32, i32, u8, *const f32);
+type GlUniformMatrix4fv = unsafe extern "C" fn(i32, i32, u8, *const f32);
+type GlVertexAttribPointer = unsafe extern "C" fn(u32, i32, u32, u8, i32, *const c_void);
+type GlEnableVertexAttribArray = unsafe extern "C" fn(u32);
+type GlEnable = unsafe extern "C" fn(u32);
+type GlDisable = unsafe extern "C" fn(u32);
+type GlBlendFunc = unsafe extern "C" fn(u32, u32);
+type GlBlendFuncSeparate = unsafe extern "C" fn(u32, u32, u32, u32);
+type GlDepthFunc = unsafe extern "C" fn(u32);
+type GlDepthMask = unsafe extern "C" fn(u8);
+type GlDepthRangef = unsafe extern "C" fn(f32, f32);
+type GlColorMask = unsafe extern "C" fn(u8, u8, u8, u8);
+type GlScissor = unsafe extern "C" fn(i32, i32, i32, i32);
+type GlDrawArrays = unsafe extern "C" fn(u32, i32, i32);
+type GlDrawElements = unsafe extern "C" fn(u32, i32, u32, *const c_void);
+type GlFlush = unsafe extern "C" fn();
+type GlPixelStorei = unsafe extern "C" fn(u32, i32);
 
 struct SdlGl {
     clear: GlClear,
     clear_color: GlClearColor,
     clear_depthf: Option<GlClearDepthf>,
     viewport: GlViewport,
+    create_shader: GlCreateShader,
+    shader_source: GlShaderSource,
+    compile_shader: GlCompileShader,
+    get_shader_iv: GlGetShaderiv,
+    get_shader_info_log: GlGetShaderInfoLog,
+    create_program: GlCreateProgram,
+    attach_shader: GlAttachShader,
+    bind_attrib_location: GlBindAttribLocation,
+    link_program: GlLinkProgram,
+    get_program_iv: GlGetProgramiv,
+    get_program_info_log: GlGetProgramInfoLog,
+    use_program: GlUseProgram,
+    get_uniform_location: GlGetUniformLocation,
+    gen_buffers: GlGenBuffers,
+    bind_buffer: GlBindBuffer,
+    buffer_data: GlBufferData,
+    buffer_sub_data: GlBufferSubData,
+    gen_textures: GlGenTextures,
+    bind_texture: GlBindTexture,
+    tex_parameteri: GlTexParameteri,
+    tex_image_2d: GlTexImage2D,
+    tex_sub_image_2d: GlTexSubImage2D,
+    active_texture: GlActiveTexture,
+    uniform_1i: GlUniform1i,
+    uniform_1fv: GlUniform1fv,
+    uniform_2fv: GlUniform2fv,
+    uniform_3fv: GlUniform3fv,
+    uniform_4fv: GlUniform4fv,
+    uniform_1iv: GlUniform1iv,
+    uniform_2iv: GlUniform2iv,
+    uniform_3iv: GlUniform3iv,
+    uniform_4iv: GlUniform4iv,
+    uniform_matrix_2fv: GlUniformMatrix2fv,
+    uniform_matrix_3fv: GlUniformMatrix3fv,
+    uniform_matrix_4fv: GlUniformMatrix4fv,
+    vertex_attrib_pointer: GlVertexAttribPointer,
+    enable_vertex_attrib_array: GlEnableVertexAttribArray,
+    enable: GlEnable,
+    disable: GlDisable,
+    blend_func: GlBlendFunc,
+    blend_func_separate: GlBlendFuncSeparate,
+    depth_func: GlDepthFunc,
+    depth_mask: GlDepthMask,
+    depth_rangef: GlDepthRangef,
+    color_mask: GlColorMask,
+    scissor: GlScissor,
+    draw_arrays: GlDrawArrays,
+    draw_elements: GlDrawElements,
+    flush: GlFlush,
+    pixel_storei: GlPixelStorei,
+}
+
+#[derive(Debug, Default)]
+struct SdlGlesReplay {
+    buffers: HashMap<u32, u32>,
+    textures: HashMap<u32, u32>,
+    shaders: HashMap<u32, u32>,
+    programs: HashMap<u32, ReplayProgram>,
+    enabled_vertex_attribs: HashMap<u32, bool>,
+    client_side_vertex_attribs: HashMap<u32, bool>,
+    client_attrib_buffers: HashMap<u32, u32>,
+    vertex_attribs: HashMap<u32, ReplayVertexAttrib>,
+    current_program: u32,
+    bound_array_buffer: u32,
+    bound_element_array_buffer: u32,
+    stats: SdlGlesReplayStats,
+}
+
+#[derive(Debug)]
+struct ReplayProgram {
+    host: u32,
+    uniforms: HashMap<u32, i32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplayVertexAttrib {
+    size: i32,
+    ty: u32,
+    normalized: bool,
+    stride: i32,
 }
 
 impl Sdl2Host {
@@ -64,7 +217,12 @@ impl Sdl2Host {
             _gl_context: gl_context,
             event_pump,
             gl,
+            replay: SdlGlesReplay::default(),
         })
+    }
+
+    pub fn replay_stats(&self) -> SdlGlesReplayStats {
+        self.replay.stats
     }
 }
 
@@ -75,6 +233,56 @@ impl SdlGl {
             clear_color: load_required_gl(video, "glClearColor")?,
             clear_depthf: load_optional_gl(video, "glClearDepthf"),
             viewport: load_required_gl(video, "glViewport")?,
+            create_shader: load_required_gl(video, "glCreateShader")?,
+            shader_source: load_required_gl(video, "glShaderSource")?,
+            compile_shader: load_required_gl(video, "glCompileShader")?,
+            get_shader_iv: load_required_gl(video, "glGetShaderiv")?,
+            get_shader_info_log: load_required_gl(video, "glGetShaderInfoLog")?,
+            create_program: load_required_gl(video, "glCreateProgram")?,
+            attach_shader: load_required_gl(video, "glAttachShader")?,
+            bind_attrib_location: load_required_gl(video, "glBindAttribLocation")?,
+            link_program: load_required_gl(video, "glLinkProgram")?,
+            get_program_iv: load_required_gl(video, "glGetProgramiv")?,
+            get_program_info_log: load_required_gl(video, "glGetProgramInfoLog")?,
+            use_program: load_required_gl(video, "glUseProgram")?,
+            get_uniform_location: load_required_gl(video, "glGetUniformLocation")?,
+            gen_buffers: load_required_gl(video, "glGenBuffers")?,
+            bind_buffer: load_required_gl(video, "glBindBuffer")?,
+            buffer_data: load_required_gl(video, "glBufferData")?,
+            buffer_sub_data: load_required_gl(video, "glBufferSubData")?,
+            gen_textures: load_required_gl(video, "glGenTextures")?,
+            bind_texture: load_required_gl(video, "glBindTexture")?,
+            tex_parameteri: load_required_gl(video, "glTexParameteri")?,
+            tex_image_2d: load_required_gl(video, "glTexImage2D")?,
+            tex_sub_image_2d: load_required_gl(video, "glTexSubImage2D")?,
+            active_texture: load_required_gl(video, "glActiveTexture")?,
+            uniform_1i: load_required_gl(video, "glUniform1i")?,
+            uniform_1fv: load_required_gl(video, "glUniform1fv")?,
+            uniform_2fv: load_required_gl(video, "glUniform2fv")?,
+            uniform_3fv: load_required_gl(video, "glUniform3fv")?,
+            uniform_4fv: load_required_gl(video, "glUniform4fv")?,
+            uniform_1iv: load_required_gl(video, "glUniform1iv")?,
+            uniform_2iv: load_required_gl(video, "glUniform2iv")?,
+            uniform_3iv: load_required_gl(video, "glUniform3iv")?,
+            uniform_4iv: load_required_gl(video, "glUniform4iv")?,
+            uniform_matrix_2fv: load_required_gl(video, "glUniformMatrix2fv")?,
+            uniform_matrix_3fv: load_required_gl(video, "glUniformMatrix3fv")?,
+            uniform_matrix_4fv: load_required_gl(video, "glUniformMatrix4fv")?,
+            vertex_attrib_pointer: load_required_gl(video, "glVertexAttribPointer")?,
+            enable_vertex_attrib_array: load_required_gl(video, "glEnableVertexAttribArray")?,
+            enable: load_required_gl(video, "glEnable")?,
+            disable: load_required_gl(video, "glDisable")?,
+            blend_func: load_required_gl(video, "glBlendFunc")?,
+            blend_func_separate: load_required_gl(video, "glBlendFuncSeparate")?,
+            depth_func: load_required_gl(video, "glDepthFunc")?,
+            depth_mask: load_required_gl(video, "glDepthMask")?,
+            depth_rangef: load_required_gl(video, "glDepthRangef")?,
+            color_mask: load_required_gl(video, "glColorMask")?,
+            scissor: load_required_gl(video, "glScissor")?,
+            draw_arrays: load_required_gl(video, "glDrawArrays")?,
+            draw_elements: load_required_gl(video, "glDrawElements")?,
+            flush: load_required_gl(video, "glFlush")?,
+            pixel_storei: load_required_gl(video, "glPixelStorei")?,
         })
     }
 }
@@ -90,6 +298,746 @@ fn load_optional_gl<T: Copy>(video: &sdl2::VideoSubsystem, name: &str) -> Option
     } else {
         Some(unsafe { std::mem::transmute_copy(&ptr) })
     }
+}
+
+impl Sdl2Host {
+    fn replay_gles_event(&mut self, event: &GlesEvent) -> HostResult<()> {
+        match event {
+            GlesEvent::CreateShader {
+                shader,
+                shader_type,
+            } => {
+                let host = unsafe { (self.gl.create_shader)(*shader_type) };
+                self.replay.shaders.insert(*shader, host);
+            }
+            GlesEvent::ShaderSource { shader, source } => {
+                if let Some(host) = self.replay.shaders.get(shader).copied() {
+                    self.compile_replay_shader(*shader, host, source)?;
+                }
+            }
+            GlesEvent::CreateProgram { program } => {
+                let host = unsafe { (self.gl.create_program)() };
+                self.replay.programs.insert(
+                    *program,
+                    ReplayProgram {
+                        host,
+                        uniforms: HashMap::new(),
+                    },
+                );
+            }
+            GlesEvent::AttachShader { program, shader } => {
+                let Some(host_program) = self.host_program(*program) else {
+                    return Ok(());
+                };
+                let Some(host_shader) = self.replay.shaders.get(shader).copied() else {
+                    return Ok(());
+                };
+                unsafe {
+                    (self.gl.attach_shader)(host_program, host_shader);
+                }
+            }
+            GlesEvent::LinkProgram {
+                program,
+                uniforms,
+                attributes,
+            } => self.link_replay_program(*program, uniforms, attributes)?,
+            GlesEvent::ActiveTexture { texture } => unsafe {
+                (self.gl.active_texture)(*texture);
+            },
+            GlesEvent::BindBuffer { target, buffer } => {
+                let host = self.host_buffer(*buffer);
+                unsafe {
+                    (self.gl.bind_buffer)(*target, host);
+                }
+                match *target {
+                    GL_ARRAY_BUFFER => self.replay.bound_array_buffer = *buffer,
+                    GL_ELEMENT_ARRAY_BUFFER => self.replay.bound_element_array_buffer = *buffer,
+                    _ => {}
+                }
+            }
+            GlesEvent::BufferData {
+                target,
+                size,
+                usage,
+                payload,
+                ..
+            } => {
+                let size = gl_size(*size, "glBufferData size")?;
+                let data = payload_ptr(payload.as_deref(), size);
+                self.rebind_guest_buffer(*target);
+                unsafe {
+                    (self.gl.buffer_data)(*target, size, data, *usage);
+                }
+            }
+            GlesEvent::BufferSubData {
+                target,
+                offset,
+                size,
+                payload,
+                ..
+            } => {
+                let offset = gl_size(*offset, "glBufferSubData offset")?;
+                let size = gl_size(*size, "glBufferSubData size")?;
+                if let Some(payload) = payload_bytes(payload.as_deref(), size) {
+                    self.rebind_guest_buffer(*target);
+                    unsafe {
+                        (self.gl.buffer_sub_data)(*target, offset, size, payload.as_ptr().cast());
+                    }
+                }
+            }
+            GlesEvent::BindTexture { target, texture } => {
+                let host = self.host_texture(*texture);
+                unsafe {
+                    (self.gl.bind_texture)(*target, host);
+                }
+            }
+            GlesEvent::TexParameteri {
+                target,
+                name,
+                value,
+            } => unsafe {
+                (self.gl.tex_parameteri)(*target, *name, *value as i32);
+            },
+            GlesEvent::TexImage2D {
+                target,
+                level,
+                internal_format,
+                width,
+                height,
+                border,
+                format,
+                ty,
+                payload,
+                ..
+            } => {
+                let data = payload
+                    .as_ref()
+                    .map_or(ptr::null(), |payload| payload.as_ptr().cast::<c_void>());
+                unsafe {
+                    (self.gl.tex_image_2d)(
+                        *target,
+                        *level,
+                        *internal_format,
+                        *width,
+                        *height,
+                        *border,
+                        *format,
+                        *ty,
+                        data,
+                    );
+                }
+            }
+            GlesEvent::TexSubImage2D {
+                target,
+                level,
+                xoffset,
+                yoffset,
+                width,
+                height,
+                format,
+                ty,
+                payload,
+                ..
+            } => {
+                if let Some(payload) = payload {
+                    unsafe {
+                        (self.gl.tex_sub_image_2d)(
+                            *target,
+                            *level,
+                            *xoffset,
+                            *yoffset,
+                            *width,
+                            *height,
+                            *format,
+                            *ty,
+                            payload.as_ptr().cast(),
+                        );
+                    }
+                }
+            }
+            GlesEvent::UseProgram { program } => {
+                let host = self.host_program(*program).unwrap_or(0);
+                unsafe {
+                    (self.gl.use_program)(host);
+                }
+                self.replay.current_program = *program;
+            }
+            GlesEvent::Uniform1i { location, value } => {
+                let location = self.host_uniform_location(*location);
+                if location >= 0 {
+                    unsafe {
+                        (self.gl.uniform_1i)(location, *value);
+                    }
+                }
+            }
+            GlesEvent::UniformVector {
+                components,
+                integer,
+                location,
+                count,
+                payload,
+                ..
+            } => self.replay_uniform_vector(*components, *integer, *location, *count, payload)?,
+            GlesEvent::UniformMatrix {
+                columns,
+                location,
+                count,
+                transpose,
+                payload,
+                ..
+            } => self.replay_uniform_matrix(*columns, *location, *count, *transpose, payload)?,
+            GlesEvent::VertexAttribPointer {
+                index,
+                size,
+                ty,
+                normalized,
+                stride,
+                pointer,
+            } => {
+                let has_array_buffer = self.replay.bound_array_buffer != 0;
+                self.replay.vertex_attribs.insert(
+                    *index,
+                    ReplayVertexAttrib {
+                        size: *size,
+                        ty: *ty,
+                        normalized: *normalized,
+                        stride: *stride,
+                    },
+                );
+                self.replay
+                    .client_side_vertex_attribs
+                    .insert(*index, !has_array_buffer);
+                if has_array_buffer {
+                    self.rebind_guest_buffer(GL_ARRAY_BUFFER);
+                    unsafe {
+                        (self.gl.vertex_attrib_pointer)(
+                            *index,
+                            *size,
+                            *ty,
+                            gl_bool(*normalized),
+                            *stride,
+                            offset_ptr(*pointer),
+                        );
+                    }
+                }
+            }
+            GlesEvent::EnableVertexAttribArray { index } => {
+                self.replay.enabled_vertex_attribs.insert(*index, true);
+                unsafe {
+                    (self.gl.enable_vertex_attrib_array)(*index);
+                }
+            }
+            GlesEvent::Enable { cap } => unsafe {
+                (self.gl.enable)(*cap);
+            },
+            GlesEvent::Disable { cap } => unsafe {
+                (self.gl.disable)(*cap);
+            },
+            GlesEvent::BlendFunc { sfactor, dfactor } => unsafe {
+                (self.gl.blend_func)(*sfactor, *dfactor);
+            },
+            GlesEvent::BlendFuncSeparate {
+                src_rgb,
+                dst_rgb,
+                src_alpha,
+                dst_alpha,
+            } => unsafe {
+                (self.gl.blend_func_separate)(*src_rgb, *dst_rgb, *src_alpha, *dst_alpha);
+            },
+            GlesEvent::DepthFunc { func } => unsafe {
+                (self.gl.depth_func)(*func);
+            },
+            GlesEvent::DepthMask { enabled } => unsafe {
+                (self.gl.depth_mask)(gl_bool(*enabled));
+            },
+            GlesEvent::DepthRangef { near, far } => unsafe {
+                (self.gl.depth_rangef)(f32::from_bits(*near), f32::from_bits(*far));
+            },
+            GlesEvent::ColorMask {
+                red,
+                green,
+                blue,
+                alpha,
+            } => unsafe {
+                (self.gl.color_mask)(
+                    gl_bool(*red),
+                    gl_bool(*green),
+                    gl_bool(*blue),
+                    gl_bool(*alpha),
+                );
+            },
+            GlesEvent::Scissor {
+                x,
+                y,
+                width,
+                height,
+            } => unsafe {
+                (self.gl.scissor)(*x, *y, *width, *height);
+            },
+            GlesEvent::ClearColor {
+                red,
+                green,
+                blue,
+                alpha,
+            } => unsafe {
+                (self.gl.clear_color)(
+                    f32::from_bits(*red),
+                    f32::from_bits(*green),
+                    f32::from_bits(*blue),
+                    f32::from_bits(*alpha),
+                );
+            },
+            GlesEvent::ClearDepthf { depth } => {
+                if let Some(clear_depthf) = self.gl.clear_depthf {
+                    unsafe {
+                        clear_depthf(f32::from_bits(*depth));
+                    }
+                }
+            }
+            GlesEvent::Clear { mask } => unsafe {
+                (self.gl.clear)(*mask);
+            },
+            GlesEvent::Viewport {
+                x,
+                y,
+                width,
+                height,
+            } => unsafe {
+                (self.gl.viewport)(*x, *y, *width, *height);
+            },
+            GlesEvent::DrawArrays {
+                mode,
+                first,
+                count,
+                client_attribs,
+            } => {
+                if !self.prepare_client_attribs(client_attribs)? {
+                    self.replay.stats.skipped_client_attrib_draws += 1;
+                    return Ok(());
+                }
+                unsafe {
+                    (self.gl.draw_arrays)(*mode, *first, *count);
+                }
+                self.replay.stats.draw_arrays += 1;
+            }
+            GlesEvent::DrawElements {
+                mode,
+                count,
+                ty,
+                indices,
+                index_payload,
+                client_attribs,
+            } => {
+                if !self.prepare_client_attribs(client_attribs)? {
+                    self.replay.stats.skipped_client_attrib_draws += 1;
+                    return Ok(());
+                }
+                self.rebind_guest_buffer(GL_ELEMENT_ARRAY_BUFFER);
+                let Some(indices) = self.draw_indices_ptr(*indices, index_payload.as_deref())
+                else {
+                    self.replay.stats.skipped_missing_index_draws += 1;
+                    return Ok(());
+                };
+                unsafe {
+                    (self.gl.draw_elements)(*mode, *count, *ty, indices);
+                }
+                self.replay.stats.draw_elements += 1;
+            }
+            GlesEvent::Flush => unsafe {
+                (self.gl.flush)();
+            },
+            GlesEvent::SwapBuffers { .. } => self.swap_buffers()?,
+        }
+        Ok(())
+    }
+
+    fn compile_replay_shader(
+        &self,
+        guest_shader: u32,
+        host_shader: u32,
+        source: &str,
+    ) -> HostResult<()> {
+        let source = CString::new(source)
+            .map_err(|_| HostError::new(format!("shader {guest_shader} source contains NUL")))?;
+        let ptr = source.as_ptr();
+        let len = source.as_bytes().len() as i32;
+        unsafe {
+            (self.gl.shader_source)(host_shader, 1, &ptr, &len);
+            (self.gl.compile_shader)(host_shader);
+        }
+        let mut status = 0;
+        unsafe {
+            (self.gl.get_shader_iv)(host_shader, GL_COMPILE_STATUS, &mut status);
+        }
+        if status == 0 {
+            return Err(HostError::new(format!(
+                "shader {guest_shader} compile failed: {}",
+                self.shader_info_log(host_shader)
+            )));
+        }
+        Ok(())
+    }
+
+    fn link_replay_program(
+        &mut self,
+        guest_program: u32,
+        uniforms: &[GlesActive],
+        attributes: &[GlesActive],
+    ) -> HostResult<()> {
+        let Some(host_program) = self.host_program(guest_program) else {
+            return Ok(());
+        };
+        for attribute in attributes {
+            if let Ok(name) = CString::new(attribute.name.as_str()) {
+                unsafe {
+                    (self.gl.bind_attrib_location)(host_program, attribute.location, name.as_ptr());
+                }
+            }
+        }
+        unsafe {
+            (self.gl.link_program)(host_program);
+        }
+        let mut status = 0;
+        unsafe {
+            (self.gl.get_program_iv)(host_program, GL_LINK_STATUS, &mut status);
+        }
+        if status == 0 {
+            return Err(HostError::new(format!(
+                "program {guest_program} link failed: {}",
+                self.program_info_log(host_program)
+            )));
+        }
+
+        let mut host_uniforms = HashMap::new();
+        for uniform in uniforms {
+            if let Some(location) = self.lookup_host_uniform(host_program, &uniform.name) {
+                host_uniforms.insert(uniform.location, location);
+            }
+        }
+        if let Some(program) = self.replay.programs.get_mut(&guest_program) {
+            program.uniforms = host_uniforms;
+        }
+        Ok(())
+    }
+
+    fn replay_uniform_vector(
+        &self,
+        components: u8,
+        integer: bool,
+        guest_location: i32,
+        count: i32,
+        payload: &Option<Vec<u8>>,
+    ) -> HostResult<()> {
+        let location = self.host_uniform_location(guest_location);
+        if location < 0 || count <= 0 {
+            return Ok(());
+        }
+        let width = usize::from(components)
+            .checked_mul(4)
+            .ok_or_else(|| HostError::new("uniform vector width overflow"))?;
+        let needed = usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(width))
+            .ok_or_else(|| HostError::new("uniform vector payload size overflow"))?;
+        let Some(payload) = payload.as_ref().filter(|payload| payload.len() >= needed) else {
+            return Ok(());
+        };
+        unsafe {
+            if integer {
+                let values = payload.as_ptr().cast::<i32>();
+                match components {
+                    1 => (self.gl.uniform_1iv)(location, count, values),
+                    2 => (self.gl.uniform_2iv)(location, count, values),
+                    3 => (self.gl.uniform_3iv)(location, count, values),
+                    4 => (self.gl.uniform_4iv)(location, count, values),
+                    _ => {}
+                }
+            } else {
+                let values = payload.as_ptr().cast::<f32>();
+                match components {
+                    1 => (self.gl.uniform_1fv)(location, count, values),
+                    2 => (self.gl.uniform_2fv)(location, count, values),
+                    3 => (self.gl.uniform_3fv)(location, count, values),
+                    4 => (self.gl.uniform_4fv)(location, count, values),
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_uniform_matrix(
+        &self,
+        columns: u8,
+        guest_location: i32,
+        count: i32,
+        transpose: bool,
+        payload: &Option<Vec<u8>>,
+    ) -> HostResult<()> {
+        let location = self.host_uniform_location(guest_location);
+        if location < 0 || count <= 0 {
+            return Ok(());
+        }
+        let columns = usize::from(columns);
+        let width = columns
+            .checked_mul(columns)
+            .and_then(|items| items.checked_mul(4))
+            .ok_or_else(|| HostError::new("uniform matrix width overflow"))?;
+        let needed = usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(width))
+            .ok_or_else(|| HostError::new("uniform matrix payload size overflow"))?;
+        let Some(payload) = payload.as_ref().filter(|payload| payload.len() >= needed) else {
+            return Ok(());
+        };
+        let values = payload.as_ptr().cast::<f32>();
+        unsafe {
+            match columns {
+                2 => (self.gl.uniform_matrix_2fv)(location, count, gl_bool(transpose), values),
+                3 => (self.gl.uniform_matrix_3fv)(location, count, gl_bool(transpose), values),
+                4 => (self.gl.uniform_matrix_4fv)(location, count, gl_bool(transpose), values),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn host_buffer(&mut self, guest: u32) -> u32 {
+        if guest == 0 {
+            return 0;
+        }
+        if let Some(host) = self.replay.buffers.get(&guest).copied() {
+            return host;
+        }
+        let mut host = 0;
+        unsafe {
+            (self.gl.gen_buffers)(1, &mut host);
+        }
+        self.replay.buffers.insert(guest, host);
+        host
+    }
+
+    fn rebind_guest_buffer(&mut self, target: u32) {
+        let guest = match target {
+            GL_ARRAY_BUFFER => self.replay.bound_array_buffer,
+            GL_ELEMENT_ARRAY_BUFFER => self.replay.bound_element_array_buffer,
+            _ => return,
+        };
+        let host = self.host_buffer(guest);
+        unsafe {
+            (self.gl.bind_buffer)(target, host);
+        }
+    }
+
+    fn prepare_client_attribs(
+        &mut self,
+        client_attribs: &[GlesClientAttribPayload],
+    ) -> HostResult<bool> {
+        if !self.has_unbacked_client_attrib() {
+            return Ok(true);
+        }
+        for (index, enabled) in self.replay.enabled_vertex_attribs.clone() {
+            if !enabled
+                || !self
+                    .replay
+                    .client_side_vertex_attribs
+                    .get(&index)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(attrib) = self.replay.vertex_attribs.get(&index).copied() else {
+                return Ok(false);
+            };
+            let Some(payload) = client_attribs
+                .iter()
+                .find(|payload| payload.index == index)
+                .and_then(|payload| payload.payload.as_deref())
+            else {
+                return Ok(false);
+            };
+            let buffer = self.client_attrib_buffer(index);
+            unsafe {
+                (self.gl.bind_buffer)(GL_ARRAY_BUFFER, buffer);
+                (self.gl.buffer_data)(
+                    GL_ARRAY_BUFFER,
+                    isize::try_from(payload.len()).map_err(|_| {
+                        HostError::new(format!(
+                            "client vertex attrib {index} payload too large: {}",
+                            payload.len()
+                        ))
+                    })?,
+                    payload.as_ptr().cast(),
+                    GL_STATIC_DRAW,
+                );
+                (self.gl.vertex_attrib_pointer)(
+                    index,
+                    attrib.size,
+                    attrib.ty,
+                    gl_bool(attrib.normalized),
+                    attrib.stride,
+                    ptr::null(),
+                );
+            }
+        }
+        Ok(true)
+    }
+
+    fn client_attrib_buffer(&mut self, index: u32) -> u32 {
+        if let Some(buffer) = self.replay.client_attrib_buffers.get(&index).copied() {
+            return buffer;
+        }
+        let mut buffer = 0;
+        unsafe {
+            (self.gl.gen_buffers)(1, &mut buffer);
+        }
+        self.replay.client_attrib_buffers.insert(index, buffer);
+        buffer
+    }
+
+    fn host_texture(&mut self, guest: u32) -> u32 {
+        if guest == 0 {
+            return 0;
+        }
+        if let Some(host) = self.replay.textures.get(&guest).copied() {
+            return host;
+        }
+        let mut host = 0;
+        unsafe {
+            (self.gl.gen_textures)(1, &mut host);
+        }
+        self.replay.textures.insert(guest, host);
+        host
+    }
+
+    fn host_program(&self, guest: u32) -> Option<u32> {
+        if guest == 0 {
+            Some(0)
+        } else {
+            self.replay.programs.get(&guest).map(|program| program.host)
+        }
+    }
+
+    fn host_uniform_location(&self, guest_location: i32) -> i32 {
+        if guest_location < 0 {
+            return -1;
+        }
+        let guest_location = guest_location as u32;
+        self.replay
+            .programs
+            .get(&self.replay.current_program)
+            .and_then(|program| program.uniforms.get(&guest_location).copied())
+            .unwrap_or(guest_location as i32)
+    }
+
+    fn lookup_host_uniform(&self, host_program: u32, guest_name: &str) -> Option<i32> {
+        for name in uniform_lookup_names(guest_name) {
+            let Ok(name) = CString::new(name) else {
+                continue;
+            };
+            let location = unsafe { (self.gl.get_uniform_location)(host_program, name.as_ptr()) };
+            if location >= 0 {
+                return Some(location);
+            }
+        }
+        None
+    }
+
+    fn shader_info_log(&self, shader: u32) -> String {
+        let mut len = 0;
+        unsafe {
+            (self.gl.get_shader_iv)(shader, GL_INFO_LOG_LENGTH, &mut len);
+        }
+        let mut log = vec![0_u8; usize::try_from(len.max(1)).unwrap_or(1)];
+        let mut written = 0;
+        unsafe {
+            (self.gl.get_shader_info_log)(
+                shader,
+                len,
+                &mut written,
+                log.as_mut_ptr().cast::<c_char>(),
+            );
+        }
+        gl_log_string(&log, written)
+    }
+
+    fn program_info_log(&self, program: u32) -> String {
+        let mut len = 0;
+        unsafe {
+            (self.gl.get_program_iv)(program, GL_INFO_LOG_LENGTH, &mut len);
+        }
+        let mut log = vec![0_u8; usize::try_from(len.max(1)).unwrap_or(1)];
+        let mut written = 0;
+        unsafe {
+            (self.gl.get_program_info_log)(
+                program,
+                len,
+                &mut written,
+                log.as_mut_ptr().cast::<c_char>(),
+            );
+        }
+        gl_log_string(&log, written)
+    }
+
+    fn has_unbacked_client_attrib(&self) -> bool {
+        self.replay
+            .enabled_vertex_attribs
+            .iter()
+            .any(|(index, enabled)| {
+                *enabled
+                    && self
+                        .replay
+                        .client_side_vertex_attribs
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false)
+            })
+    }
+
+    fn draw_indices_ptr(&self, indices: u32, payload: Option<&[u8]>) -> Option<*const c_void> {
+        if self.replay.bound_element_array_buffer != 0 {
+            return Some(offset_ptr(indices));
+        }
+        payload.map(|payload| payload.as_ptr().cast())
+    }
+}
+
+fn gl_size(value: u32, label: &str) -> HostResult<isize> {
+    isize::try_from(value).map_err(|_| HostError::new(format!("{label} too large: {value}")))
+}
+
+fn payload_ptr(payload: Option<&[u8]>, size: isize) -> *const c_void {
+    payload_bytes(payload, size).map_or(ptr::null(), |payload| payload.as_ptr().cast())
+}
+
+fn payload_bytes(payload: Option<&[u8]>, size: isize) -> Option<&[u8]> {
+    let size = usize::try_from(size).ok()?;
+    if size == 0 {
+        Some(&[])
+    } else {
+        payload.filter(|payload| payload.len() >= size)
+    }
+}
+
+fn offset_ptr(offset: u32) -> *const c_void {
+    offset as usize as *const c_void
+}
+
+fn gl_bool(value: bool) -> u8 {
+    if value { GL_TRUE } else { GL_FALSE }
+}
+
+fn uniform_lookup_names(name: &str) -> [&str; 2] {
+    [name, name.strip_suffix("[0]").unwrap_or(name)]
+}
+
+fn gl_log_string(log: &[u8], written: i32) -> String {
+    let len = usize::try_from(written).unwrap_or(0).min(log.len());
+    let log = &log[..len];
+    String::from_utf8_lossy(log)
+        .trim_end_matches('\0')
+        .to_string()
 }
 
 impl HostBackend for Sdl2Host {
@@ -194,42 +1142,12 @@ impl HostBackend for Sdl2Host {
     }
 
     fn replay_gles_events(&mut self, events: &[GlesEvent]) -> HostResult<()> {
+        unsafe {
+            (self.gl.active_texture)(GL_TEXTURE0);
+            (self.gl.pixel_storei)(GL_UNPACK_ALIGNMENT, 1);
+        }
         for event in events {
-            match event {
-                GlesEvent::ClearColor {
-                    red,
-                    green,
-                    blue,
-                    alpha,
-                } => unsafe {
-                    (self.gl.clear_color)(
-                        f32::from_bits(*red),
-                        f32::from_bits(*green),
-                        f32::from_bits(*blue),
-                        f32::from_bits(*alpha),
-                    );
-                },
-                GlesEvent::ClearDepthf { depth } => {
-                    if let Some(clear_depthf) = self.gl.clear_depthf {
-                        unsafe {
-                            clear_depthf(f32::from_bits(*depth));
-                        }
-                    }
-                }
-                GlesEvent::Clear { mask } => unsafe {
-                    (self.gl.clear)(*mask);
-                },
-                GlesEvent::Viewport {
-                    x,
-                    y,
-                    width,
-                    height,
-                } => unsafe {
-                    (self.gl.viewport)(*x, *y, *width, *height);
-                },
-                GlesEvent::SwapBuffers { .. } => self.swap_buffers()?,
-                _ => {}
-            }
+            self.replay_gles_event(event)?;
         }
         Ok(())
     }
