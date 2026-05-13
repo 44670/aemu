@@ -4409,6 +4409,10 @@ impl Cpu {
             return Ok(());
         }
 
+        if (first & 0xff80) == 0xfa00 && (second & 0xf0c0) == 0xf080 {
+            return self.exec_thumb32_extend_add(first, second, pc);
+        }
+
         if (first & 0xff80) == 0xfa00 && (second & 0xf0f0) == 0xf000 {
             return self.exec_thumb32_register_shift(first, second, pc);
         }
@@ -4496,6 +4500,30 @@ impl Cpu {
             self.cpsr.set_nzc(shifted.value, shifted.carry);
         }
         let _ = pc;
+        Ok(())
+    }
+
+    fn exec_thumb32_extend_add(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        let op = (first >> 4) & 0x7;
+        let rn = usize::from(first & 0xf);
+        let rd = usize::from((second >> 8) & 0xf);
+        let rotate = u32::from((second >> 4) & 0x3) * 8;
+        let rm = usize::from(second & 0xf);
+        if rd == 15 || rm == 15 || op >= 6 {
+            return Err(Trap::UndefinedThumb { pc, instr: first });
+        }
+
+        let rotated = self.regs[rm].rotate_right(rotate);
+        let base = if rn == 15 { 0 } else { self.regs[rn] };
+        self.regs[rd] = match op {
+            0 => base.wrapping_add(sign_extend(rotated & 0xffff, 16) as u32),
+            1 => base.wrapping_add(rotated & 0xffff),
+            2 => extend_add_16(base, rotated, true),
+            3 => extend_add_16(base, rotated, false),
+            4 => base.wrapping_add(sign_extend(rotated & 0xff, 8) as u32),
+            5 => base.wrapping_add(rotated & 0xff),
+            _ => unreachable!(),
+        };
         Ok(())
     }
 
@@ -9365,6 +9393,31 @@ mod tests {
         assert_eq!(cpu.dreg(10), 0x7fff_ffff_2000_0000);
         assert!(cpu.cpsr.q);
 
+        cpu.cpsr.q = false;
+        cpu.set_dreg(11, 0x8000_0000_4000_0001);
+        cpu.set_dreg(12, 0x8000_0000_4000_0001);
+        cpu.execute_arm(
+            enc_neon_3same(true, 2, 11, 13, 11, false, false, 12),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqrdmulh.s32 d13, d11, d12
+        assert_eq!(cpu.dreg(13), 0x7fff_ffff_2000_0001);
+        assert!(cpu.cpsr.q);
+
+        cpu.set_dreg(14, u64::from_le_bytes([3, 0x80, 0xff, 0, 0, 0, 0, 0]));
+        cpu.set_dreg(15, u64::from_le_bytes([5, 2, 2, 0xff, 0, 0, 0, 0]));
+        cpu.execute_arm(
+            enc_neon_3same(true, 0, 14, 16, 9, false, true, 15),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vmul.p8 d16, d14, d15
+        assert_eq!(
+            cpu.dreg(16),
+            u64::from_le_bytes([0x0f, 0, 0xfe, 0, 0, 0, 0, 0])
+        );
+
         let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
         cpu.set_dreg(4, pack2(1.5, 2.0));
         cpu.set_dreg(5, pack2(2.5, -3.0));
@@ -10172,6 +10225,16 @@ mod tests {
             .unwrap(); // vqdmlal.s16 q11, d2, d3
         assert_eq!(cpu.dreg(22), 0xe000_0000_2000_0001);
         assert_eq!(cpu.dreg(23), 0x0000_0002_0000_0000);
+
+        cpu.set_dreg(14, u64::from_le_bytes([3, 0x80, 0xff, 0, 0, 0, 0, 0]));
+        cpu.set_dreg(15, u64::from_le_bytes([5, 2, 2, 0xff, 0, 0, 0, 0]));
+        cpu.execute_arm(enc_neon_3diff(false, 0, 14, 24, 14, 15), 0, &mut mem)
+            .unwrap(); // vmull.p8 q12, d14, d15
+        assert_eq!(
+            cpu.dreg(24),
+            u64::from_le_bytes([0x0f, 0, 0, 1, 0xfe, 1, 0, 0])
+        );
+        assert_eq!(cpu.dreg(25), 0);
     }
 
     #[test]
@@ -10714,15 +10777,31 @@ mod tests {
         assert_eq!(cpu.reg(1), 16);
 
         cpu.set_pc(0x4b6aa);
+        cpu.set_reg(1, (-5i32) as u32);
+        cpu.set_reg(0, 0x1234_5607);
+        mem.load_thumb_halfwords(0x4b6aa, &[0xfa51, 0xf180])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // uxtab r1, r1, r0
+        assert_eq!(cpu.reg(1), 2);
+
+        cpu.set_pc(0x4b6ae);
+        cpu.set_reg(4, 0x0001_0002);
+        cpu.set_reg(5, 0x00fe_00ff);
+        mem.load_thumb_halfwords(0x4b6ae, &[0xfa34, 0xf385])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // uxtab16 r3, r4, r5
+        assert_eq!(cpu.reg(3), 0x00ff_0101);
+
+        cpu.set_pc(0x4b6b2);
         cpu.set_reg(3, 0xe0);
-        mem.load_thumb_halfwords(0x4b6aa, &[0xea4f, 0x1353])
+        mem.load_thumb_halfwords(0x4b6b2, &[0xea4f, 0x1353])
             .unwrap();
         cpu.step(&mut mem).unwrap(); // lsr.w r3, r3, #5
         assert_eq!(cpu.reg(3), 7);
 
-        cpu.set_pc(0x4b6ae);
+        cpu.set_pc(0x4b6b6);
         cpu.set_reg(2, 0x1234_abcd);
-        mem.load_thumb_halfwords(0x4b6ae, &[0xf3c2, 0x020b])
+        mem.load_thumb_halfwords(0x4b6b6, &[0xf3c2, 0x020b])
             .unwrap();
         cpu.step(&mut mem).unwrap(); // ubfx r2, r2, #0, #12
         assert_eq!(cpu.reg(2), 0xbcd);

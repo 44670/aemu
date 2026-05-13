@@ -3894,6 +3894,50 @@ fn qemu_oracle_thumb32_long_multiply_register_order_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_thumb32_extend_add_matches_interpreter() {
+    let asm = ".syntax unified\n\
+         .arch armv7-a\n\
+         .text\n\
+         .arm\n\
+         .global _start\n\
+         _start:\n\
+         ldr r0, =thumb_start + 1\n\
+         bx r0\n\
+         .thumb\n\
+         thumb_start:\n\
+         movs r7, #0\n\
+         ldr r1, =0xfffffffb\n\
+         ldr r0, =0x12345607\n\
+         uxtab r1, r1, r0\n\
+         eors r7, r1\n\
+         ldr r4, =0x00010002\n\
+         ldr r5, =0x00fe00ff\n\
+         uxtab16 r3, r4, r5\n\
+         eors r7, r3\n\
+         mov r0, r7\n\
+         movs r7, #1\n\
+         svc #0\n"
+        .to_string();
+    let Some(qemu_exit) = run_arm_linux_exit_with_clang_args(&asm, &["-march=armv7-a"]) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_reg(1, (-5i32) as u32);
+    cpu.set_reg(0, 0x1234_5607);
+    cpu.execute_thumb32(0xfa51, 0xf180, 0, &mut mem).unwrap(); // uxtab r1, r1, r0
+    let mut folded = cpu.reg(1);
+
+    cpu.set_reg(4, 0x0001_0002);
+    cpu.set_reg(5, 0x00fe_00ff);
+    cpu.execute_thumb32(0xfa34, 0xf385, 0, &mut mem).unwrap(); // uxtab16 r3, r4, r5
+    folded ^= cpu.reg(3);
+
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_thumb32_table_branch_matches_interpreter() {
     let asm = ".syntax unified\n\
          .arch armv7-a\n\
@@ -5716,6 +5760,70 @@ fn qemu_oracle_neon_mcpe_narrow_and_estimate_matches_interpreter() {
         ^ ((cpu.dreg(1) >> 32) as u32)
         ^ (cpu.dreg(8) as u32)
         ^ ((cpu.dreg(8) >> 32) as u32);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
+fn qemu_oracle_neon_mcpe_polynomial_and_high_mul_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_poly_high\n\
+         vld1.32 {d0}, [r5]!\n\
+         vld1.32 {d1}, [r5]!\n\
+         vqrdmulh.s32 d2, d0, d1\n\
+         vld1.8 {d3}, [r5]!\n\
+         vld1.8 {d4}, [r5]\n\
+         vmul.p8 d5, d3, d4\n\
+         vmull.p8 q3, d3, d4\n\
+         ldr r5, =out_poly_high\n\
+         vst1.64 {d2, d5, d6, d7}, [r5]\n\
+         mov r0, #0\n\
+         .rept 8\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_poly_high: .word 0x40000001, 0x80000000\n\
+                           .word 0x40000001, 0x80000000\n\
+                           .byte 3, 0x80, 0xff, 0, 0, 0, 0, 0\n\
+                           .byte 5, 2, 2, 0xff, 0, 0, 0, 0\n\
+         out_poly_high: .space 32\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(0, 0x8000_0000_4000_0001);
+    cpu.set_dreg(1, 0x8000_0000_4000_0001);
+    cpu.execute_arm(
+        neon_3same_instr(true, 2, 0, 2, 11, false, false, 1),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vqrdmulh.s32 d2, d0, d1
+
+    cpu.set_dreg(3, u64::from_le_bytes([3, 0x80, 0xff, 0, 0, 0, 0, 0]));
+    cpu.set_dreg(4, u64::from_le_bytes([5, 2, 2, 0xff, 0, 0, 0, 0]));
+    cpu.execute_arm(
+        neon_3same_instr(true, 0, 3, 5, 9, false, true, 4),
+        0,
+        &mut mem,
+    )
+    .unwrap(); // vmul.p8 d5, d3, d4
+    cpu.execute_arm(neon_3diff_instr(false, 0, 3, 6, 14, 4), 0, &mut mem)
+        .unwrap(); // vmull.p8 q3, d3, d4
+
+    let folded = (cpu.dreg(2) as u32)
+        ^ ((cpu.dreg(2) >> 32) as u32)
+        ^ (cpu.dreg(5) as u32)
+        ^ ((cpu.dreg(5) >> 32) as u32)
+        ^ (cpu.dreg(6) as u32)
+        ^ ((cpu.dreg(6) >> 32) as u32)
+        ^ (cpu.dreg(7) as u32)
+        ^ ((cpu.dreg(7) >> 32) as u32);
     assert_eq!(qemu_exit as u32, folded & 0xff);
 }
 
