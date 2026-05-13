@@ -1406,14 +1406,24 @@ impl Cpu {
             let result = if to_integer {
                 let value = f32::from_bits(bits);
                 if unsigned {
-                    value as u32
+                    let (result, flags) = vfp_trunc_to_u32_bits(f64::from(value));
+                    self.fpscr |= flags;
+                    result
                 } else {
-                    value as i32 as u32
+                    let (result, flags) = vfp_trunc_to_i32_bits(f64::from(value));
+                    self.fpscr |= flags;
+                    result
                 }
             } else if unsigned {
-                (bits as f32).to_bits()
+                let input = f64::from(bits);
+                let result = bits as f32;
+                self.fpscr |= vfp_int_to_f32_inexact_flag(input, result);
+                result.to_bits()
             } else {
-                ((bits as i32) as f32).to_bits()
+                let input = f64::from(bits as i32);
+                let result = (bits as i32) as f32;
+                self.fpscr |= vfp_int_to_f32_inexact_flag(input, result);
+                result.to_bits()
             };
             neon_write_elem(&mut out, lane, 2, u64::from(result));
         }

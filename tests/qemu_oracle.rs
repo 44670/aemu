@@ -5878,6 +5878,84 @@ fn qemu_oracle_neon_reciprocal_estimate_f32_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_neon_vcvt_fpscr_flags_match_interpreter() {
+    let asm = neon_oracle_program(
+        "mov r3, #0\n\
+         vmsr fpscr, r3\n\
+         ldr r5, =values_vcvt_float\n\
+         vld1.32 {d0, d1}, [r5]\n\
+         vcvt.s32.f32 q1, q0\n\
+         vmrs r2, fpscr\n\
+         ldr r5, =out_vcvt\n\
+         vst1.64 {d2, d3}, [r5]\n\
+         mov r0, r2\n\
+         .rept 4\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         mov r3, #0\n\
+         vmsr fpscr, r3\n\
+         ldr r5, =values_vcvt_uint\n\
+         vld1.32 {d6, d7}, [r5]\n\
+         vcvt.f32.u32 q2, q3\n\
+         vmrs r2, fpscr\n\
+         ldr r5, =out_vcvt\n\
+         vst1.64 {d4, d5}, [r5]\n\
+         eor r0, r0, r2\n\
+         .rept 4\n\
+         ldr r1, [r5], #4\n\
+         eor r0, r0, r1\n\
+         .endr\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_vcvt_float: .word 0x3fc00000, 0xbf800000, 0x4f000000, 0x7fc00000\n\
+         values_vcvt_uint: .word 0x01000001, 5, 0xffffffff, 0\n\
+         out_vcvt: .space 16\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(
+        0,
+        u64::from(1.5f32.to_bits()) | (u64::from((-1.0f32).to_bits()) << 32),
+    );
+    cpu.set_dreg(
+        1,
+        u64::from(2_147_483_648.0f32.to_bits()) | (u64::from(f32::NAN.to_bits()) << 32),
+    );
+    cpu.fpscr = 0;
+    cpu.execute_arm(neon_2reg_misc_instr(2, 2, 3, 14, true, 0), 0, &mut mem)
+        .unwrap(); // vcvt.s32.f32 q1, q0
+    let first_flags = cpu.fpscr;
+    let first_folded = (cpu.dreg(2) as u32)
+        ^ ((cpu.dreg(2) >> 32) as u32)
+        ^ (cpu.dreg(3) as u32)
+        ^ ((cpu.dreg(3) >> 32) as u32)
+        ^ first_flags;
+
+    cpu.set_dreg(6, u64::from(0x0100_0001u32) | (u64::from(5u32) << 32));
+    cpu.set_dreg(7, u64::from(u32::MAX));
+    cpu.fpscr = 0;
+    cpu.execute_arm(neon_2reg_misc_instr(4, 2, 3, 13, true, 6), 0, &mut mem)
+        .unwrap(); // vcvt.f32.u32 q2, q3
+    let second_flags = cpu.fpscr;
+    let folded = first_folded
+        ^ (cpu.dreg(4) as u32)
+        ^ ((cpu.dreg(4) >> 32) as u32)
+        ^ (cpu.dreg(5) as u32)
+        ^ ((cpu.dreg(5) >> 32) as u32)
+        ^ second_flags;
+
+    assert_eq!(first_flags & 0x1f, 0x11);
+    assert_eq!(second_flags & 0x1f, 0x10);
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_neon_mcpe_scalar_long_matches_interpreter() {
     let asm = neon_oracle_program(
         "ldr r5, =values_mul_a\n\
