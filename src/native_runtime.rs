@@ -262,12 +262,38 @@ impl NativeRuntime {
         self.cpu.branch_exchange(address);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
+        let trace_range = parse_trace_pc_range();
         for _ in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
                 return Ok(());
             }
             if tail.len() == RUN_FUNCTION_TRACE_LEN {
                 tail.pop_front();
+            }
+            if let Some((start, end)) = trace_range {
+                let pc = self.cpu.pc();
+                if pc >= start && pc < end {
+                    let instr16 = self.link.memory.load16(pc).unwrap_or(0xffff);
+                    eprintln!(
+                        "TRACE {:?} pc={pc:#010x} instr16={instr16:#06x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} sp={:#010x} lr={:#010x}",
+                        self.cpu.isa(),
+                        self.cpu.reg(0),
+                        self.cpu.reg(1),
+                        self.cpu.reg(2),
+                        self.cpu.reg(3),
+                        self.cpu.reg(4),
+                        self.cpu.reg(5),
+                        self.cpu.reg(6),
+                        self.cpu.reg(7),
+                        self.cpu.reg(8),
+                        self.cpu.reg(9),
+                        self.cpu.reg(10),
+                        self.cpu.reg(11),
+                        self.cpu.reg(12),
+                        self.cpu.reg(13),
+                        self.cpu.reg(14),
+                    );
+                }
             }
             tail.push_back(NativeRuntimeTraceEntry {
                 pc: self.cpu.pc(),
@@ -295,6 +321,23 @@ impl NativeRuntime {
             self.run_function(constructor.address, max_steps_per_constructor)?;
         }
         Ok(())
+    }
+}
+
+fn parse_trace_pc_range() -> Option<(u32, u32)> {
+    let raw = std::env::var("AEMU_TRACE_PC_RANGE").ok()?;
+    let (start, end) = raw.split_once(':')?;
+    let start = parse_u32_env(start)?;
+    let end = parse_u32_env(end)?;
+    (start < end).then_some((start, end))
+}
+
+fn parse_u32_env(raw: &str) -> Option<u32> {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        raw.parse().ok()
     }
 }
 

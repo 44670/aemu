@@ -4,6 +4,10 @@ use crate::armv6::{Cpu, Memory};
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 
+const FAKE_FILE_SIZE: u32 = 0x40;
+const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
+const FIRST_FAKE_FD: u32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
     Libc,
@@ -128,6 +132,8 @@ pub struct HleRuntime {
     heap_end: u32,
     allocations: Vec<HleAllocation>,
     next_gl_name: u32,
+    next_fd: u32,
+    random_state: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +150,8 @@ impl HleRuntime {
             heap_end: heap_base.saturating_add(heap_size),
             allocations: Vec::new(),
             next_gl_name: 1,
+            next_fd: FIRST_FAKE_FD,
+            random_state: 0x1234_5678,
         }
     }
 
@@ -187,6 +195,17 @@ impl HleRuntime {
             "clock_gettime" => self.clock_gettime(cpu, memory),
             "time" => self.time(cpu, memory),
             "pthread_self" => Ok(self.return32(cpu, 1)),
+            "fopen" => self.fopen_call(cpu, memory),
+            "fdopen" => self.fdopen_call(cpu, memory),
+            "fclose" | "close" => Ok(self.return32(cpu, 0)),
+            "open" => self.open_call(cpu, memory),
+            "read" => self.read_call(cpu, memory),
+            "fread" => self.fread_call(cpu, memory),
+            "write" => Ok(self.return32(cpu, cpu.reg(2))),
+            "fwrite" => Ok(self.return32(cpu, cpu.reg(2))),
+            "__cxa_guard_acquire" => self.cxa_guard_acquire(cpu, memory),
+            "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
+            "__cxa_guard_abort" => Ok(self.return32(cpu, 0)),
             name if name.starts_with("gl") => self.gles(name, cpu, memory),
             name if name.starts_with("egl") => self.egl(name, cpu, memory),
             _ => self.dispatch_stub(name, descriptor.behavior, cpu, memory),
@@ -488,6 +507,128 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn fopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 256)?;
+        if is_random_device_path(&path) {
+            let fd = self.alloc_fd();
+            let ptr = self.alloc_fake_file(memory, fd)?;
+            return Ok(self.return32(cpu, ptr));
+        }
+        self.set_errno(memory, 2)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn fdopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        if fd == u32::MAX {
+            self.set_errno(memory, 9)?;
+            return Ok(self.return32(cpu, 0));
+        }
+        let ptr = self.alloc_fake_file(memory, fd)?;
+        Ok(self.return32(cpu, ptr))
+    }
+
+    fn open_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 256)?;
+        if is_random_device_path(&path) {
+            let fd = self.alloc_fd();
+            return Ok(self.return32(cpu, fd));
+        }
+        self.set_errno(memory, 2)?;
+        Ok(self.return32(cpu, u32::MAX))
+    }
+
+    fn read_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let buf = cpu.reg(1);
+        let count = cpu.reg(2);
+        if fd < FIRST_FAKE_FD || buf == 0 {
+            self.set_errno(memory, 9)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        self.fill_random(memory, buf, count)?;
+        Ok(self.return32(cpu, count))
+    }
+
+    fn fread_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let ptr = cpu.reg(0);
+        let size = cpu.reg(1);
+        let count = cpu.reg(2);
+        let stream = cpu.reg(3);
+        if ptr == 0 || stream == 0 || self.fake_file_fd(memory, stream).is_err() {
+            return Ok(self.return32(cpu, 0));
+        }
+        let Some(total) = size.checked_mul(count) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        self.fill_random(memory, ptr, total)?;
+        Ok(self.return32(cpu, count))
+    }
+
+    fn alloc_fd(&mut self) -> u32 {
+        let fd = self.next_fd;
+        self.next_fd = self.next_fd.wrapping_add(1).max(FIRST_FAKE_FD);
+        fd
+    }
+
+    fn alloc_fake_file<M: Memory>(&mut self, memory: &mut M, fd: u32) -> Result<u32, HleError> {
+        let ptr = self.alloc(FAKE_FILE_SIZE, 8)?;
+        for offset in 0..FAKE_FILE_SIZE {
+            store8(memory, ptr.wrapping_add(offset), 0)?;
+        }
+        store16(memory, ptr.wrapping_add(FAKE_FILE_FD_OFFSET), fd as u16)?;
+        Ok(ptr)
+    }
+
+    fn fake_file_fd<M: Memory>(&mut self, memory: &mut M, stream: u32) -> Result<u32, HleError> {
+        Ok(u32::from(load16(
+            memory,
+            stream.wrapping_add(FAKE_FILE_FD_OFFSET),
+        )?))
+    }
+
+    fn fill_random<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        ptr: u32,
+        len: u32,
+    ) -> Result<(), HleError> {
+        for idx in 0..len {
+            self.random_state = self
+                .random_state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            store8(
+                memory,
+                ptr.wrapping_add(idx),
+                (self.random_state >> 24) as u8,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn cxa_guard_acquire<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let guard = cpu.reg(0);
+        let initialized = guard != 0 && load8(memory, guard)? != 0;
+        Ok(self.return32(cpu, u32::from(!initialized)))
+    }
+
+    fn cxa_guard_release<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let guard = cpu.reg(0);
+        if guard != 0 {
+            store8(memory, guard, 1)?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
     fn libm(&mut self, name: &str, cpu: &mut Cpu) -> Result<(), HleError> {
         match name {
             "sinf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).sin())),
@@ -748,6 +889,18 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "clock_gettime"
                 | "time"
                 | "pthread_self"
+                | "fopen"
+                | "fdopen"
+                | "fclose"
+                | "open"
+                | "close"
+                | "read"
+                | "fread"
+                | "write"
+                | "fwrite"
+                | "__cxa_guard_acquire"
+                | "__cxa_guard_release"
+                | "__cxa_guard_abort"
         )
     {
         return HleCallBehavior::Implemented;
@@ -1227,6 +1380,22 @@ fn strlen<M: Memory>(memory: &mut M, ptr: u32) -> Result<u32, HleError> {
     }
 }
 
+fn load_c_string<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> Result<String, HleError> {
+    let mut bytes = Vec::new();
+    for idx in 0..max_len {
+        let byte = load8(memory, ptr.wrapping_add(idx))?;
+        if byte == 0 {
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        bytes.push(byte);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn is_random_device_path(path: &str) -> bool {
+    matches!(path, "/dev/urandom" | "/dev/random")
+}
+
 fn strcmp<M: Memory>(memory: &mut M, a: u32, b: u32, max_len: u32) -> Result<i32, HleError> {
     for idx in 0..max_len {
         let av = load8(memory, a.wrapping_add(idx))?;
@@ -1241,6 +1410,12 @@ fn strcmp<M: Memory>(memory: &mut M, a: u32, b: u32, max_len: u32) -> Result<i32
 fn load8<M: Memory>(memory: &mut M, addr: u32) -> Result<u8, HleError> {
     memory
         .load8(addr)
+        .map_err(|err| HleError::Memory(err.to_string()))
+}
+
+fn load16<M: Memory>(memory: &mut M, addr: u32) -> Result<u16, HleError> {
+    memory
+        .load16(addr)
         .map_err(|err| HleError::Memory(err.to_string()))
 }
 
@@ -1362,6 +1537,68 @@ mod tests {
         let new_ptr = cpu.reg(0);
         assert_ne!(new_ptr, old_ptr);
         assert_eq!(memory.load_bytes_for_test(new_ptr, 4), b"rust");
+    }
+
+    #[test]
+    fn dispatches_random_device_stdio_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1100, b"/dev/urandom\0").unwrap();
+        memory.load_bytes(0x1120, b"rb\0").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 0x1120);
+        hle.dispatch("fopen", &mut cpu, &mut memory).unwrap();
+        let file = cpu.reg(0);
+        assert_ne!(file, 0);
+        let fd = memory
+            .load16(file.wrapping_add(FAKE_FILE_FD_OFFSET))
+            .unwrap();
+        assert_eq!(fd, FIRST_FAKE_FD as u16);
+
+        cpu.set_reg(0, u32::from(fd));
+        cpu.set_reg(1, 0x1200);
+        cpu.set_reg(2, 4);
+        hle.dispatch("read", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+        assert_ne!(memory.load_bytes_for_test(0x1200, 4), [0, 0, 0, 0]);
+
+        cpu.set_reg(0, 0x1210);
+        cpu.set_reg(1, 2);
+        cpu.set_reg(2, 3);
+        cpu.set_reg(3, file);
+        hle.dispatch("fread", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 3);
+        assert_ne!(memory.load_bytes_for_test(0x1210, 6), [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn dispatches_cxa_guard_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("__cxa_guard_acquire", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("__cxa_guard_release", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load8(0x1100).unwrap(), 1);
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("__cxa_guard_acquire", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
     }
 
     trait TestBytes {
