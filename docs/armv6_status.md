@@ -1,7 +1,8 @@
-# ARMv6 Interpreter Status
+# ARM Interpreter Status
 
 This file tracks implemented interpreter coverage. Passing tests do not mean the
-ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
+ARMv6 or ARMv7 goal is complete; this is a working checklist for the remaining
+CPU work.
 
 ## Implemented
 
@@ -78,9 +79,8 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   `VLDM`/`VSTM`/`VPUSH`/`VPOP` forms
 - Explicit unpredictable traps for invalid VFPv2 load/store register ranges,
   empty VFP multiple-transfer lists, and writeback with `PC` as the base
-- Explicit unpredictable traps for VFPv2 double-register encodings that select
-  D16-D31 across core-register moves, `VMOV.32`, arithmetic, compare, and
-  conversion paths
+- Target-driven VFPv3 register coverage for D16-D31 across core-register
+  moves, selected arithmetic, conversion, and load/store paths
 - FPSCR VFP short-vector `LEN`/`STRIDE` support for vectorizable VFPv2
   arithmetic and unary operations, including scalar destination/source-bank
   handling and invalid vector length/stride traps
@@ -109,8 +109,19 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   conversion remains scalar when FPSCR short-vector `LEN` is nonzero
 - Explicit unpredictable traps for invalid VFP core-register forms that use
   `PC`, including single-register `VMOV` and `VMSR FPSCR, PC`
-- Explicit undefined traps for non-baseline VFPv3 immediate moves and
-  fixed-point conversion encodings that are outside ARMv6/VFPv2
+- Target-driven VFPv3 immediate moves: `VMOV.f32 #imm` and `VMOV.f64 #imm`
+  for ARMv7 constructor paths
+- Target-driven ARMv7/Thumb-2 coverage used by the local Minecraft PE
+  `armeabi-v7a` probe: A32 `MOVW`/`MOVT`, 32-bit Thumb fetch/decode,
+  Thumb-2 branches, `CLZ`, modified immediates, IT blocks, `CBZ`/`CBNZ`,
+  `PUSH.W`/`POP.W`, `STM.W`, `STRD`, and common wide `LDR.W`/`STR.W`
+  immediate forms
+- Target-driven NEON coverage for the local Minecraft PE probe: D0-D31 vector
+  state, 3-same integer/logic/f32 operations, modified immediates,
+  multiple-structure `VLD`/`VST`, `VTBL`/`VTBX`, `VEXT`, `VDUP`, `VREV`,
+  immediate and register shifts, narrowing shifts, widening/narrowing moves,
+  3-different-length add/sub/absolute-difference/multiply-long families,
+  pairwise integer min/max, `VQDMULH`/`VQRDMULH`, and vector `VABS`/`VNEG`
 - Thumb-1 common instruction set: shifts, ALU ops, high-register ops,
   literal loads, load/store forms, push/pop, multiple load/store,
   including `LDMIA` base-in-list writeback suppression,
@@ -129,18 +140,20 @@ ARMv6 goal is complete; this is a working checklist for the remaining CPU work.
   ARMv5TE signed-halfword multiply, dual 16-bit DSP multiply, high-word signed
   multiply, and absolute-difference cases has not been audited
   instruction-by-instruction against the ARM ARM.
-- Full VFP/VFPv2 is not implemented; FPSCR exception flags remain incomplete
+- Full VFP/VFPv2/VFPv3 is not implemented; FPSCR exception flags remain incomplete
   beyond basic `IOC`/`DZC` divide, square-root, compare-NaN, selected
   single-precision arithmetic, selected double invalid/overflow arithmetic, and
   conversion invalid cases, plus basic conversion `IXC`/`OFC`/`UFC` cases;
   double-precision square-root inexact behavior and less common
   arithmetic/conversion edge cases still need an
   instruction-by-instruction audit. VFPv3 fixed-point conversions are outside
-  the ARMv6/VFPv2 baseline.
+  the current target-driven coverage.
 - General coprocessor instructions are not implemented beyond the CP15
   user-thread/barrier shims and VFP paths listed above.
-- Thumb-2 is intentionally not implemented for the ARMv6 baseline, but
-  ARMv6T2 targets would need it.
+- Thumb-2 coverage is target-driven and incomplete; add opcodes from real
+  target traces instead of treating current support as architecture-complete.
+- NEON coverage is target-driven and incomplete; remaining gaps should be
+  closed from real target traces or focused disassembly scans.
 - Exception, signal, and privileged/system behavior is only stubbed or trapped
   enough for user-mode HLE work.
 - Exclusive monitor behavior is still a single-core approximation and does not
@@ -158,9 +171,14 @@ The only local APK currently found is:
 ```
 
 It contains only `lib/armeabi-v7a/*.so`. Its `libminecraftpe.so` probes as ARM
-v7, Thumb-2, VFPv3, and NEON, so it is outside the ARMv6/`armeabi` baseline.
-A broader search under `/mnt/hgfs/deb13` also found no older Minecraft PE APK
-and no standalone `libminecraftpe.so`.
+v7, Thumb-2, VFPv3, and NEON, so it is outside the original ARMv6/`armeabi`
+baseline but is now the active ARMv7/NEON research target.
+
+The native constructor probe currently reaches `libminecraftpe.so` init array
+entry `0x70af5491` after completing the earlier `libfmod.so` and
+`libgnustl_shared.so` constructors. The current blocker is a null guest-memory
+access while executing Thumb at `0x71ae01fe`, which falls in the
+`libminecraftpe.so` data/vtable region rather than an undefined NEON opcode.
 
 An older Minecraft PE APK with `lib/armeabi/libminecraftpe.so` is still needed
 for true ARMv6 Minecraft PE verification.

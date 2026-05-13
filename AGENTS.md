@@ -73,7 +73,7 @@ Avoid building broad framework behavior until a target game actually needs it.
 
 ## ARM CPU Direction
 
-Use a custom Rust ARM interpreter for guest `armeabi` native code.
+Use a custom Rust ARM interpreter for guest Android native code.
 
 Do not embed QEMU, Unicorn, or another large CPU emulator as the runtime core.
 Those projects are useful as references and test oracles, but they do not fit
@@ -83,11 +83,14 @@ Interpreter baseline:
 
 - ARMv5TE plus ARMv6 user-mode integer instructions
 - ARM state and Thumb-1 state with interworking
+- Target-driven ARMv7-A, Thumb-2, VFPv3, and NEON coverage for local
+  `armeabi-v7a` Minecraft PE probes
 - little-endian ARM EABI
 - user-mode condition flags and exceptions needed by native app code
 - helper paths for unaligned memory behavior as target games require
-- VFPv2/softfloat support only after export reports or runtime traces show it
-  is needed
+- VFP/NEON support should continue to be added from target APK disassembly,
+  export reports, and runtime traces, not by trying to claim full architecture
+  completeness upfront
 
 References:
 

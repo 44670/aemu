@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::armv6::{Cpu, Memory, Trap};
+use crate::armv6::{Cpu, Isa, Memory, Trap};
 use crate::guest_memory::MappedMemoryError;
 use crate::hle_imports::{HLE_TRAP_ARM_INSTR, HleError, HleRuntime};
 use crate::native_loader::NativeLinkReport;
@@ -11,6 +11,7 @@ pub const DEFAULT_TLS_BASE: u32 = 0x6e00_0000;
 pub const DEFAULT_TLS_SIZE: usize = 0x0001_0000;
 pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
 pub const DEFAULT_HEAP_SIZE: usize = 0x0400_0000;
+const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
 
@@ -68,6 +69,7 @@ pub enum NativeRuntimeError {
     Memory(String),
     AddressOverflow,
     Cpu(Trap),
+    CpuAt { pc: u32, isa: Isa, source: Trap },
     UnknownHleTrap { pc: u32 },
     Hle { name: String, source: HleError },
 }
@@ -79,6 +81,9 @@ impl fmt::Display for NativeRuntimeError {
             Self::Memory(err) => write!(f, "{err}"),
             Self::AddressOverflow => write!(f, "runtime address range overflow"),
             Self::Cpu(err) => write!(f, "{err}"),
+            Self::CpuAt { pc, isa, source } => {
+                write!(f, "{source} while executing {isa:?} at {pc:#010x}")
+            }
             Self::UnknownHleTrap { pc } => write!(f, "unknown HLE trap at {pc:#010x}"),
             Self::Hle { name, source } => write!(f, "HLE {name} failed: {source}"),
         }
@@ -103,11 +108,17 @@ impl NativeRuntime {
             .map_err(NativeRuntimeError::MemoryMap)?;
 
         let mut cpu = Cpu::new();
-        let sp = config
+        let stack_size =
+            u32::try_from(config.stack_size).map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let stack_top = config
             .stack_base
-            .checked_add(config.stack_size as u32)
+            .checked_add(stack_size)
             .ok_or(NativeRuntimeError::AddressOverflow)?
             & !7;
+        let entry_headroom = (stack_size / 16)
+            .clamp(0x100, STACK_ENTRY_HEADROOM_MAX)
+            .min(stack_size.saturating_sub(8));
+        let sp = stack_top.wrapping_sub(entry_headroom) & !7;
         cpu.set_reg(13, sp);
         cpu.cp15_tpidrurw = config.tls_base;
         cpu.cp15_tpidruro = config.tls_base;
@@ -122,6 +133,8 @@ impl NativeRuntime {
     }
 
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        let pc_before = self.cpu.pc();
+        let isa_before = self.cpu.isa();
         match self.cpu.step(&mut self.link.memory) {
             Ok(()) => Ok(NativeRuntimeStep::GuestInstruction),
             Err(Trap::UndefinedArm { pc, instr }) if instr == HLE_TRAP_ARM_INSTR => {
@@ -137,7 +150,14 @@ impl NativeRuntime {
                     })?;
                 Ok(NativeRuntimeStep::HleCall { name, address: pc })
             }
-            Err(err) => Err(NativeRuntimeError::Cpu(err)),
+            Err(Trap::Memory(err)) => Err(NativeRuntimeError::Memory(format!(
+                "{err} while executing {isa_before:?} at {pc_before:#010x}"
+            ))),
+            Err(err) => Err(NativeRuntimeError::CpuAt {
+                pc: pc_before,
+                isa: isa_before,
+                source: err,
+            }),
         }
     }
 

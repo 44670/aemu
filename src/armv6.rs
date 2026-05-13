@@ -131,6 +131,13 @@ struct VfpVectorPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThumbItState {
+    conds: [u32; 4],
+    len: usize,
+    pos: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExclusiveReservation {
     addr: u32,
     size: u8,
@@ -139,12 +146,13 @@ struct ExclusiveReservation {
 #[derive(Debug, Clone)]
 pub struct Cpu {
     regs: [u32; 16],
-    sregs: [u32; 32],
+    sregs: [u32; 64],
     pub fpscr: u32,
     pub cp15_tpidrurw: u32,
     pub cp15_tpidruro: u32,
     pub cpsr: Cpsr,
     thumb_bl_prefix: Option<u32>,
+    thumb_it: Option<ThumbItState>,
     exclusive_reservation: Option<ExclusiveReservation>,
 }
 
@@ -158,12 +166,13 @@ impl Cpu {
     pub fn new() -> Self {
         Self {
             regs: [0; 16],
-            sregs: [0; 32],
+            sregs: [0; 64],
             fpscr: 0,
             cp15_tpidrurw: 0,
             cp15_tpidruro: 0,
             cpsr: Cpsr::default(),
             thumb_bl_prefix: None,
+            thumb_it: None,
             exclusive_reservation: None,
         }
     }
@@ -174,6 +183,9 @@ impl Cpu {
 
     pub fn set_isa(&mut self, isa: Isa) {
         self.cpsr.t = isa == Isa::Thumb;
+        if isa == Isa::Arm {
+            self.thumb_it = None;
+        }
     }
 
     pub fn reg(&self, idx: usize) -> u32 {
@@ -210,6 +222,9 @@ impl Cpu {
 
     pub fn branch_exchange(&mut self, target: u32) {
         self.cpsr.t = target & 1 != 0;
+        if !self.cpsr.t {
+            self.thumb_it = None;
+        }
         self.regs[15] = target & !1;
     }
 
@@ -217,8 +232,26 @@ impl Cpu {
         let pc = self.regs[15];
         if self.cpsr.t {
             let instr = mem.load16(pc)?;
-            self.regs[15] = pc.wrapping_add(2);
-            self.execute_thumb(instr, pc, mem)
+            if thumb_is_32bit_prefix(instr) {
+                let second = mem.load16(pc.wrapping_add(2))?;
+                self.regs[15] = pc.wrapping_add(4);
+                if let Some(cond) = self.consume_thumb_it_condition() {
+                    if !condition_passed(cond, self.cpsr) {
+                        return Ok(());
+                    }
+                }
+                self.execute_thumb32(instr, second, pc, mem)
+            } else {
+                self.regs[15] = pc.wrapping_add(2);
+                if (instr & 0xff00) != 0xbf00 {
+                    if let Some(cond) = self.consume_thumb_it_condition() {
+                        if !condition_passed(cond, self.cpsr) {
+                            return Ok(());
+                        }
+                    }
+                }
+                self.execute_thumb(instr, pc, mem)
+            }
         } else {
             let instr = mem.load32(pc)?;
             self.regs[15] = pc.wrapping_add(4);
@@ -244,6 +277,9 @@ impl Cpu {
 
         let cond = (instr >> 28) & 0xf;
         if cond == 0xf {
+            if self.exec_arm_neon(instr, pc, mem)? {
+                return Ok(());
+            }
             if self.exec_arm_unconditional(instr, pc)? {
                 return Ok(());
             }
@@ -375,6 +411,1092 @@ impl Cpu {
         Ok(())
     }
 
+    fn exec_arm_neon<M: Memory>(&mut self, instr: u32, pc: u32, mem: &mut M) -> Result<bool> {
+        if (instr & 0xff90_0000) == 0xf400_0000 {
+            return self.exec_arm_neon_load_store_multiple(instr, pc, mem);
+        }
+
+        if (instr & 0x0e80_0000) == 0x0200_0000 {
+            return self.exec_arm_neon_3same(instr, pc);
+        }
+
+        if (instr & 0x0e80_0050) == 0x0280_0000 {
+            if self.exec_arm_neon_3diff(instr, pc)? {
+                return Ok(true);
+            }
+        }
+
+        if (instr & 0xfeb8_0090) == 0xf280_0010 {
+            return self.exec_arm_neon_modified_immediate(instr, pc);
+        }
+
+        if (instr & 0xfe80_0010) == 0xf280_0010 {
+            return self.exec_arm_neon_2reg_shift(instr, pc);
+        }
+
+        if (instr & 0xffb0_0010) == 0xf2b0_0000 {
+            return self.exec_arm_neon_vext(instr, pc);
+        }
+
+        if (instr & 0xffb0_0c10) == 0xf3b0_0800 {
+            return self.exec_arm_neon_table_lookup(instr, pc);
+        }
+
+        if (instr & 0xffb0_0f90) == 0xf3b0_0c00 {
+            return self.exec_arm_neon_vdup_scalar(instr, pc);
+        }
+
+        if (instr & 0xffb0_0810) == 0xf3b0_0000 {
+            return self.exec_arm_neon_2reg_misc(instr, pc);
+        }
+
+        Ok(false)
+    }
+
+    fn exec_arm_neon_load_store_multiple<M: Memory>(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        mem: &mut M,
+    ) -> Result<bool> {
+        let load = instr & (1 << 21) != 0;
+        let rn = ((instr >> 16) & 0xf) as usize;
+        let vd = vfp_double_d(instr);
+        let itype = ((instr >> 8) & 0xf) as u8;
+        let size = ((instr >> 6) & 0x3) as usize;
+        let align = ((instr >> 4) & 0x3) as u8;
+        let rm = (instr & 0xf) as usize;
+
+        let Some((nelem, regs, inc)) = neon_decode_ls_multiple(itype, size, align) else {
+            return Err(Trap::UndefinedArm { pc, instr });
+        };
+        let d_last = vd + inc * (nelem - 1);
+        if rn == 15 || d_last + regs > 32 {
+            return Err(Trap::Unpredictable(
+                "NEON multiple structure transfer register range",
+            ));
+        }
+
+        let ebytes = 1usize << size;
+        let elements = 8 / ebytes;
+        let mut address = self.regs[rn];
+
+        if load {
+            for r in 0..regs {
+                for i in 0..nelem {
+                    self.set_dreg_bits(vd + i * inc + r, 0);
+                }
+            }
+            for r in 0..regs {
+                for e in 0..elements {
+                    for i in 0..nelem {
+                        let ext_reg = vd + i * inc + r;
+                        let element = load_neon_memory_elem(mem, address, ebytes)?;
+                        let shift = e * ebytes * 8;
+                        let value = self.dreg_bits(ext_reg) | (element << shift);
+                        self.set_dreg_bits(ext_reg, value);
+                        address = address.wrapping_add(ebytes as u32);
+                    }
+                }
+            }
+        } else {
+            for r in 0..regs {
+                for e in 0..elements {
+                    for i in 0..nelem {
+                        let ext_reg = vd + i * inc + r;
+                        let element =
+                            (self.dreg_bits(ext_reg) >> (e * ebytes * 8)) & neon_byte_mask(ebytes);
+                        store_neon_memory_elem(mem, address, ebytes, element)?;
+                        address = address.wrapping_add(ebytes as u32);
+                    }
+                }
+            }
+        }
+
+        if rm != 15 {
+            let increment = if rm == 13 {
+                (8 * nelem * regs) as u32
+            } else {
+                self.regs[rm]
+            };
+            self.regs[rn] = self.regs[rn].wrapping_add(increment);
+        }
+        Ok(true)
+    }
+
+    fn exec_arm_neon_modified_immediate(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let vd = vfp_double_d(instr);
+        let q = instr & (1 << 6) != 0;
+        let op = instr & (1 << 5) != 0;
+        let cmode = ((instr >> 8) & 0xf) as u8;
+        let imm = ((instr >> 17) & 0x80) | ((instr >> 12) & 0x70) | (instr & 0xf);
+
+        self.check_dreg(vd)?;
+        if q {
+            if vd & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+        }
+        if cmode == 15 && op {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
+        let imm64 = neon_expand_modified_imm(imm as u8, cmode, op);
+        let regs = if q { 2 } else { 1 };
+        for idx in 0..regs {
+            let reg = vd + idx;
+            let old = self.dreg_bits(reg);
+            let value = if cmode & 1 != 0 && cmode < 12 {
+                if op { old & !imm64 } else { old | imm64 }
+            } else if op && cmode != 14 {
+                !imm64
+            } else {
+                imm64
+            };
+            self.set_dreg_bits(reg, value);
+        }
+        Ok(true)
+    }
+
+    fn exec_arm_neon_2reg_shift(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let u = instr & (1 << 24) != 0;
+        let imm6 = (instr >> 16) & 0x3f;
+        let vd = vfp_double_d(instr);
+        let opcode = ((instr >> 8) & 0xf) as u8;
+        let l = instr & (1 << 7) != 0;
+        let q = instr & (1 << 6) != 0;
+        let vm = vfp_double_m(instr);
+
+        if opcode == 10 {
+            return self.exec_arm_neon_2reg_shift_long(instr, pc, u, imm6, vd, q, vm);
+        }
+
+        if matches!(opcode, 8 | 9) {
+            return self.exec_arm_neon_2reg_shift_narrow(instr, pc, u, imm6, vd, opcode, l, q, vm);
+        }
+
+        let right_shift = matches!(opcode, 0..=4);
+        let Some((size, shift)) = neon_decode_shift_imm(right_shift, l, imm6) else {
+            return Ok(false);
+        };
+
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 || vm & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+
+        let lanes = neon_lanes(q, size);
+        let src = self.neon_reg_bytes(vm, q);
+        let old_dst = self.neon_reg_bytes(vd, q);
+        let mut out = [0u8; 16];
+        let mask = neon_elem_mask(size);
+        for lane in 0..lanes {
+            let value = neon_read_elem(&src, lane, size);
+            let old = neon_read_elem(&old_dst, lane, size);
+            let result = match opcode {
+                0 => neon_shift_right(value, shift, size, !u, false),
+                1 => old.wrapping_add(neon_shift_right(value, shift, size, !u, false)) & mask,
+                2 => neon_shift_right(value, shift, size, !u, true),
+                3 => old.wrapping_add(neon_shift_right(value, shift, size, !u, true)) & mask,
+                4 if u => {
+                    let shifted = neon_shift_right(value, shift, size, false, false);
+                    let insert_mask = if shift == neon_elem_bits(size) {
+                        0
+                    } else {
+                        mask >> shift
+                    };
+                    (old & !insert_mask) | (shifted & insert_mask)
+                }
+                5 if !u => {
+                    if shift >= neon_elem_bits(size) {
+                        0
+                    } else {
+                        (value << shift) & mask
+                    }
+                }
+                5 if u => {
+                    let insert_mask = if shift >= neon_elem_bits(size) {
+                        0
+                    } else {
+                        (mask << shift) & mask
+                    };
+                    (old & !insert_mask) | ((value << shift) & insert_mask)
+                }
+                6 if u => self.neon_qshlu_immediate(value, size, shift),
+                7 => self.neon_variable_shift(value, i64::from(shift), size, !u, true, false),
+                _ => return Ok(false),
+            };
+            neon_write_elem(&mut out, lane, size, result);
+        }
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_2reg_shift_long(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        imm6: u32,
+        vd: usize,
+        q: bool,
+        vm: usize,
+    ) -> Result<bool> {
+        if q || vd & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        let Some((size, shift)) = neon_decode_shift_imm(false, false, imm6) else {
+            return Ok(false);
+        };
+        if size == 3 {
+            return Ok(false);
+        }
+
+        self.check_dreg(vd)?;
+        self.check_dreg(vd + 1)?;
+        self.check_dreg(vm)?;
+
+        let signed = !u;
+        let src = self.neon_reg_bytes(vm, false);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        let lanes = 8 >> size;
+        for lane in 0..lanes {
+            let value = neon_read_elem(&src, lane, size);
+            let widened = neon_extend_elem(value, size, signed);
+            let shifted = (widened << shift) & neon_elem_mask(wide_size);
+            neon_write_elem(&mut out, lane, wide_size, shifted);
+        }
+        self.set_neon_reg_bytes(vd, true, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_2reg_shift_narrow(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        imm6: u32,
+        vd: usize,
+        opcode: u8,
+        rounding: bool,
+        q: bool,
+        vm: usize,
+    ) -> Result<bool> {
+        if q {
+            return Ok(false);
+        }
+        let Some((size, shift)) = neon_decode_shift_imm(true, false, imm6) else {
+            return Ok(false);
+        };
+        if size == 3 {
+            return Ok(false);
+        }
+        self.check_dreg(vd)?;
+        if vm & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vm)?;
+        self.check_dreg(vm + 1)?;
+
+        let src_size = size + 1;
+        let src = self.neon_reg_bytes(vm, true);
+        let mut out = [0u8; 16];
+        let dest_mask = neon_elem_mask(size);
+        let lanes = 8 >> size;
+
+        for lane in 0..lanes {
+            let value = neon_read_elem(&src, lane, src_size);
+            let shifted = match (opcode, u) {
+                (8, true) | (9, false) => neon_shift_right(value, shift, src_size, true, rounding),
+                _ => neon_shift_right(value, shift, src_size, false, rounding),
+            };
+            let result = match (opcode, u) {
+                (8, false) => shifted & dest_mask,
+                (8, true) => self.neon_saturating_narrow_to_unsigned(shifted, size, true),
+                (9, false) => self.neon_saturating_narrow_to_signed(shifted, size),
+                (9, true) => self.neon_saturating_narrow_to_unsigned(shifted, size, false),
+                _ => return Ok(false),
+            };
+            neon_write_elem(&mut out, lane, size, result);
+        }
+
+        self.set_dreg_bits(
+            vd,
+            u64::from_le_bytes(out[..8].try_into().expect("narrow dreg")),
+        );
+        Ok(true)
+    }
+
+    fn exec_arm_neon_vext(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let vd = vfp_double_d(instr);
+        let vn = vfp_double_n(instr);
+        let vm = vfp_double_m(instr);
+        let q = instr & (1 << 6) != 0;
+        let imm = ((instr >> 8) & 0xf) as usize;
+
+        self.check_neon_3same_regs(vd, vn, vm, q, pc, instr)?;
+        if !q && imm & 0x8 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
+        let bytes = neon_reg_bytes(q);
+        let src_n = self.neon_reg_bytes(vn, q);
+        let src_m = self.neon_reg_bytes(vm, q);
+        let mut out = [0u8; 16];
+        for idx in 0..bytes {
+            let src = idx + imm;
+            out[idx] = if src < bytes {
+                src_n[src]
+            } else {
+                src_m[src - bytes]
+            };
+        }
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_table_lookup(&mut self, instr: u32, _pc: u32) -> Result<bool> {
+        let vd = vfp_double_d(instr);
+        let vn = vfp_double_n(instr);
+        let vm = vfp_double_m(instr);
+        let len = ((instr >> 8) & 0x3) as usize + 1;
+        let tbx = instr & (1 << 6) != 0;
+
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if vn + len > 32 {
+            return Err(Trap::Unpredictable("NEON table lookup register range"));
+        }
+        for idx in 0..len {
+            self.check_dreg(vn + idx)?;
+        }
+
+        let indices = self.neon_reg_bytes(vm, false);
+        let mut table = [0u8; 32];
+        for reg_idx in 0..len {
+            let bytes = self.dreg_bits(vn + reg_idx).to_le_bytes();
+            table[reg_idx * 8..reg_idx * 8 + 8].copy_from_slice(&bytes);
+        }
+        let old_dst = self.neon_reg_bytes(vd, false);
+        let mut out = [0u8; 16];
+        for lane in 0..8 {
+            let index = indices[lane] as usize;
+            out[lane] = if index < len * 8 {
+                table[index]
+            } else if tbx {
+                old_dst[lane]
+            } else {
+                0
+            };
+        }
+        self.set_neon_reg_bytes(vd, false, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_vdup_scalar(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let vd = vfp_double_d(instr);
+        let vm = vfp_double_m(instr);
+        let q = instr & (1 << 6) != 0;
+        let imm4 = ((instr >> 16) & 0xf) as u8;
+        if imm4 & 0x7 == 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+        }
+
+        let size = imm4.trailing_zeros() as usize;
+        if size > 2 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        let index = (imm4 >> (size + 1)) as usize;
+        let src = self.neon_reg_bytes(vm, false);
+        let element = neon_read_elem(&src, index, size);
+        let mut out = [0u8; 16];
+        for lane in 0..neon_lanes(q, size) {
+            neon_write_elem(&mut out, lane, size, element);
+        }
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_2reg_misc(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let vd = vfp_double_d(instr);
+        let vm = vfp_double_m(instr);
+        let q = instr & (1 << 6) != 0;
+        let size = ((instr >> 18) & 0x3) as usize;
+        let op1 = (instr >> 16) & 0x3;
+        let op2 = (instr >> 7) & 0xf;
+
+        match (op1, op2) {
+            (0, 0..=2) => {
+                self.check_dreg(vd)?;
+                self.check_dreg(vm)?;
+                if q {
+                    if vd & 1 != 0 || vm & 1 != 0 {
+                        return Err(Trap::UndefinedArm { pc, instr });
+                    }
+                    self.check_dreg(vd + 1)?;
+                    self.check_dreg(vm + 1)?;
+                }
+                if op2 as usize + size >= 3 {
+                    return Err(Trap::UndefinedArm { pc, instr });
+                }
+
+                let group_bytes = match op2 {
+                    0 => 8,
+                    1 => 4,
+                    2 => 2,
+                    _ => unreachable!(),
+                };
+                let elem_bytes = 1usize << size;
+                let bytes = neon_reg_bytes(q);
+                let src = self.neon_reg_bytes(vm, q);
+                let mut out = [0u8; 16];
+                for group_start in (0..bytes).step_by(group_bytes) {
+                    let elems = group_bytes / elem_bytes;
+                    for elem in 0..elems {
+                        let dst_off = group_start + elem * elem_bytes;
+                        let src_off = group_start + (elems - 1 - elem) * elem_bytes;
+                        out[dst_off..dst_off + elem_bytes]
+                            .copy_from_slice(&src[src_off..src_off + elem_bytes]);
+                    }
+                }
+                self.set_neon_reg_bytes(vd, q, out);
+                Ok(true)
+            }
+            (2, 4) if !q => {
+                if size == 3 || vm & 1 != 0 {
+                    return Err(Trap::UndefinedArm { pc, instr });
+                }
+                self.check_dreg(vd)?;
+                self.check_dreg(vm)?;
+                self.check_dreg(vm + 1)?;
+
+                let src = self.neon_reg_bytes(vm, true);
+                let mut out = [0u8; 16];
+                let wide_size = size + 1;
+                for lane in 0..(8 >> size) {
+                    let value = neon_read_elem(&src, lane, wide_size) & neon_elem_mask(size);
+                    neon_write_elem(&mut out, lane, size, value);
+                }
+                self.set_dreg_bits(
+                    vd,
+                    u64::from_le_bytes(out[..8].try_into().expect("vmovn dreg")),
+                );
+                Ok(true)
+            }
+            (2, 6) if !q => {
+                if size == 3 || vd & 1 != 0 {
+                    return Err(Trap::UndefinedArm { pc, instr });
+                }
+                self.check_dreg(vd)?;
+                self.check_dreg(vd + 1)?;
+                self.check_dreg(vm)?;
+
+                let src = self.neon_reg_bytes(vm, false);
+                let mut out = [0u8; 16];
+                let wide_size = size + 1;
+                let shift = neon_elem_bits(size);
+                for lane in 0..(8 >> size) {
+                    let value = neon_read_elem(&src, lane, size);
+                    let widened = (value << shift) & neon_elem_mask(wide_size);
+                    neon_write_elem(&mut out, lane, wide_size, widened);
+                }
+                self.set_neon_reg_bytes(vd, true, out);
+                Ok(true)
+            }
+            (1, 6 | 7 | 14 | 15) => {
+                self.exec_arm_neon_2reg_abs_neg(instr, pc, size, op2, q, vd, vm)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn exec_arm_neon_2reg_abs_neg(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        size: usize,
+        op2: u32,
+        q: bool,
+        vd: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        let float = op2 >= 14;
+        let negate = matches!(op2, 7 | 15);
+        if size == 3 || (float && size != 2) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vm)?;
+        if q {
+            if vd & 1 != 0 || vm & 1 != 0 {
+                return Err(Trap::UndefinedArm { pc, instr });
+            }
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+
+        let src = self.neon_reg_bytes(vm, q);
+        let mut out = [0u8; 16];
+        if float {
+            for lane in 0..(if q { 4 } else { 2 }) {
+                let bits = neon_read_elem(&src, lane, 2) as u32;
+                let result = if negate {
+                    bits ^ 0x8000_0000
+                } else {
+                    bits & 0x7fff_ffff
+                };
+                neon_write_elem(&mut out, lane, 2, u64::from(result));
+            }
+        } else {
+            let mask = neon_elem_mask(size);
+            for lane in 0..neon_lanes(q, size) {
+                let value = neon_read_elem(&src, lane, size);
+                let signed = neon_sign_extend(value, size);
+                let result = if negate {
+                    (0u64.wrapping_sub(value)) & mask
+                } else if signed < 0 {
+                    (0u64.wrapping_sub(value)) & mask
+                } else {
+                    value & mask
+                };
+                neon_write_elem(&mut out, lane, size, result);
+            }
+        }
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_3same(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let u = instr & (1 << 24) != 0;
+        let size = ((instr >> 20) & 0x3) as usize;
+        let opcode = ((instr >> 8) & 0xf) as u8;
+        let q = instr & (1 << 6) != 0;
+        let op = instr & (1 << 4) != 0;
+        let vd = vfp_double_d(instr);
+        let vn = vfp_double_n(instr);
+        let vm = vfp_double_m(instr);
+        self.check_neon_3same_regs(vd, vn, vm, q, pc, instr)?;
+
+        if opcode == 1 && op {
+            let dst = self.neon_reg_bytes(vd, q);
+            let lhs = self.neon_reg_bytes(vn, q);
+            let rhs = self.neon_reg_bytes(vm, q);
+            let mut out = [0u8; 16];
+            let bytes = neon_reg_bytes(q);
+            for idx in 0..bytes {
+                out[idx] = match (u, size) {
+                    (false, 0) => lhs[idx] & rhs[idx],
+                    (false, 1) => lhs[idx] & !rhs[idx],
+                    (false, 2) => lhs[idx] | rhs[idx],
+                    (false, 3) => lhs[idx] | !rhs[idx],
+                    (true, 0) => lhs[idx] ^ rhs[idx],
+                    (true, 1) => (lhs[idx] & dst[idx]) | (rhs[idx] & !dst[idx]),
+                    (true, 2) => (lhs[idx] & rhs[idx]) | (dst[idx] & !rhs[idx]),
+                    (true, 3) => (dst[idx] & rhs[idx]) | (lhs[idx] & !rhs[idx]),
+                    _ => unreachable!(),
+                };
+            }
+            self.set_neon_reg_bytes(vd, q, out);
+            return Ok(true);
+        }
+
+        if matches!(opcode, 4 | 5) {
+            return self.exec_arm_neon_3same_shift(instr, pc, u, size, opcode, q, op, vd, vn, vm);
+        }
+
+        if matches!(opcode, 0 | 1 | 2 | 3 | 6 | 7 | 8 | 9 | 10 | 11) {
+            return self.exec_arm_neon_3same_int(instr, pc, u, size, opcode, q, op, vd, vn, vm);
+        }
+
+        if matches!(opcode, 12..=15) {
+            return self.exec_arm_neon_3same_f32(instr, pc, u, size, opcode, q, op, vd, vn, vm);
+        }
+
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3same_int(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        size: usize,
+        opcode: u8,
+        q: bool,
+        op: bool,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if matches!(opcode, 3 | 6 | 7) && size == 3 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if matches!(opcode, 0 | 2) && size == 3 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if opcode == 10 && (size == 3 || q) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if opcode == 11 && op && q {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if opcode == 11 && !op && (size == 0 || size == 3) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if opcode == 9 && op && u && size != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
+        if opcode == 10 {
+            let lanes = neon_lanes(false, size);
+            let lhs = self.neon_reg_bytes(vn, false);
+            let rhs = self.neon_reg_bytes(vm, false);
+            let mut out = [0u8; 16];
+            for lane in 0..lanes {
+                let a = if lane * 2 < lanes {
+                    neon_read_elem(&lhs, lane * 2, size)
+                } else {
+                    neon_read_elem(&rhs, lane * 2 - lanes, size)
+                };
+                let b = if lane * 2 + 1 < lanes {
+                    neon_read_elem(&lhs, lane * 2 + 1, size)
+                } else {
+                    neon_read_elem(&rhs, lane * 2 + 1 - lanes, size)
+                };
+                let result = neon_minmax(a, b, size, !u, !op);
+                neon_write_elem(&mut out, lane, size, result);
+            }
+            self.set_neon_reg_bytes(vd, false, out);
+            return Ok(true);
+        }
+
+        let lanes = neon_lanes(q, size);
+        let lhs = self.neon_reg_bytes(vn, q);
+        let rhs = self.neon_reg_bytes(vm, q);
+        let old_dst = self.neon_reg_bytes(vd, q);
+        let mut out = [0u8; 16];
+
+        for lane in 0..lanes {
+            let a = neon_read_elem(&lhs, lane, size);
+            let b = neon_read_elem(&rhs, lane, size);
+            let d = neon_read_elem(&old_dst, lane, size);
+            let mask = neon_elem_mask(size);
+            let result = match (opcode, u, op) {
+                (0, unsigned, false) => neon_halving_add(a, b, size, !unsigned, false),
+                (0, unsigned, true) => self.neon_saturating_add(a, b, size, !unsigned),
+                (1, unsigned, false) => neon_halving_add(a, b, size, !unsigned, true),
+                (1, _, _) => unreachable!(),
+                (2, unsigned, false) => neon_halving_sub(a, b, size, !unsigned),
+                (2, unsigned, true) => self.neon_saturating_sub(a, b, size, !unsigned),
+                (3, unsigned, false) => neon_compare_gt(a, b, size, !unsigned),
+                (3, unsigned, true) => neon_compare_ge(a, b, size, !unsigned),
+                (6, unsigned, false) => neon_minmax(a, b, size, !unsigned, true),
+                (6, unsigned, true) => neon_minmax(a, b, size, !unsigned, false),
+                (7, unsigned, false) => neon_abs_diff(a, b, size, !unsigned),
+                (7, unsigned, true) => d.wrapping_add(neon_abs_diff(a, b, size, !unsigned)) & mask,
+                (8, false, false) => a.wrapping_add(b) & mask,
+                (8, true, false) => a.wrapping_sub(b) & mask,
+                (8, false, true) => {
+                    if a & b != 0 {
+                        mask
+                    } else {
+                        0
+                    }
+                }
+                (8, true, true) => {
+                    if a == b {
+                        mask
+                    } else {
+                        0
+                    }
+                }
+                (9, false, false) => d.wrapping_add(a.wrapping_mul(b)) & mask,
+                (9, true, false) => d.wrapping_sub(a.wrapping_mul(b)) & mask,
+                (9, false, true) => a.wrapping_mul(b) & mask,
+                (9, true, true) => neon_polynomial_mul8(a as u8, b as u8) as u64,
+                (11, rounding, false) => {
+                    self.neon_saturating_doubling_mul_high(a, b, size, rounding)
+                }
+                (11, false, true) => neon_pairwise_add_lane(&lhs, &rhs, lane, size),
+                _ => return Ok(false),
+            };
+            neon_write_elem(&mut out, lane, size, result);
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3same_shift(
+        &mut self,
+        _instr: u32,
+        _pc: u32,
+        u: bool,
+        size: usize,
+        opcode: u8,
+        q: bool,
+        op: bool,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        let signed = !u;
+        let rounding = opcode == 5;
+        let saturating = op;
+        let lanes = neon_lanes(q, size);
+        let values = self.neon_reg_bytes(vm, q);
+        let shifts = self.neon_reg_bytes(vn, q);
+        let mut out = [0u8; 16];
+
+        for lane in 0..lanes {
+            let value = neon_read_elem(&values, lane, size);
+            let shift = neon_sign_extend(neon_read_elem(&shifts, lane, size), size);
+            let result = self.neon_variable_shift(value, shift, size, signed, saturating, rounding);
+            neon_write_elem(&mut out, lane, size, result);
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
+    fn exec_arm_neon_3diff(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        let u = instr & (1 << 24) != 0;
+        let size = ((instr >> 20) & 0x3) as usize;
+        let opcode = ((instr >> 8) & 0xf) as u8;
+        let vd = vfp_double_d(instr);
+        let vn = vfp_double_n(instr);
+        let vm = vfp_double_m(instr);
+
+        if size == 3 {
+            return Ok(false);
+        }
+
+        match opcode {
+            0 | 1 | 2 | 3 => {
+                self.exec_arm_neon_3diff_add_sub_wide(instr, pc, u, size, opcode, vd, vn, vm)
+            }
+            4 | 6 => {
+                self.exec_arm_neon_3diff_add_sub_high_narrow(instr, pc, opcode, u, size, vd, vn, vm)
+            }
+            5 | 7 => self.exec_arm_neon_3diff_absdiff(instr, pc, u, size, opcode == 5, vd, vn, vm),
+            8 | 10 => {
+                self.exec_arm_neon_3diff_mul_accum(instr, pc, u, size, opcode == 10, vd, vn, vm)
+            }
+            12 => self.exec_arm_neon_3diff_mul_long(instr, pc, u, size, false, vd, vn, vm),
+            14 if !u && size != 2 => {
+                self.exec_arm_neon_3diff_mul_long(instr, pc, false, size, true, vd, vn, vm)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3diff_add_sub_wide(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        size: usize,
+        opcode: u8,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        let widen_both = matches!(opcode, 0 | 2);
+        let subtract = matches!(opcode, 2 | 3);
+        if vd & 1 != 0 || (!widen_both && vn & 1 != 0) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vd + 1)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vm)?;
+        if !widen_both {
+            self.check_dreg(vn + 1)?;
+        }
+
+        let signed = !u;
+        let mut out = [0u8; 16];
+        let rhs = self.neon_reg_bytes(vm, false);
+        let lhs = self.neon_reg_bytes(vn, !widen_both);
+        let wide_size = size + 1;
+        let mask = neon_elem_mask(wide_size);
+        for lane in 0..(8 >> size) {
+            let a = if widen_both {
+                neon_extend_elem(neon_read_elem(&lhs, lane, size), size, signed)
+            } else {
+                neon_read_elem(&lhs, lane, wide_size)
+            };
+            let b = neon_extend_elem(neon_read_elem(&rhs, lane, size), size, signed);
+            let result = if subtract {
+                a.wrapping_sub(b)
+            } else {
+                a.wrapping_add(b)
+            } & mask;
+            neon_write_elem(&mut out, lane, wide_size, result);
+        }
+        self.set_neon_reg_bytes(vd, true, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3diff_add_sub_high_narrow(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        opcode: u8,
+        rounding: bool,
+        size: usize,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if vn & 1 != 0 || vm & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vn + 1)?;
+        self.check_dreg(vm)?;
+        self.check_dreg(vm + 1)?;
+
+        let lhs = self.neon_reg_bytes(vn, true);
+        let rhs = self.neon_reg_bytes(vm, true);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        let narrow_bits = neon_elem_bits(size);
+        let round = if rounding {
+            1u64 << (narrow_bits - 1)
+        } else {
+            0
+        };
+        for lane in 0..(8 >> size) {
+            let a = neon_read_elem(&lhs, lane, wide_size);
+            let b = neon_read_elem(&rhs, lane, wide_size);
+            let wide = if opcode == 6 {
+                a.wrapping_sub(b)
+            } else {
+                a.wrapping_add(b)
+            };
+            neon_write_elem(
+                &mut out,
+                lane,
+                size,
+                wide.wrapping_add(round) >> narrow_bits,
+            );
+        }
+        self.set_dreg_bits(
+            vd,
+            u64::from_le_bytes(out[..8].try_into().expect("high narrow dreg")),
+        );
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3diff_absdiff(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        size: usize,
+        accumulate: bool,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if vd & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vd + 1)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vm)?;
+
+        let signed = !u;
+        let lhs = self.neon_reg_bytes(vn, false);
+        let rhs = self.neon_reg_bytes(vm, false);
+        let old = self.neon_reg_bytes(vd, true);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        let mask = neon_elem_mask(wide_size);
+        for lane in 0..(8 >> size) {
+            let a = neon_extend_i128(neon_read_elem(&lhs, lane, size), size, signed);
+            let b = neon_extend_i128(neon_read_elem(&rhs, lane, size), size, signed);
+            let mut result = a.abs_diff(b) as u64 & mask;
+            if accumulate {
+                result = result.wrapping_add(neon_read_elem(&old, lane, wide_size)) & mask;
+            }
+            neon_write_elem(&mut out, lane, wide_size, result);
+        }
+        self.set_neon_reg_bytes(vd, true, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3diff_mul_accum(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        size: usize,
+        subtract: bool,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if vd & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vd + 1)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vm)?;
+
+        let signed = !u;
+        let lhs = self.neon_reg_bytes(vn, false);
+        let rhs = self.neon_reg_bytes(vm, false);
+        let old = self.neon_reg_bytes(vd, true);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        let mask = neon_elem_mask(wide_size);
+        for lane in 0..(8 >> size) {
+            let a = neon_extend_i128(neon_read_elem(&lhs, lane, size), size, signed);
+            let b = neon_extend_i128(neon_read_elem(&rhs, lane, size), size, signed);
+            let product = neon_mask_i128(a * b, wide_size);
+            let acc = neon_read_elem(&old, lane, wide_size);
+            let result = if subtract {
+                acc.wrapping_sub(product)
+            } else {
+                acc.wrapping_add(product)
+            } & mask;
+            neon_write_elem(&mut out, lane, wide_size, result);
+        }
+        self.set_neon_reg_bytes(vd, true, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3diff_mul_long(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        size: usize,
+        polynomial: bool,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if vd & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        self.check_dreg(vd)?;
+        self.check_dreg(vd + 1)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vm)?;
+
+        let signed = !u;
+        let lhs = self.neon_reg_bytes(vn, false);
+        let rhs = self.neon_reg_bytes(vm, false);
+        let mut out = [0u8; 16];
+        let wide_size = size + 1;
+        for lane in 0..(8 >> size) {
+            let product = if polynomial {
+                if size == 0 {
+                    u64::from(neon_polynomial_mul8(
+                        neon_read_elem(&lhs, lane, size) as u8,
+                        neon_read_elem(&rhs, lane, size) as u8,
+                    ))
+                } else {
+                    return Ok(false);
+                }
+            } else {
+                let a = neon_extend_i128(neon_read_elem(&lhs, lane, size), size, signed);
+                let b = neon_extend_i128(neon_read_elem(&rhs, lane, size), size, signed);
+                neon_mask_i128(a * b, wide_size)
+            };
+            neon_write_elem(&mut out, lane, wide_size, product);
+        }
+        self.set_neon_reg_bytes(vd, true, out);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_arm_neon_3same_f32(
+        &mut self,
+        instr: u32,
+        pc: u32,
+        u: bool,
+        size: usize,
+        opcode: u8,
+        q: bool,
+        op: bool,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+    ) -> Result<bool> {
+        if size & 1 != 0 {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+
+        let subop = size >> 1;
+        let lhs = self.neon_reg_bytes(vn, q);
+        let rhs = self.neon_reg_bytes(vm, q);
+        let old_dst = self.neon_reg_bytes(vd, q);
+        let mut out = [0u8; 16];
+        let lanes = if q { 4 } else { 2 };
+
+        for lane in 0..lanes {
+            let a_bits = neon_read_elem(&lhs, lane, 2) as u32;
+            let b_bits = neon_read_elem(&rhs, lane, 2) as u32;
+            let d_bits = neon_read_elem(&old_dst, lane, 2) as u32;
+            let a = f32::from_bits(a_bits);
+            let b = f32::from_bits(b_bits);
+            let d = f32::from_bits(d_bits);
+            let bits = match (opcode, u, subop, op) {
+                (12, false, 0, true) => d.mul_add(a, b).to_bits(),
+                (12, false, 1, true) => d.mul_add(a, -b).to_bits(),
+                (13, false, 0, false) => (a + b).to_bits(),
+                (13, false, 1, false) => (a - b).to_bits(),
+                (13, false, 0, true) => (d + a * b).to_bits(),
+                (13, false, 1, true) => (d - a * b).to_bits(),
+                (13, true, 0, true) => (a * b).to_bits(),
+                (14, false, 0, false) => neon_f32_compare(a == b),
+                (14, true, 0, false) => neon_f32_compare(a >= b),
+                (14, true, 1, false) => neon_f32_compare(a > b),
+                (14, true, 0, true) => neon_f32_compare(a.abs() >= b.abs()),
+                (14, true, 1, true) => neon_f32_compare(a.abs() > b.abs()),
+                (15, false, 0, false) => a.max(b).to_bits(),
+                (15, false, 1, false) => a.min(b).to_bits(),
+                (15, false, 0, true) => (2.0 - a * b).to_bits(),
+                (15, false, 1, true) => ((3.0 - a * b) * 0.5).to_bits(),
+                _ => return Ok(false),
+            };
+            neon_write_elem(&mut out, lane, 2, u64::from(bits));
+        }
+
+        self.set_neon_reg_bytes(vd, q, out);
+        Ok(true)
+    }
+
     fn exec_arm_vfp<M: Memory>(&mut self, instr: u32, pc: u32, mem: &mut M) -> Result<bool> {
         let vfp_multi = if (instr & 0x0e00_0a00) == 0x0c00_0a00 {
             let p = instr & (1 << 24) != 0;
@@ -414,7 +1536,7 @@ impl Cpu {
             if double {
                 let first = vfp_double_d(instr);
                 let regs = (words / 2) as usize;
-                if regs == 0 || regs > 16 || first + regs > 16 {
+                if regs == 0 || regs > 32 || first + regs > 32 {
                     return Err(Trap::Unpredictable("VFP multiple transfer register range"));
                 }
                 for idx in 0..regs {
@@ -470,7 +1592,7 @@ impl Cpu {
             if instr & (1 << 20) != 0 {
                 if double {
                     let dd = vfp_double_d(instr);
-                    if dd >= 16 {
+                    if dd >= 32 {
                         return Err(Trap::Unpredictable("VFP double register out of range"));
                     }
                     let lo = u64::from(mem.load32(addr)?);
@@ -482,7 +1604,7 @@ impl Cpu {
                 }
             } else if double {
                 let dd = vfp_double_d(instr);
-                if dd >= 16 {
+                if dd >= 32 {
                     return Err(Trap::Unpredictable("VFP double register out of range"));
                 }
                 let value = self.dreg_bits(dd);
@@ -643,6 +1765,19 @@ impl Cpu {
                     }
                     _ => return Err(Trap::UndefinedArm { pc, instr }),
                 }
+            }
+            return Ok(true);
+        }
+
+        let vfp_imm = instr & 0x0fb0_0ff0;
+        if vfp_imm == 0x0eb0_0a00 || vfp_imm == 0x0eb0_0b00 {
+            let imm8 = (((instr >> 16) & 0xf) << 4) | (instr & 0xf);
+            if vfp_imm == 0x0eb0_0b00 {
+                let dd = vfp_double_d(instr);
+                self.set_checked_dreg_bits(dd, vfp_expand_imm_f64(imm8 as u8))?;
+            } else {
+                let sd = vfp_single_d(instr);
+                self.sregs[sd] = vfp_expand_imm_f32(imm8 as u8);
             }
             return Ok(true);
         }
@@ -944,6 +2079,20 @@ impl Cpu {
     }
 
     fn exec_arm_misc<M: Memory>(&mut self, instr: u32, pc: u32, mem: &mut M) -> Result<bool> {
+        if (instr & 0x0ff0_0000) == 0x0300_0000 || (instr & 0x0ff0_0000) == 0x0340_0000 {
+            let rd = ((instr >> 12) & 0xf) as usize;
+            if rd == 15 {
+                return Err(Trap::Unpredictable("MOVW/MOVT with PC destination"));
+            }
+            let imm16 = (((instr >> 16) & 0xf) << 12) | (instr & 0xfff);
+            if instr & (1 << 22) != 0 {
+                self.write_reg_arm(rd, (self.regs[rd] & 0x0000_ffff) | (imm16 << 16));
+            } else {
+                self.write_reg_arm(rd, imm16);
+            }
+            return Ok(true);
+        }
+
         if is_unsupported_a32_newer_than_armv6(instr) {
             return Err(Trap::UndefinedArm { pc, instr });
         }
@@ -2026,6 +3175,277 @@ impl Cpu {
         }
     }
 
+    pub fn execute_thumb32<M: Memory>(
+        &mut self,
+        first: u16,
+        second: u16,
+        pc: u32,
+        mem: &mut M,
+    ) -> Result<()> {
+        let arm_like = (u32::from(first) << 16) | u32::from(second);
+        if self.exec_arm_vfp(arm_like, pc, mem)? {
+            return Ok(());
+        }
+
+        if (first & 0xf800) == 0xf000 && (second & 0x8000) != 0 {
+            return self.exec_thumb32_branch(first, second, pc);
+        }
+
+        if (first & 0xf800) == 0xf000 && (second & 0x8000) == 0 {
+            return self.exec_thumb32_modified_immediate(first, second, pc);
+        }
+
+        if (first & 0xfff0) == 0xfab0 && (second & 0xf0f0) == 0xf080 {
+            let rn = usize::from(first & 0xf);
+            let rd = usize::from((second >> 8) & 0xf);
+            let rm = usize::from(second & 0xf);
+            if rn != rm || rd == 15 || rm == 15 {
+                return Err(Trap::UndefinedThumb { pc, instr: first });
+            }
+            self.regs[rd] = self.regs[rm].leading_zeros();
+            return Ok(());
+        }
+
+        if first == 0xe8bd {
+            return self.exec_thumb32_pop(second, pc, mem);
+        }
+
+        if (first & 0xfff0) == 0xe880 {
+            return self.exec_thumb32_stmia(first, second, pc, mem);
+        }
+
+        if (first & 0xff50) == 0xe940 {
+            return self.exec_thumb32_strd(first, second, pc, mem);
+        }
+
+        if (first & 0xfff0) == 0xf8c0 || (first & 0xfff0) == 0xf8d0 {
+            return self.exec_thumb32_word_transfer(first, second, pc, mem);
+        }
+
+        if (first & 0xffff) == 0xe92d {
+            return self.exec_arm_block_transfer(arm_like, pc, mem);
+        }
+
+        Err(Trap::UndefinedThumb { pc, instr: first })
+    }
+
+    fn exec_thumb32_modified_immediate(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        let op = (first >> 5) & 0xf;
+        let set_flags = first & (1 << 4) != 0;
+        let rn = usize::from(first & 0xf);
+        let rd = usize::from((second >> 8) & 0xf);
+        let imm12 = (u32::from((first >> 10) & 1) << 11)
+            | (u32::from((second >> 12) & 0x7) << 8)
+            | u32::from(second & 0xff);
+        let (imm, carry) = thumb_expand_imm(imm12, self.cpsr.c);
+
+        match op {
+            0x0 => {
+                let value = self.regs[rn] & imm;
+                if rd == 15 {
+                    self.cpsr.set_nzc(value, carry);
+                } else {
+                    self.regs[rd] = value;
+                    if set_flags {
+                        self.cpsr.set_nzc(value, carry);
+                    }
+                }
+                Ok(())
+            }
+            0x2 => {
+                if rd == 15 {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let lhs = if rn == 15 { 0 } else { self.regs[rn] };
+                let value = lhs | imm;
+                self.regs[rd] = value;
+                if set_flags {
+                    self.cpsr.set_nzc(value, carry);
+                }
+                Ok(())
+            }
+            0x8 | 0xd => {
+                if rd == 15 {
+                    return Err(Trap::UndefinedThumb { pc, instr: first });
+                }
+                let lhs = if rn == 15 {
+                    pc.wrapping_add(4) & !3
+                } else {
+                    self.regs[rn]
+                };
+                let (value, carry, overflow) = if op == 0x8 {
+                    add_with_flags(lhs, imm)
+                } else {
+                    sub_with_flags(lhs, imm)
+                };
+                self.regs[rd] = value;
+                if set_flags {
+                    self.cpsr.set_nzcv(value, carry, overflow);
+                }
+                Ok(())
+            }
+            _ => Err(Trap::UndefinedThumb { pc, instr: first }),
+        }
+    }
+
+    fn exec_thumb32_branch(&mut self, first: u16, second: u16, pc: u32) -> Result<()> {
+        let s = u32::from((first >> 10) & 1);
+        let imm10 = u32::from(first & 0x03ff);
+        let j1 = u32::from((second >> 13) & 1);
+        let j2 = u32::from((second >> 11) & 1);
+        let imm11 = u32::from(second & 0x07ff);
+        let i1 = u32::from((j1 ^ s) == 0);
+        let i2 = u32::from((j2 ^ s) == 0);
+        let imm = sign_extend(
+            (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1),
+            25,
+        );
+
+        match (second >> 14) & 0x3 {
+            0b10 => {
+                self.regs[15] = pc.wrapping_add(4).wrapping_add(imm as u32);
+                Ok(())
+            }
+            0b11 if second & (1 << 12) == 0 => {
+                self.regs[14] = pc.wrapping_add(4) | 1;
+                let target = (pc.wrapping_add(4) & !3).wrapping_add(imm as u32) & !3;
+                self.branch_exchange(target);
+                Ok(())
+            }
+            0b11 => {
+                self.regs[14] = pc.wrapping_add(4) | 1;
+                self.regs[15] = pc.wrapping_add(4).wrapping_add(imm as u32);
+                Ok(())
+            }
+            _ => Err(Trap::UndefinedThumb { pc, instr: first }),
+        }
+    }
+
+    fn exec_thumb32_pop<M: Memory>(&mut self, reglist: u16, pc: u32, mem: &mut M) -> Result<()> {
+        if reglist == 0 {
+            return Err(Trap::Unpredictable("empty Thumb pop register list"));
+        }
+        let mut addr = self.regs[13];
+        for reg in 0..16 {
+            if reglist & (1 << reg) == 0 {
+                continue;
+            }
+            let value = mem.load32(addr)?;
+            addr = addr.wrapping_add(4);
+            if reg == 15 {
+                self.branch_exchange(value);
+            } else {
+                self.regs[reg] = value;
+            }
+        }
+        self.regs[13] = addr;
+        if reglist & (1 << 15) == 0 {
+            self.regs[15] = pc.wrapping_add(4);
+        }
+        Ok(())
+    }
+
+    fn exec_thumb32_stmia<M: Memory>(
+        &mut self,
+        first: u16,
+        reglist: u16,
+        _pc: u32,
+        mem: &mut M,
+    ) -> Result<()> {
+        if reglist == 0 {
+            return Err(Trap::Unpredictable(
+                "empty Thumb store multiple register list",
+            ));
+        }
+        let rn = usize::from(first & 0xf);
+        if rn == 15 {
+            return Err(Trap::Unpredictable(
+                "Thumb store multiple with PC base register",
+            ));
+        }
+        let mut addr = self.regs[rn];
+        for reg in 0..16 {
+            if reglist & (1 << reg) == 0 {
+                continue;
+            }
+            self.store32(mem, addr, self.regs[reg])?;
+            addr = addr.wrapping_add(4);
+        }
+        Ok(())
+    }
+
+    fn exec_thumb32_strd<M: Memory>(
+        &mut self,
+        first: u16,
+        second: u16,
+        _pc: u32,
+        mem: &mut M,
+    ) -> Result<()> {
+        let rn = usize::from(first & 0xf);
+        let rt = usize::from((second >> 12) & 0xf);
+        let rt2 = usize::from((second >> 8) & 0xf);
+        if rn == 15 || rt == 15 || rt2 == 15 {
+            return Err(Trap::Unpredictable("Thumb STRD with PC register"));
+        }
+        let base = self.regs[rn];
+        let offset = u32::from(second & 0xff) << 2;
+        let addr = if first & (1 << 7) != 0 {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
+        self.store32(mem, addr, self.regs[rt])?;
+        self.store32(mem, addr.wrapping_add(4), self.regs[rt2])?;
+        if first & (1 << 5) != 0 {
+            self.regs[rn] = addr;
+        }
+        Ok(())
+    }
+
+    fn exec_thumb32_word_transfer<M: Memory>(
+        &mut self,
+        first: u16,
+        second: u16,
+        pc: u32,
+        mem: &mut M,
+    ) -> Result<()> {
+        let load = (first & 0x0010) != 0;
+        let rn = usize::from(first & 0xf);
+        let rt = usize::from((second >> 12) & 0xf);
+        if rn == 15 {
+            if !load {
+                return Err(Trap::Unpredictable(
+                    "Thumb word store with PC base register",
+                ));
+            }
+            let addr = (pc.wrapping_add(4) & !3).wrapping_add(u32::from(second & 0x0fff));
+            let value = mem.load32(addr)?;
+            if rt == 15 {
+                self.branch_exchange(value);
+            } else {
+                self.regs[rt] = value;
+            }
+            return Ok(());
+        }
+        let addr = self.regs[rn].wrapping_add(u32::from(second & 0x0fff));
+        if load {
+            let value = mem.load32(addr)?;
+            if rt == 15 {
+                self.branch_exchange(value);
+            } else {
+                self.regs[rt] = value;
+            }
+        } else {
+            if rt == 15 {
+                return Err(Trap::Unpredictable(
+                    "Thumb word store with PC source register",
+                ));
+            }
+            self.store32(mem, addr, self.regs[rt])?;
+        }
+        Ok(())
+    }
+
     fn exec_thumb_shift_add_sub(&mut self, instr: u16, pc: u32) -> Result<()> {
         if instr & 0x1800 == 0x1800 {
             let immediate = instr & 0x0400 != 0;
@@ -2336,6 +3756,15 @@ impl Cpu {
             return Ok(());
         }
 
+        if instr & 0xff00 == 0xbf00 {
+            let mask = instr & 0xf;
+            if mask == 0 {
+                return Ok(());
+            }
+            let cond = u32::from((instr >> 4) & 0xf);
+            return self.start_thumb_it(cond, mask, pc, instr);
+        }
+
         if instr & 0xff00 == 0xbe00 {
             return Err(Trap::Breakpoint {
                 pc,
@@ -2367,6 +3796,16 @@ impl Cpu {
                 pc.wrapping_add(4) & !3
             };
             self.regs[rd] = base.wrapping_add(u32::from(instr & 0xff) << 2);
+            return Ok(());
+        }
+
+        if instr & 0xf500 == 0xb100 {
+            let rn = (instr & 0x7) as usize;
+            let nonzero = instr & 0x0800 != 0;
+            let imm = (u32::from((instr >> 9) & 1) << 6) | (u32::from((instr >> 3) & 0x1f) << 1);
+            if (self.regs[rn] != 0) == nonzero {
+                self.regs[15] = pc.wrapping_add(4).wrapping_add(imm);
+            }
             return Ok(());
         }
 
@@ -2589,6 +4028,219 @@ impl Cpu {
         self.sregs[idx * 2 + 1] = (value >> 32) as u32;
     }
 
+    fn neon_reg_bytes(&self, dreg: usize, q: bool) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.dreg_bits(dreg).to_le_bytes());
+        if q {
+            bytes[8..].copy_from_slice(&self.dreg_bits(dreg + 1).to_le_bytes());
+        }
+        bytes
+    }
+
+    fn set_neon_reg_bytes(&mut self, dreg: usize, q: bool, bytes: [u8; 16]) {
+        self.set_dreg_bits(
+            dreg,
+            u64::from_le_bytes(bytes[..8].try_into().expect("D register is 8 bytes")),
+        );
+        if q {
+            self.set_dreg_bits(
+                dreg + 1,
+                u64::from_le_bytes(bytes[8..].try_into().expect("D register is 8 bytes")),
+            );
+        }
+    }
+
+    fn check_neon_3same_regs(
+        &self,
+        vd: usize,
+        vn: usize,
+        vm: usize,
+        q: bool,
+        pc: u32,
+        instr: u32,
+    ) -> Result<()> {
+        self.check_dreg(vd)?;
+        self.check_dreg(vn)?;
+        self.check_dreg(vm)?;
+        if q && (vd & 1 != 0 || vn & 1 != 0 || vm & 1 != 0) {
+            return Err(Trap::UndefinedArm { pc, instr });
+        }
+        if q {
+            self.check_dreg(vd + 1)?;
+            self.check_dreg(vn + 1)?;
+            self.check_dreg(vm + 1)?;
+        }
+        Ok(())
+    }
+
+    fn neon_saturating_add(&mut self, a: u64, b: u64, size: usize, signed: bool) -> u64 {
+        let bits = neon_elem_bits(size);
+        if signed {
+            let min = -(1i128 << (bits - 1));
+            let max = (1i128 << (bits - 1)) - 1;
+            let raw = i128::from(neon_sign_extend(a, size)) + i128::from(neon_sign_extend(b, size));
+            if raw < min || raw > max {
+                self.cpsr.q = true;
+            }
+            (raw.clamp(min, max) as i64 as u64) & neon_elem_mask(size)
+        } else {
+            let max = neon_elem_mask(size);
+            let raw = u128::from(a) + u128::from(b);
+            if raw > u128::from(max) {
+                self.cpsr.q = true;
+            }
+            raw.min(u128::from(max)) as u64
+        }
+    }
+
+    fn neon_saturating_sub(&mut self, a: u64, b: u64, size: usize, signed: bool) -> u64 {
+        let bits = neon_elem_bits(size);
+        if signed {
+            let min = -(1i128 << (bits - 1));
+            let max = (1i128 << (bits - 1)) - 1;
+            let raw = i128::from(neon_sign_extend(a, size)) - i128::from(neon_sign_extend(b, size));
+            if raw < min || raw > max {
+                self.cpsr.q = true;
+            }
+            (raw.clamp(min, max) as i64 as u64) & neon_elem_mask(size)
+        } else {
+            if a < b {
+                self.cpsr.q = true;
+                0
+            } else {
+                a - b
+            }
+        }
+    }
+
+    fn neon_saturating_doubling_mul_high(
+        &mut self,
+        a: u64,
+        b: u64,
+        size: usize,
+        rounding: bool,
+    ) -> u64 {
+        let bits = neon_elem_bits(size);
+        let min = -(1i128 << (bits - 1));
+        let max = (1i128 << (bits - 1)) - 1;
+        let av = i128::from(neon_sign_extend(a, size));
+        let bv = i128::from(neon_sign_extend(b, size));
+        let round = if rounding { 1i128 << (bits - 1) } else { 0 };
+        let raw = ((av * bv * 2) + round) >> bits;
+        if raw < min || raw > max {
+            self.cpsr.q = true;
+        }
+        (raw.clamp(min, max) as i64 as u64) & neon_elem_mask(size)
+    }
+
+    fn neon_variable_shift(
+        &mut self,
+        value: u64,
+        shift: i64,
+        size: usize,
+        signed: bool,
+        saturating: bool,
+        rounding: bool,
+    ) -> u64 {
+        let bits = neon_elem_bits(size);
+        let mask = neon_elem_mask(size);
+        if shift == 0 {
+            return value & mask;
+        }
+
+        if shift < 0 {
+            let amount = shift.unsigned_abs().min(255) as u32;
+            return neon_shift_right(value, amount, size, signed, rounding);
+        }
+
+        let amount = shift.min(255) as u32;
+        if !saturating {
+            if amount >= bits {
+                0
+            } else {
+                (value << amount) & mask
+            }
+        } else if signed {
+            let min = -(1i128 << (bits - 1));
+            let max = (1i128 << (bits - 1)) - 1;
+            let input = i128::from(neon_sign_extend(value, size));
+            let raw = if amount >= bits {
+                if input == 0 {
+                    0
+                } else if input > 0 {
+                    max + 1
+                } else {
+                    min - 1
+                }
+            } else {
+                input << amount
+            };
+            if raw < min || raw > max {
+                self.cpsr.q = true;
+            }
+            (raw.clamp(min, max) as i64 as u64) & mask
+        } else {
+            let raw = if amount >= bits {
+                if value & mask == 0 {
+                    0
+                } else {
+                    u128::from(mask) + 1
+                }
+            } else {
+                u128::from(value & mask) << amount
+            };
+            if raw > u128::from(mask) {
+                self.cpsr.q = true;
+            }
+            raw.min(u128::from(mask)) as u64
+        }
+    }
+
+    fn neon_qshlu_immediate(&mut self, value: u64, size: usize, shift: u32) -> u64 {
+        let mask = neon_elem_mask(size);
+        let input = i128::from(neon_sign_extend(value, size));
+        let raw = if input < 0 {
+            -1
+        } else if shift >= neon_elem_bits(size) {
+            if input == 0 { 0 } else { i128::from(mask) + 1 }
+        } else {
+            input << shift
+        };
+        if raw < 0 || raw > i128::from(mask) {
+            self.cpsr.q = true;
+        }
+        raw.clamp(0, i128::from(mask)) as u64
+    }
+
+    fn neon_saturating_narrow_to_unsigned(
+        &mut self,
+        value: u64,
+        size: usize,
+        signed_input: bool,
+    ) -> u64 {
+        let mask = neon_elem_mask(size);
+        let raw = if signed_input {
+            i128::from(neon_sign_extend(value, size + 1))
+        } else {
+            i128::from(value)
+        };
+        if raw < 0 || raw > i128::from(mask) {
+            self.cpsr.q = true;
+        }
+        raw.clamp(0, i128::from(mask)) as u64
+    }
+
+    fn neon_saturating_narrow_to_signed(&mut self, value: u64, size: usize) -> u64 {
+        let bits = neon_elem_bits(size);
+        let min = -(1i128 << (bits - 1));
+        let max = (1i128 << (bits - 1)) - 1;
+        let raw = i128::from(neon_sign_extend(value, size + 1));
+        if raw < min || raw > max {
+            self.cpsr.q = true;
+        }
+        (raw.clamp(min, max) as i64 as u64) & neon_elem_mask(size)
+    }
+
     fn checked_dreg_bits(&self, idx: usize) -> Result<u64> {
         self.check_dreg(idx)?;
         Ok(self.dreg_bits(idx))
@@ -2598,6 +4250,32 @@ impl Cpu {
         self.check_dreg(idx)?;
         self.set_dreg_bits(idx, value);
         Ok(())
+    }
+
+    fn start_thumb_it(&mut self, cond: u32, mask: u16, pc: u32, instr: u16) -> Result<()> {
+        if cond == 0xf || mask == 0 {
+            return Err(Trap::UndefinedThumb { pc, instr });
+        }
+        let len = 4 - mask.trailing_zeros() as usize;
+        let mut conds = [0; 4];
+        for (idx, slot) in conds.iter_mut().enumerate().take(len) {
+            let then = (mask >> (3 - idx)) & 1 != 0;
+            *slot = if then { cond } else { cond ^ 1 };
+        }
+        self.thumb_it = Some(ThumbItState { conds, len, pos: 0 });
+        Ok(())
+    }
+
+    fn consume_thumb_it_condition(&mut self) -> Option<u32> {
+        let mut state = self.thumb_it?;
+        let cond = state.conds[state.pos];
+        state.pos += 1;
+        if state.pos >= state.len {
+            self.thumb_it = None;
+        } else {
+            self.thumb_it = Some(state);
+        }
+        Some(cond)
     }
 
     fn store8<M: Memory>(&mut self, mem: &mut M, addr: u32, value: u8) -> Result<()> {
@@ -2632,7 +4310,7 @@ impl Cpu {
     }
 
     fn check_dreg(&self, idx: usize) -> Result<()> {
-        if idx >= 16 {
+        if idx >= 32 {
             Err(Trap::Unpredictable("VFP double register out of range"))
         } else {
             Ok(())
@@ -2863,7 +4541,7 @@ impl Cpu {
 
     fn thumb_read_reg(&self, idx: usize, pc: u32) -> u32 {
         if idx == 15 {
-            pc.wrapping_add(4) & !3
+            pc.wrapping_add(4)
         } else {
             self.regs[idx]
         }
@@ -3994,6 +5672,351 @@ fn vfp_double_m(instr: u32) -> usize {
     ((instr & 0xf) | (((instr >> 5) & 1) << 4)) as usize
 }
 
+fn vfp_expand_imm_f64(imm8: u8) -> u64 {
+    let imm8 = u64::from(imm8);
+    let sign = if imm8 & 0x80 != 0 { 0x8000 } else { 0 };
+    let exponent = if imm8 & 0x40 != 0 { 0x3fc0 } else { 0x4000 };
+    (sign | exponent | (imm8 & 0x3f)) << 48
+}
+
+fn vfp_expand_imm_f32(imm8: u8) -> u32 {
+    let imm8 = u32::from(imm8);
+    let sign = if imm8 & 0x80 != 0 { 0x8000 } else { 0 };
+    let exponent = if imm8 & 0x40 != 0 { 0x3e00 } else { 0x4000 };
+    (sign | exponent | ((imm8 & 0x3f) << 3)) << 16
+}
+
+fn neon_reg_bytes(q: bool) -> usize {
+    if q { 16 } else { 8 }
+}
+
+fn neon_elem_bits(size: usize) -> u32 {
+    8 << size
+}
+
+fn neon_elem_mask(size: usize) -> u64 {
+    let bits = neon_elem_bits(size);
+    if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+fn neon_byte_mask(bytes: usize) -> u64 {
+    if bytes == 8 {
+        u64::MAX
+    } else {
+        (1u64 << (bytes * 8)) - 1
+    }
+}
+
+fn neon_decode_ls_multiple(itype: u8, size: usize, align: u8) -> Option<(usize, usize, usize)> {
+    match itype {
+        0b0111 if align & 0b10 == 0 => Some((1, 1, 0)),
+        0b1010 if align != 0b11 => Some((1, 2, 0)),
+        0b0110 if align & 0b10 == 0 => Some((1, 3, 0)),
+        0b0010 => Some((1, 4, 0)),
+        0b1000 | 0b1001 if size != 0b11 && align != 0b11 => {
+            Some((2, 1, if itype == 0b1000 { 1 } else { 2 }))
+        }
+        0b0011 if size != 0b11 => Some((2, 2, 2)),
+        0b0100 | 0b0101 if size != 0b11 && align & 0b10 == 0 => {
+            Some((3, 1, if itype == 0b0100 { 1 } else { 2 }))
+        }
+        0b0000 | 0b0001 if size != 0b11 => Some((4, 1, if itype == 0b0000 { 1 } else { 2 })),
+        _ => None,
+    }
+}
+
+fn neon_decode_shift_imm(right_shift: bool, l: bool, imm6: u32) -> Option<(usize, u32)> {
+    if l {
+        return Some((3, if right_shift { 64 - imm6 } else { imm6 }));
+    }
+
+    let top = imm6 >> 3;
+    if top == 0 {
+        return None;
+    }
+    let size = 31 - top.leading_zeros();
+    let bits = 8 << size;
+    let shift = if right_shift {
+        (bits * 2) - imm6
+    } else {
+        imm6 - bits
+    };
+    Some((size as usize, shift))
+}
+
+fn load_neon_memory_elem<M: Memory>(mem: &mut M, addr: u32, bytes: usize) -> Result<u64> {
+    let mut value = 0u64;
+    for idx in 0..bytes {
+        value |= u64::from(mem.load8(addr.wrapping_add(idx as u32))?) << (idx * 8);
+    }
+    Ok(value)
+}
+
+fn store_neon_memory_elem<M: Memory>(
+    mem: &mut M,
+    addr: u32,
+    bytes: usize,
+    value: u64,
+) -> Result<()> {
+    for idx in 0..bytes {
+        mem.store8(
+            addr.wrapping_add(idx as u32),
+            ((value >> (idx * 8)) & 0xff) as u8,
+        )?;
+    }
+    Ok(())
+}
+
+fn neon_lanes(q: bool, size: usize) -> usize {
+    neon_reg_bytes(q) >> size
+}
+
+fn neon_read_elem(bytes: &[u8; 16], lane: usize, size: usize) -> u64 {
+    let off = lane << size;
+    match size {
+        0 => u64::from(bytes[off]),
+        1 => u64::from(u16::from_le_bytes([bytes[off], bytes[off + 1]])),
+        2 => u64::from(u32::from_le_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ])),
+        3 => u64::from_le_bytes(bytes[off..off + 8].try_into().expect("u64 lane")),
+        _ => unreachable!(),
+    }
+}
+
+fn neon_write_elem(bytes: &mut [u8; 16], lane: usize, size: usize, value: u64) {
+    let off = lane << size;
+    match size {
+        0 => bytes[off] = value as u8,
+        1 => bytes[off..off + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+        2 => bytes[off..off + 4].copy_from_slice(&(value as u32).to_le_bytes()),
+        3 => bytes[off..off + 8].copy_from_slice(&value.to_le_bytes()),
+        _ => unreachable!(),
+    }
+}
+
+fn neon_sign_extend(value: u64, size: usize) -> i64 {
+    let bits = neon_elem_bits(size);
+    if bits == 64 {
+        value as i64
+    } else {
+        let shift = 64 - bits;
+        ((value << shift) as i64) >> shift
+    }
+}
+
+fn neon_extend_elem(value: u64, size: usize, signed: bool) -> u64 {
+    let wide_size = size + 1;
+    if signed {
+        (neon_sign_extend(value, size) as u64) & neon_elem_mask(wide_size)
+    } else {
+        value & neon_elem_mask(size)
+    }
+}
+
+fn neon_extend_i128(value: u64, size: usize, signed: bool) -> i128 {
+    if signed {
+        i128::from(neon_sign_extend(value, size))
+    } else {
+        i128::from(value & neon_elem_mask(size))
+    }
+}
+
+fn neon_mask_i128(value: i128, size: usize) -> u64 {
+    (value & i128::from(neon_elem_mask(size))) as u64
+}
+
+fn neon_shift_right(value: u64, amount: u32, size: usize, signed: bool, rounding: bool) -> u64 {
+    let bits = neon_elem_bits(size);
+    let mask = neon_elem_mask(size);
+    if amount == 0 {
+        return value & mask;
+    }
+    if signed {
+        let input = i128::from(neon_sign_extend(value, size));
+        if amount >= bits + 1 {
+            return if input < 0 { mask } else { 0 };
+        }
+        let rounded = if rounding && amount <= 126 {
+            input + (1i128 << (amount - 1))
+        } else {
+            input
+        };
+        ((rounded >> amount.min(126)) as i64 as u64) & mask
+    } else if amount > bits {
+        0
+    } else if amount == bits {
+        if rounding {
+            (value >> (bits - 1)) & 1
+        } else {
+            0
+        }
+    } else {
+        let rounded = if rounding {
+            value.wrapping_add(1u64 << (amount - 1))
+        } else {
+            value
+        };
+        (rounded >> amount) & mask
+    }
+}
+
+fn neon_expand_modified_imm(imm: u8, cmode: u8, op: bool) -> u64 {
+    let imm = u64::from(imm);
+    let imm32 = match cmode {
+        0 | 1 => imm,
+        2 | 3 => imm << 8,
+        4 | 5 => imm << 16,
+        6 | 7 => imm << 24,
+        8 | 9 => imm | (imm << 16),
+        10 | 11 => (imm << 8) | (imm << 24),
+        12 => (imm << 8) | 0xff,
+        13 => (imm << 16) | 0xffff,
+        14 if op => {
+            let mut value = 0u64;
+            for bit in 0..8 {
+                if imm & (1 << bit) != 0 {
+                    value |= 0xffu64 << (bit * 8);
+                }
+            }
+            return value;
+        }
+        14 => imm | (imm << 8) | (imm << 16) | (imm << 24),
+        15 => {
+            ((imm & 0x80) << 24)
+                | ((imm & 0x3f) << 19)
+                | if imm & 0x40 != 0 { 0x1f << 25 } else { 1 << 30 }
+        }
+        _ => unreachable!(),
+    };
+    imm32 | (imm32 << 32)
+}
+
+fn neon_halving_add(a: u64, b: u64, size: usize, signed: bool, rounding: bool) -> u64 {
+    if signed {
+        let addend = if rounding { 1 } else { 0 };
+        (((neon_sign_extend(a, size) as i128 + neon_sign_extend(b, size) as i128 + addend) >> 1)
+            as i64 as u64)
+            & neon_elem_mask(size)
+    } else {
+        let addend = if rounding { 1 } else { 0 };
+        ((u128::from(a) + u128::from(b) + addend) >> 1) as u64
+    }
+}
+
+fn neon_halving_sub(a: u64, b: u64, size: usize, signed: bool) -> u64 {
+    if signed {
+        (((neon_sign_extend(a, size) as i128 - neon_sign_extend(b, size) as i128) >> 1) as i64
+            as u64)
+            & neon_elem_mask(size)
+    } else {
+        ((a.wrapping_sub(b) & neon_elem_mask(size)) >> 1) & neon_elem_mask(size)
+    }
+}
+
+fn neon_compare_gt(a: u64, b: u64, size: usize, signed: bool) -> u64 {
+    if if signed {
+        neon_sign_extend(a, size) > neon_sign_extend(b, size)
+    } else {
+        a > b
+    } {
+        neon_elem_mask(size)
+    } else {
+        0
+    }
+}
+
+fn neon_compare_ge(a: u64, b: u64, size: usize, signed: bool) -> u64 {
+    if if signed {
+        neon_sign_extend(a, size) >= neon_sign_extend(b, size)
+    } else {
+        a >= b
+    } {
+        neon_elem_mask(size)
+    } else {
+        0
+    }
+}
+
+fn neon_minmax(a: u64, b: u64, size: usize, signed: bool, max: bool) -> u64 {
+    if signed {
+        let av = neon_sign_extend(a, size);
+        let bv = neon_sign_extend(b, size);
+        let selected = if (av >= bv) == max { av } else { bv };
+        (selected as u64) & neon_elem_mask(size)
+    } else if (a >= b) == max {
+        a
+    } else {
+        b
+    }
+}
+
+fn neon_abs_diff(a: u64, b: u64, size: usize, signed: bool) -> u64 {
+    if signed {
+        neon_sign_extend(a, size).abs_diff(neon_sign_extend(b, size)) & neon_elem_mask(size)
+    } else {
+        a.abs_diff(b) & neon_elem_mask(size)
+    }
+}
+
+fn neon_pairwise_add_lane(lhs: &[u8; 16], rhs: &[u8; 16], lane: usize, size: usize) -> u64 {
+    let half_lanes = 4 >> size;
+    let (source, source_lane) = if lane < half_lanes {
+        (lhs, lane * 2)
+    } else {
+        (rhs, (lane - half_lanes) * 2)
+    };
+    neon_read_elem(source, source_lane, size).wrapping_add(neon_read_elem(
+        source,
+        source_lane + 1,
+        size,
+    )) & neon_elem_mask(size)
+}
+
+fn neon_polynomial_mul8(a: u8, b: u8) -> u16 {
+    let mut result = 0u16;
+    for bit in 0..8 {
+        if b & (1 << bit) != 0 {
+            result ^= u16::from(a) << bit;
+        }
+    }
+    result
+}
+
+fn neon_f32_compare(value: bool) -> u32 {
+    if value { u32::MAX } else { 0 }
+}
+
+fn thumb_is_32bit_prefix(instr: u16) -> bool {
+    matches!(instr & 0xf800, 0xe800 | 0xf000 | 0xf800)
+}
+
+fn thumb_expand_imm(imm12: u32, old_carry: bool) -> (u32, bool) {
+    if imm12 & 0x0c00 == 0 {
+        let imm8 = imm12 & 0xff;
+        let value = match (imm12 >> 8) & 0x3 {
+            0 => imm8,
+            1 => (imm8 << 16) | imm8,
+            2 => (imm8 << 24) | (imm8 << 8),
+            3 => (imm8 << 24) | (imm8 << 16) | (imm8 << 8) | imm8,
+            _ => unreachable!(),
+        };
+        (value, old_carry)
+    } else {
+        let unrotated = 0x80 | (imm12 & 0x7f);
+        let rotation = (imm12 >> 7) & 0x1f;
+        let value = unrotated.rotate_right(rotation);
+        (value, value & 0x8000_0000 != 0)
+    }
+}
+
 fn is_unsupported_a32_newer_than_armv6(instr: u32) -> bool {
     const ARMV6T2_ARMV7_PATTERNS: &[(u32, u32)] = &[
         (0x0fe0_007f, 0x07c0_001f), // BFC
@@ -4022,6 +6045,153 @@ mod tests {
 
     fn enc_bit(value: bool, shift: u32) -> u32 {
         u32::from(value) << shift
+    }
+
+    fn enc_neon_3same(
+        u: bool,
+        size: u32,
+        vn: usize,
+        vd: usize,
+        opcode: u32,
+        q: bool,
+        op: bool,
+        vm: usize,
+    ) -> u32 {
+        0xf200_0000
+            | enc_bit(u, 24)
+            | (((vd >> 4) as u32 & 1) << 22)
+            | ((size & 0x3) << 20)
+            | (((vn & 0xf) as u32) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((opcode & 0xf) << 8)
+            | (((vn >> 4) as u32 & 1) << 7)
+            | enc_bit(q, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | enc_bit(op, 4)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_3diff(u: bool, size: u32, vn: usize, vd: usize, opcode: u32, vm: usize) -> u32 {
+        0xf280_0000
+            | enc_bit(u, 24)
+            | (((vd >> 4) as u32 & 1) << 22)
+            | ((size & 0x3) << 20)
+            | (((vn & 0xf) as u32) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((opcode & 0xf) << 8)
+            | (((vn >> 4) as u32 & 1) << 7)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_ls_multiple(
+        load: bool,
+        rn: usize,
+        vd: usize,
+        itype: u32,
+        size: u32,
+        align: u32,
+        rm: usize,
+    ) -> u32 {
+        0xf400_0000
+            | (((vd >> 4) as u32 & 1) << 22)
+            | enc_bit(load, 21)
+            | ((rn as u32) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((itype & 0xf) << 8)
+            | ((size & 0x3) << 6)
+            | ((align & 0x3) << 4)
+            | ((rm & 0xf) as u32)
+    }
+
+    fn enc_neon_table(vn: usize, vd: usize, len: u32, tbx: bool, vm: usize) -> u32 {
+        0xf3b0_0800
+            | (((vd >> 4) as u32 & 1) << 22)
+            | (((vn & 0xf) as u32) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((len & 0x3) << 8)
+            | (((vn >> 4) as u32 & 1) << 7)
+            | enc_bit(tbx, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_vext(vn: usize, vd: usize, imm: u32, q: bool, vm: usize) -> u32 {
+        0xf2b0_0000
+            | (((vd >> 4) as u32 & 1) << 22)
+            | (((vn & 0xf) as u32) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((imm & 0xf) << 8)
+            | (((vn >> 4) as u32 & 1) << 7)
+            | enc_bit(q, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_vdup(vd: usize, imm4: u32, q: bool, vm: usize) -> u32 {
+        0xf3b0_0c00
+            | (((vd >> 4) as u32 & 1) << 22)
+            | ((imm4 & 0xf) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | enc_bit(q, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_vrev(vd: usize, size: u32, op: u32, q: bool, vm: usize) -> u32 {
+        0xf3b0_0000
+            | (((vd >> 4) as u32 & 1) << 22)
+            | ((size & 0x3) << 18)
+            | (((vd & 0xf) as u32) << 12)
+            | ((op & 0xf) << 7)
+            | enc_bit(q, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_2reg_misc(vd: usize, size: u32, op1: u32, op2: u32, q: bool, vm: usize) -> u32 {
+        0xf3b0_0000
+            | (((vd >> 4) as u32 & 1) << 22)
+            | ((size & 0x3) << 18)
+            | ((op1 & 0x3) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((op2 & 0xf) << 7)
+            | enc_bit(q, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
+    }
+
+    fn enc_neon_modified_imm(vd: usize, imm: u32, cmode: u32, q: bool, op: bool) -> u32 {
+        0xf280_0010
+            | (((imm >> 7) & 1) << 24)
+            | (((vd >> 4) as u32 & 1) << 22)
+            | (((imm >> 4) & 0x7) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((cmode & 0xf) << 8)
+            | enc_bit(q, 6)
+            | enc_bit(op, 5)
+            | (imm & 0xf)
+    }
+
+    fn enc_neon_2reg_shift(
+        u: bool,
+        imm6: u32,
+        vd: usize,
+        opcode: u32,
+        l: bool,
+        q: bool,
+        vm: usize,
+    ) -> u32 {
+        0xf280_0010
+            | enc_bit(u, 24)
+            | (((vd >> 4) as u32 & 1) << 22)
+            | ((imm6 & 0x3f) << 16)
+            | (((vd & 0xf) as u32) << 12)
+            | ((opcode & 0xf) << 8)
+            | enc_bit(l, 7)
+            | enc_bit(q, 6)
+            | (((vm >> 4) as u32 & 1) << 5)
+            | ((vm & 0xf) as u32)
     }
 
     fn arm_single_transfer(
@@ -4648,8 +6818,6 @@ mod tests {
         let mut mem = VecMemory::new(0, 4);
 
         for instr in [
-            0xe300_0000, // movw r0, #0
-            0xe340_0000, // movt r0, #0
             0xe7c0_001f, // bfc r0, #0, #1
             0xe7c0_0010, // bfi r0, r0, #0, #1
             0xe7a0_0050, // sbfx r0, r0, #0, #1
@@ -4661,6 +6829,408 @@ mod tests {
             let err = cpu.execute_arm(instr, 0x80, &mut mem).unwrap_err();
             assert_eq!(err, Trap::UndefinedArm { pc: 0x80, instr });
         }
+    }
+
+    #[test]
+    fn armv7_movw_movt_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.execute_arm(0xe302_60ab, 0, &mut mem).unwrap(); // movw r6, #0x20ab
+        assert_eq!(cpu.reg(6), 0x20ab);
+
+        cpu.execute_arm(0xe34c_6def, 0, &mut mem).unwrap(); // movt r6, #0xcdef
+        assert_eq!(cpu.reg(6), 0xcdef_20ab);
+
+        let err = cpu.execute_arm(0xe300_f000, 0x100, &mut mem).unwrap_err(); // movw pc, #0
+        assert_eq!(err, Trap::Unpredictable("MOVW/MOVT with PC destination"));
+    }
+
+    #[test]
+    fn neon_three_same_integer_and_logic_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(1, 0x0807_0605_0403_0201);
+        cpu.set_dreg(2, 0x0101_0101_0101_0101);
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 1, 0, 8, false, false, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vadd.i8 d0, d1, d2
+        assert_eq!(cpu.dreg(0), 0x0908_0706_0504_0302);
+
+        cpu.set_dreg(3, 0x0008_0007_0006_0005);
+        cpu.set_dreg(4, 0x0001_0002_0003_0004);
+        cpu.execute_arm(
+            enc_neon_3same(true, 1, 3, 5, 8, false, false, 4),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vsub.i16 d5, d3, d4
+        assert_eq!(cpu.dreg(5), 0x0007_0005_0003_0001);
+
+        cpu.set_dreg(1, 0x0007_0003_0009_0001);
+        cpu.set_dreg(2, 0x0004_0008_0002_0005);
+        cpu.execute_arm(
+            enc_neon_3same(true, 1, 1, 0, 10, false, false, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vpmax.u16 d0, d1, d2
+        assert_eq!(cpu.dreg(0), 0x0008_0005_0007_0009);
+
+        cpu.set_dreg(2, 0x00ff_00ff_00ff_00ff);
+        cpu.set_dreg(3, 0xff00_ff00_ff00_ff00);
+        cpu.set_dreg(4, 0x0f0f_0f0f_0f0f_0f0f);
+        cpu.set_dreg(5, 0xf0f0_f0f0_f0f0_f0f0);
+        cpu.execute_arm(
+            enc_neon_3same(false, 2, 2, 0, 1, true, true, 4),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vorr q0, q1, q2
+        assert_eq!(cpu.dreg(0), 0x0fff_0fff_0fff_0fff);
+        assert_eq!(cpu.dreg(1), 0xfff0_fff0_fff0_fff0);
+
+        let err = cpu
+            .execute_arm(
+                enc_neon_3same(false, 0, 2, 1, 8, true, false, 4),
+                0x200,
+                &mut mem,
+            )
+            .unwrap_err(); // q-register form with odd Vd
+        assert_eq!(
+            err,
+            Trap::UndefinedArm {
+                pc: 0x200,
+                instr: enc_neon_3same(false, 0, 2, 1, 8, true, false, 4)
+            }
+        );
+    }
+
+    #[test]
+    fn neon_three_same_saturating_compare_and_float_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(1, 0x7f78_8081_0102_f0f1);
+        cpu.set_dreg(2, 0x010a_ff80_0304_2020);
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 1, 0, 0, false, true, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqadd.s8 d0, d1, d2
+        assert_eq!(cpu.dreg(0), 0x7f7f_8080_0406_1011);
+        assert!(cpu.cpsr.q);
+
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 1, 3, 3, false, false, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vcgt.s8 d3, d1, d2
+        assert_eq!(cpu.dreg(3), 0xffff_00ff_0000_0000);
+
+        cpu.cpsr.q = false;
+        cpu.set_dreg(8, u64::from_le_bytes([0, 0, 0, 0x40, 0, 0, 0, 0x80]));
+        cpu.set_dreg(9, u64::from_le_bytes([0, 0, 0, 0x40, 0, 0, 0, 0x80]));
+        cpu.execute_arm(
+            enc_neon_3same(false, 2, 8, 10, 11, false, false, 9),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqdmulh.s32 d10, d8, d9
+        assert_eq!(cpu.dreg(10), 0x7fff_ffff_2000_0000);
+        assert!(cpu.cpsr.q);
+
+        let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+        cpu.set_dreg(4, pack2(1.5, 2.0));
+        cpu.set_dreg(5, pack2(2.5, -3.0));
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 4, 6, 13, false, false, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vadd.f32 d6, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(12)), 4.0);
+        assert_eq!(f32::from_bits(cpu.sreg(13)), -1.0);
+
+        cpu.set_dreg(6, pack2(10.0, 10.0));
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 4, 6, 13, false, true, 5),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vmla.f32 d6, d4, d5
+        assert_eq!(f32::from_bits(cpu.sreg(12)), 13.75);
+        assert_eq!(f32::from_bits(cpu.sreg(13)), 4.0);
+    }
+
+    #[test]
+    fn neon_structure_load_store_and_misc_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0x1000, 0x200);
+
+        let mut interleaved = Vec::new();
+        for lane in 1..=4u16 {
+            interleaved.extend_from_slice(&(0x1000 | lane).to_le_bytes());
+            interleaved.extend_from_slice(&(0x2000 | lane).to_le_bytes());
+            interleaved.extend_from_slice(&(0x3000 | lane).to_le_bytes());
+        }
+        mem.load_bytes(0x1000, &interleaved).unwrap();
+        cpu.set_reg(0, 0x1000);
+        cpu.execute_arm(
+            enc_neon_ls_multiple(true, 0, 4, 0b0100, 1, 0, 13),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vld3.16 {d4, d5, d6}, [r0]!
+        assert_eq!(cpu.reg(0), 0x1018);
+        assert_eq!(cpu.dreg(4), 0x1004_1003_1002_1001);
+        assert_eq!(cpu.dreg(5), 0x2004_2003_2002_2001);
+        assert_eq!(cpu.dreg(6), 0x3004_3003_3002_3001);
+
+        cpu.set_reg(1, 0x1040);
+        cpu.execute_arm(
+            enc_neon_ls_multiple(false, 1, 4, 0b0100, 1, 0, 15),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vst3.16 {d4, d5, d6}, [r1]
+        for (idx, expected) in interleaved.iter().copied().enumerate() {
+            assert_eq!(mem.load8(0x1040 + idx as u32).unwrap(), expected);
+        }
+
+        cpu.set_dreg(15, u64::from_le_bytes(*b"abcdefgh"));
+        cpu.set_dreg(16, u64::from_le_bytes(*b"ABCDEFGH"));
+        cpu.set_dreg(4, u64::from_le_bytes([0, 7, 8, 15, 16, 1, 10, 99]));
+        assert_eq!(enc_neon_table(15, 3, 1, false, 4), 0xf3bf_3904);
+        cpu.execute_arm(enc_neon_table(15, 3, 1, false, 4), 0, &mut mem)
+            .unwrap(); // vtbl.8 d3, {d15, d16}, d4
+        assert_eq!(cpu.dreg(3), u64::from_le_bytes(*b"ahAH\0bC\0"));
+
+        cpu.set_dreg(3, u64::from_le_bytes(*b"zzzzzzzz"));
+        cpu.set_dreg(4, u64::from_le_bytes([0, 17, 1, 18, 2, 19, 3, 20]));
+        cpu.execute_arm(enc_neon_table(15, 3, 1, true, 4), 0, &mut mem)
+            .unwrap(); // vtbx.8 d3, {d15, d16}, d4
+        assert_eq!(cpu.dreg(3), u64::from_le_bytes(*b"azbzczdz"));
+
+        cpu.set_dreg(0, u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]));
+        cpu.set_dreg(1, u64::from_le_bytes([8, 9, 10, 11, 12, 13, 14, 15]));
+        cpu.set_dreg(4, u64::from_le_bytes([16, 17, 18, 19, 20, 21, 22, 23]));
+        cpu.set_dreg(5, u64::from_le_bytes([24, 25, 26, 27, 28, 29, 30, 31]));
+        cpu.execute_arm(enc_neon_vext(0, 8, 12, true, 4), 0, &mut mem)
+            .unwrap(); // vext.8 q4, q0, q2, #12
+        assert_eq!(
+            cpu.dreg(8),
+            u64::from_le_bytes([12, 13, 14, 15, 16, 17, 18, 19])
+        );
+        assert_eq!(
+            cpu.dreg(9),
+            u64::from_le_bytes([20, 21, 22, 23, 24, 25, 26, 27])
+        );
+
+        cpu.set_dreg(6, 0x4444_3333_2222_1111);
+        cpu.execute_arm(enc_neon_vdup(10, 0xa, false, 6), 0, &mut mem)
+            .unwrap(); // vdup.16 d10, d6[2]
+        assert_eq!(cpu.dreg(10), 0x3333_3333_3333_3333);
+
+        cpu.set_dreg(11, u64::from_le_bytes([1, 2, 3, 4, 5, 6, 7, 8]));
+        cpu.execute_arm(enc_neon_vrev(12, 0, 1, false, 11), 0, &mut mem)
+            .unwrap(); // vrev32.8 d12, d11
+        assert_eq!(cpu.dreg(12), u64::from_le_bytes([4, 3, 2, 1, 8, 7, 6, 5]));
+
+        let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+        cpu.set_dreg(20, pack2(-1.5, 2.25));
+        cpu.execute_arm(enc_neon_2reg_misc(21, 2, 1, 14, false, 20), 0, &mut mem)
+            .unwrap(); // vabs.f32 d21, d20
+        assert_eq!(f32::from_bits(cpu.sreg(42)), 1.5);
+        assert_eq!(f32::from_bits(cpu.sreg(43)), 2.25);
+
+        cpu.set_dreg(23, u64::from_le_bytes([1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff]));
+        cpu.execute_arm(enc_neon_2reg_misc(22, 2, 1, 7, false, 23), 0, &mut mem)
+            .unwrap(); // vneg.s32 d22, d23
+        assert_eq!(
+            cpu.dreg(22),
+            u64::from_le_bytes([0xff, 0xff, 0xff, 0xff, 2, 0, 0, 0])
+        );
+
+        cpu.execute_arm(
+            enc_neon_modified_imm(14, 0x80, 14, true, false),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vmov.i8 q7, #0x80
+        assert_eq!(cpu.dreg(14), 0x8080_8080_8080_8080);
+        assert_eq!(cpu.dreg(15), 0x8080_8080_8080_8080);
+    }
+
+    #[test]
+    fn neon_register_shift_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(
+            1,
+            u64::from_le_bytes([1, 0x80, 0x7f, 2, 0xff, 8, 0x11, 0x40]),
+        );
+        cpu.set_dreg(13, u64::from_le_bytes([1, 1, 1, 0xff, 0xff, 8, 0xf8, 0]));
+        cpu.execute_arm(0xf20d_4401, 0, &mut mem).unwrap(); // vshl.s8 d4, d1, d13
+        assert_eq!(
+            cpu.dreg(4),
+            u64::from_le_bytes([2, 0, 0xfe, 1, 0xff, 0, 0, 0x40])
+        );
+
+        cpu.set_dreg(2, u64::from_le_bytes([0x40, 0x7f, 0x80, 0, 1, 2, 3, 4]));
+        cpu.set_dreg(3, u64::from_le_bytes([1, 1, 1, 4, 8, 0xff, 0xfe, 0]));
+        cpu.execute_arm(
+            enc_neon_3same(false, 0, 3, 5, 4, false, true, 2),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqshl.s8 d5, d2, d3
+        assert_eq!(
+            cpu.dreg(5),
+            u64::from_le_bytes([0x7f, 0x7f, 0x80, 0, 0x7f, 1, 0, 4])
+        );
+        assert!(cpu.cpsr.q);
+    }
+
+    #[test]
+    fn neon_immediate_shift_and_narrow_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(16, 0x8000_0000_1234_5678);
+        cpu.set_dreg(17, 0xffff_0000_0001_0000);
+        assert_eq!(
+            enc_neon_2reg_shift(true, 48, 20, 0, false, true, 16),
+            0xf3f0_4070
+        );
+        cpu.execute_arm(
+            enc_neon_2reg_shift(true, 48, 20, 0, false, true, 16),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vshr.u32 q10, q8, #16
+        assert_eq!(cpu.dreg(20), 0x0000_8000_0000_1234);
+        assert_eq!(cpu.dreg(21), 0x0000_ffff_0000_0001);
+
+        cpu.set_dreg(22, 0xaaaa_aaaa_aaaa_aaaa);
+        cpu.set_dreg(18, 0x0000_ffff_0000_ffff);
+        cpu.execute_arm(
+            enc_neon_2reg_shift(true, 48, 22, 5, false, false, 18),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vsli.32 d22, d18, #16
+        assert_eq!(cpu.dreg(22), 0xffff_aaaa_ffff_aaaa);
+
+        cpu.set_dreg(16, 2);
+        cpu.set_dreg(17, (-2i64) as u64);
+        assert_eq!(
+            enc_neon_2reg_shift(true, 63, 7, 8, false, false, 16),
+            0xf3bf_7830
+        );
+        cpu.execute_arm(
+            enc_neon_2reg_shift(true, 63, 7, 8, false, false, 16),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vqshrun.s64 d7, q8, #1
+        assert_eq!(cpu.dreg(7), 1);
+        assert!(cpu.cpsr.q);
+    }
+
+    #[test]
+    fn neon_three_different_length_integer_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(2, u64::from_le_bytes([1, 2, 250, 255, 0, 128, 3, 4]));
+        cpu.set_dreg(3, u64::from_le_bytes([10, 20, 10, 2, 1, 1, 7, 8]));
+        cpu.execute_arm(enc_neon_3diff(true, 0, 2, 0, 0, 3), 0, &mut mem)
+            .unwrap(); // vaddl.u8 q0, d2, d3
+        assert_eq!(cpu.dreg(0), u64::from_le_bytes([11, 0, 22, 0, 4, 1, 1, 1]));
+        assert_eq!(
+            cpu.dreg(1),
+            u64::from_le_bytes([1, 0, 129, 0, 10, 0, 12, 0])
+        );
+
+        cpu.set_dreg(8, 10);
+        cpu.set_dreg(9, 20);
+        cpu.set_dreg(10, u64::from_le_bytes([3, 0, 0, 0, 4, 0, 0, 0]));
+        cpu.set_dreg(11, u64::from_le_bytes([5, 0, 0, 0, 6, 0, 0, 0]));
+        cpu.execute_arm(enc_neon_3diff(true, 2, 10, 8, 8, 11), 0, &mut mem)
+            .unwrap(); // vmlal.u32 q4, d10, d11
+        assert_eq!(cpu.dreg(8), 25);
+        assert_eq!(cpu.dreg(9), 44);
+
+        cpu.set_dreg(12, u64::from_le_bytes([0xe8, 3, 5, 0, 0x40, 0x9c, 0, 0]));
+        cpu.set_dreg(
+            13,
+            u64::from_le_bytes([1, 0, 10, 0, 0x30, 0x75, 0xff, 0xff]),
+        );
+        cpu.execute_arm(enc_neon_3diff(true, 1, 12, 14, 7, 13), 0, &mut mem)
+            .unwrap(); // vabdl.u16 q7, d12, d13
+        assert_eq!(
+            cpu.dreg(14),
+            u64::from_le_bytes([0xe7, 3, 0, 0, 5, 0, 0, 0])
+        );
+        assert_eq!(
+            cpu.dreg(15),
+            u64::from_le_bytes([0x10, 0x27, 0, 0, 0xff, 0xff, 0, 0])
+        );
+
+        cpu.set_dreg(
+            0,
+            u64::from_le_bytes([0xff, 0, 0, 1, 0x34, 0x12, 0xff, 0xff]),
+        );
+        cpu.set_dreg(1, u64::from_le_bytes([0, 0, 0, 0, 0x80, 0, 0, 0]));
+        cpu.set_dreg(4, u64::from_le_bytes([0, 0, 1, 0, 0, 1, 1, 0]));
+        cpu.set_dreg(5, u64::from_le_bytes([0, 0, 0, 0, 0x80, 0, 0, 0]));
+        cpu.execute_arm(enc_neon_3diff(true, 0, 0, 18, 4, 4), 0, &mut mem)
+            .unwrap(); // vraddhn.i16 d18, q0, q2
+        assert_eq!(
+            cpu.dreg(18),
+            u64::from_le_bytes([1, 1, 0x13, 0, 0, 0, 1, 0])
+        );
+    }
+
+    #[test]
+    fn neon_long_move_and_shift_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_dreg(
+            16,
+            u64::from_le_bytes([0x34, 0x12, 0xff, 0, 0xcd, 0xab, 0, 0]),
+        );
+        cpu.set_dreg(17, u64::from_le_bytes([1, 0, 2, 0, 3, 0, 4, 0]));
+        cpu.execute_arm(enc_neon_2reg_misc(18, 0, 2, 4, false, 16), 0, &mut mem)
+            .unwrap(); // vmovn.i16 d18, q8
+        assert_eq!(
+            cpu.dreg(18),
+            u64::from_le_bytes([0x34, 0xff, 0xcd, 0, 1, 2, 3, 4])
+        );
+
+        cpu.set_dreg(18, u64::from_le_bytes([1, 0, 0, 0, 0, 0, 0, 0x80]));
+        cpu.execute_arm(
+            enc_neon_2reg_shift(true, 36, 20, 10, false, false, 18),
+            0,
+            &mut mem,
+        )
+        .unwrap(); // vshll.u32 q10, d18, #4
+        assert_eq!(cpu.dreg(20), 16);
+        assert_eq!(cpu.dreg(21), 0x0000_0008_0000_0000);
+
+        cpu.execute_arm(enc_neon_2reg_misc(22, 2, 2, 6, false, 18), 0, &mut mem)
+            .unwrap(); // vshll.i32 q11, d18, #32
+        assert_eq!(cpu.dreg(22), 0x0000_0001_0000_0000);
+        assert_eq!(cpu.dreg(23), 0x8000_0000_0000_0000);
     }
 
     #[test]
@@ -4861,6 +7431,35 @@ mod tests {
     }
 
     #[test]
+    fn thumb_high_register_add_reads_unaligned_pc_plus_four() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_isa(Isa::Thumb);
+        cpu.set_reg(0, 0x0006_32fa);
+        cpu.execute_thumb(0x4478, 0x0004_bad6, &mut mem).unwrap(); // add r0, pc
+        assert_eq!(cpu.reg(0), 0x000a_edd4);
+    }
+
+    #[test]
+    fn thumb_compare_and_branch_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.set_reg(5, 0);
+        cpu.execute_thumb(0xb325, 0xa202e2, &mut mem).unwrap(); // cbz r5, +0x48
+        assert_eq!(cpu.pc(), 0xa2032e);
+
+        cpu.set_pc(0);
+        cpu.set_reg(5, 1);
+        cpu.execute_thumb(0xb325, 0xa202e2, &mut mem).unwrap(); // not taken
+        assert_eq!(cpu.pc(), 0);
+
+        cpu.execute_thumb(0xbb25, 0xa202e2, &mut mem).unwrap(); // cbnz r5, +0x48
+        assert_eq!(cpu.pc(), 0xa2032e);
+    }
+
+    #[test]
     fn thumb_push_pop_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0x3000, 0x2000);
@@ -4892,6 +7491,155 @@ mod tests {
         cpu.execute_thumb(0xc803, 0x300c, &mut mem).unwrap(); // ldmia r0!, {r0, r1}
         assert_eq!(cpu.reg(0), 0x33);
         assert_eq!(cpu.reg(1), 0x44);
+    }
+
+    #[test]
+    fn thumb32_branch_clz_and_pop_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0x4b000, 0x2000);
+        cpu.set_isa(Isa::Thumb);
+
+        cpu.set_pc(0x4b694);
+        mem.load_thumb_halfwords(0x4b694, &[0xf7ff, 0xece6])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // blx 0x4b064
+        assert_eq!(cpu.pc(), 0x4b064);
+        assert!(!cpu.cpsr.t);
+        assert_eq!(cpu.reg(14), 0x4b699);
+
+        cpu.set_isa(Isa::Thumb);
+        cpu.set_pc(0x4b6b0);
+        mem.load_thumb_halfwords(0x4b6b0, &[0xf000, 0xbd6e])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // b.w 0x4c190
+        assert_eq!(cpu.pc(), 0x4c190);
+        assert!(cpu.cpsr.t);
+
+        cpu.set_pc(0x4b6a2);
+        cpu.set_reg(0, 0x0000_00f0);
+        mem.load_thumb_halfwords(0x4b6a2, &[0xfab0, 0xf380])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // clz r3, r0
+        assert_eq!(cpu.reg(3), 24);
+        assert_eq!(cpu.pc(), 0x4b6a6);
+
+        cpu.set_pc(0x4b6d0);
+        cpu.set_reg(2, 0x8000_0001);
+        mem.load_thumb_halfwords(0x4b6d0, &[0xf012, 0x0201])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // ands r2, r2, #1
+        assert_eq!(cpu.reg(2), 1);
+        assert!(!cpu.cpsr.n);
+        assert!(!cpu.cpsr.z);
+
+        cpu.set_pc(0x4b74c);
+        mem.load_thumb_halfwords(0x4b74c, &[0xf04f, 0x35ff])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // mov.w r5, #0xffffffff
+        assert_eq!(cpu.reg(5), u32::MAX);
+
+        cpu.set_pc(0x4b974);
+        mem.load_thumb_halfwords(0x4b974, &[0xeeb0, 0x6b00])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // vmov.f64 d6, #2.0
+        assert_eq!(f64::from_bits(cpu.dreg(6)), 2.0);
+
+        cpu.set_pc(0x4b978);
+        mem.load_thumb_halfwords(0x4b978, &[0xf44f, 0x7080])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // mov.w r0, #0x100
+        assert_eq!(cpu.reg(0), 0x100);
+
+        cpu.set_pc(0x4b97c);
+        cpu.set_reg(13, 0x4c200);
+        cpu.set_reg(4, 0x4444);
+        cpu.set_reg(11, 0xbbbb);
+        cpu.set_reg(14, 0xeeee);
+        mem.load_thumb_halfwords(0x4b97c, &[0xe92d, 0x4ff0])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // push.w {r4-r11, lr}
+        assert_eq!(cpu.reg(13), 0x4c1dc);
+        assert_eq!(mem.load32(0x4c1dc).unwrap(), 0x4444);
+        assert_eq!(mem.load32(0x4c1f8).unwrap(), 0xbbbb);
+        assert_eq!(mem.load32(0x4c1fc).unwrap(), 0xeeee);
+
+        cpu.set_pc(0x4b990);
+        cpu.set_reg(6, 0x1000);
+        mem.load_thumb_halfwords(0x4b990, &[0xf506, 0x78a8])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // add.w r8, r6, #0x150
+        assert_eq!(cpu.reg(8), 0x1150);
+
+        cpu.set_pc(0x4b9b2);
+        cpu.set_reg(2, 0x1111_2222);
+        cpu.set_reg(3, 0x3333_4444);
+        cpu.set_reg(6, 0x4c200);
+        mem.load_thumb_halfwords(0x4b9b2, &[0xe9c6, 0x2314])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // strd r2, r3, [r6, #80]
+        assert_eq!(mem.load32(0x4c250).unwrap(), 0x1111_2222);
+        assert_eq!(mem.load32(0x4c254).unwrap(), 0x3333_4444);
+        assert_eq!(cpu.reg(6), 0x4c200);
+
+        cpu.set_pc(0x4ba04);
+        cpu.set_reg(1, 0x5555_6666);
+        cpu.set_reg(6, 0x4c200);
+        mem.load_thumb_halfwords(0x4ba04, &[0xf8c6, 0x1098])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // str.w r1, [r6, #0x98]
+        assert_eq!(mem.load32(0x4c298).unwrap(), 0x5555_6666);
+
+        cpu.set_pc(0x4ba10);
+        mem.load_thumb_halfwords(0x4ba10, &[0xf8df, 0x4498])
+            .unwrap();
+        mem.store32(0x4beac, 0x1234_5678).unwrap();
+        cpu.step(&mut mem).unwrap(); // ldr.w r4, [pc, #0x498]
+        assert_eq!(cpu.reg(4), 0x1234_5678);
+
+        cpu.set_pc(0x4b758);
+        cpu.set_reg(0, 0xaaaa_bbbb);
+        cpu.set_reg(1, 0x4c100);
+        cpu.set_reg(2, 0xcccc_dddd);
+        mem.load_thumb_halfwords(0x4b758, &[0xe881, 0x0005])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // stm.w r1, {r0, r2}
+        assert_eq!(mem.load32(0x4c100).unwrap(), 0xaaaa_bbbb);
+        assert_eq!(mem.load32(0x4c104).unwrap(), 0xcccc_dddd);
+        assert_eq!(cpu.reg(1), 0x4c100);
+
+        cpu.set_pc(0x4b7b8);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0x4c180);
+        cpu.cpsr.n = false;
+        mem.store32(0x4c180, 0).unwrap();
+        mem.load_thumb_halfwords(0x4b7b8, &[0xbf5c, 0x2101, 0x6011])
+            .unwrap();
+        for _ in 0..3 {
+            cpu.step(&mut mem).unwrap();
+        }
+        assert_eq!(mem.load32(0x4c180).unwrap(), 1);
+
+        cpu.set_pc(0x4b7b8);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0x4c180);
+        cpu.cpsr.n = true;
+        mem.store32(0x4c180, 0).unwrap();
+        for _ in 0..3 {
+            cpu.step(&mut mem).unwrap();
+        }
+        assert_eq!(mem.load32(0x4c180).unwrap(), 0);
+
+        cpu.set_pc(0x4b6ac);
+        cpu.set_reg(13, 0x4c000);
+        mem.store32(0x4c000, 0x1234_5678).unwrap();
+        mem.store32(0x4c004, 0x8765_4321).unwrap();
+        mem.load_thumb_halfwords(0x4b6ac, &[0xe8bd, 0x4010])
+            .unwrap();
+        cpu.step(&mut mem).unwrap(); // pop.w {r4, lr}
+        assert_eq!(cpu.reg(4), 0x1234_5678);
+        assert_eq!(cpu.reg(14), 0x8765_4321);
+        assert_eq!(cpu.reg(13), 0x4c008);
+        assert_eq!(cpu.pc(), 0x4b6b0);
     }
 
     #[test]
@@ -6233,7 +8981,6 @@ mod tests {
     #[test]
     fn vfpv3_nonbaseline_encodings_trap_undefined() {
         let cases = [
-            0xeeb7_0a00, // vmov.f32 s0, #1.0
             0xeeba_1a44, // vcvt.f32.s16 s2, s2, #8
             0xeebe_2a44, // vcvt.s16.f32 s4, s4, #8
         ];
@@ -6245,6 +8992,18 @@ mod tests {
             let err = cpu.execute_arm(instr, pc, &mut mem).unwrap_err();
             assert_eq!(err, Trap::UndefinedArm { pc, instr });
         }
+    }
+
+    #[test]
+    fn vfpv3_immediate_moves_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0, 4);
+
+        cpu.execute_arm(0xeeb0_6b00, 0, &mut mem).unwrap(); // vmov.f64 d6, #2.0
+        assert_eq!(f64::from_bits(cpu.dreg(6)), 2.0);
+
+        cpu.execute_arm(0xeeb7_0a00, 0, &mut mem).unwrap(); // vmov.f32 s0, #1.0
+        assert_eq!(f32::from_bits(cpu.sreg(0)), 1.0);
     }
 
     #[test]
@@ -6357,7 +9116,7 @@ mod tests {
     }
 
     #[test]
-    fn vfpv2_double_register_ranges_trap() {
+    fn vfpv3_d16_to_d31_double_registers_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 0x100);
 
@@ -6366,27 +9125,29 @@ mod tests {
         cpu.execute_arm(0xee3e_fb0d, 0, &mut mem).unwrap(); // vadd.f64 d15, d14, d13
         assert_eq!(f64::from_bits(cpu.dreg(15)), 3.0);
 
-        for (instr, comment) in [
-            (0xec43_2b30, "vmov d16, r2, r3"),
-            (0xec51_0b30, "vmov r0, r1, d16"),
-            (0xee00_7b90, "vmov.32 d16[0], r7"),
-            (0xee10_6b90, "vmov.32 r6, d16[0]"),
-            (0xee70_0b01, "vadd.f64 d16, d0, d1"),
-            (0xee30_2b81, "vadd.f64 d2, d16, d1"),
-            (0xee30_2b20, "vadd.f64 d2, d0, d16"),
-            (0xeef4_0b41, "vcmp.f64 d16, d1"),
-            (0xeeb4_0b60, "vcmp.f64 d0, d16"),
-            (0xeef7_0ae0, "vcvt.f64.f32 d16, s1"),
-            (0xeeb7_1be0, "vcvt.f32.f64 s2, d16"),
-            (0xeef8_0bc4, "vcvt.f64.s32 d16, s8"),
-        ] {
-            let err = cpu.execute_arm(instr, 0, &mut mem).unwrap_err();
-            assert_eq!(
-                err,
-                Trap::Unpredictable("VFP double register out of range"),
-                "{comment}"
-            );
-        }
+        cpu.set_reg(2, 0x5566_7788);
+        cpu.set_reg(3, 0x1122_3344);
+        cpu.execute_arm(0xec43_2b30, 0, &mut mem).unwrap(); // vmov d16, r2, r3
+        assert_eq!(cpu.dreg(16), 0x1122_3344_5566_7788);
+
+        cpu.execute_arm(0xec51_0b30, 0, &mut mem).unwrap(); // vmov r0, r1, d16
+        assert_eq!(cpu.reg(0), 0x5566_7788);
+        assert_eq!(cpu.reg(1), 0x1122_3344);
+
+        cpu.set_dreg(0, 1.5f64.to_bits());
+        cpu.set_dreg(1, 2.5f64.to_bits());
+        cpu.execute_arm(0xee70_0b01, 0, &mut mem).unwrap(); // vadd.f64 d16, d0, d1
+        assert_eq!(f64::from_bits(cpu.dreg(16)), 4.0);
+
+        cpu.execute_arm(0xee30_2b81, 0, &mut mem).unwrap(); // vadd.f64 d2, d16, d1
+        assert_eq!(f64::from_bits(cpu.dreg(2)), 6.5);
+
+        cpu.set_sreg(1, 3.25f32.to_bits());
+        cpu.execute_arm(0xeef7_0ae0, 0, &mut mem).unwrap(); // vcvt.f64.f32 d16, s1
+        assert_eq!(f64::from_bits(cpu.dreg(16)), 3.25);
+
+        cpu.execute_arm(0xeeb7_1be0, 0, &mut mem).unwrap(); // vcvt.f32.f64 s2, d16
+        assert_eq!(f32::from_bits(cpu.sreg(2)), 3.25);
     }
 
     #[test]
@@ -6444,8 +9205,7 @@ mod tests {
         let mut mem = VecMemory::new(0, 0x100);
         cpu.set_reg(0, 0x40);
 
-        let err = cpu.execute_arm(0xedd0_0b00, 0, &mut mem).unwrap_err(); // vldr d16, [r0]
-        assert_eq!(err, Trap::Unpredictable("VFP double register out of range"));
+        cpu.execute_arm(0xedd0_0b00, 0, &mut mem).unwrap(); // vldr d16, [r0]
 
         let err = cpu.execute_arm(0xeca0_0a00, 0, &mut mem).unwrap_err(); // vstmia r0!, {}
         assert_eq!(
@@ -6459,7 +9219,7 @@ mod tests {
             Trap::Unpredictable("VFP multiple transfer writeback with PC base")
         );
 
-        let err = cpu.execute_arm(0xece0_0b04, 0, &mut mem).unwrap_err(); // vstmia r0!, {d16-d17}
+        let err = cpu.execute_arm(0xece0_fb04, 0, &mut mem).unwrap_err(); // vstmia r0!, {d31-d32}
         assert_eq!(
             err,
             Trap::Unpredictable("VFP multiple transfer register range")
