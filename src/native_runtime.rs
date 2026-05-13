@@ -117,7 +117,11 @@ pub struct NativeActivityHarness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRuntimeStep {
     GuestInstruction,
-    HleCall { name: String, address: u32 },
+    HleCall {
+        name: String,
+        address: u32,
+        args: [u32; 4],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +186,19 @@ struct JniMethod {
 struct GuestThread {
     id: u32,
     cpu: Cpu,
+    wait: GuestThreadWait,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestThreadWait {
+    Runnable,
+    Condvar { cond: u32 },
+}
+
+impl GuestThreadWait {
+    fn is_runnable(self) -> bool {
+        matches!(self, Self::Runnable)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,11 +330,13 @@ impl NativeRuntime {
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
         let pc_before = self.cpu.pc();
         let isa_before = self.cpu.isa();
+        let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
         if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
             self.dispatch_runtime_hle(trap)?;
             return Ok(NativeRuntimeStep::HleCall {
                 name: trap.name.to_string(),
                 address: pc_before,
+                args: args_before,
             });
         }
         match self.cpu.step(&mut self.link.memory) {
@@ -331,7 +350,11 @@ impl NativeRuntime {
                             name: name.clone(),
                             source,
                         })?;
-                    return Ok(NativeRuntimeStep::HleCall { name, address: pc });
+                    return Ok(NativeRuntimeStep::HleCall {
+                        name,
+                        address: pc,
+                        args: args_before,
+                    });
                 }
                 if let Some(trap) = self
                     .runtime_hle_traps
@@ -343,6 +366,7 @@ impl NativeRuntime {
                     return Ok(NativeRuntimeStep::HleCall {
                         name: trap.name.to_string(),
                         address: pc,
+                        args: args_before,
                     });
                 }
                 Err(NativeRuntimeError::UnknownHleTrap { pc })
@@ -360,7 +384,9 @@ impl NativeRuntime {
 
     pub fn run(&mut self, max_steps: usize) -> Result<(), NativeRuntimeError> {
         for _ in 0..max_steps {
-            self.step()?;
+            if let NativeRuntimeStep::HleCall { name, args, .. } = self.step()? {
+                self.handle_thread_sync_hle(&name, args);
+            }
         }
         Err(NativeRuntimeError::Cpu(Trap::StepLimit))
     }
@@ -774,7 +800,9 @@ impl NativeRuntime {
                 Ok(NativeRuntimeStep::HleCall {
                     name,
                     address: hle_address,
+                    args,
                 }) => {
+                    self.handle_thread_sync_hle(&name, args);
                     let should_service_threads = self.hle.has_created_pthreads()
                         || (!self.guest_threads.is_empty()
                             && GUEST_THREAD_SERVICE_HLE.contains(&name.as_str()));
@@ -790,10 +818,10 @@ impl NativeRuntime {
                             step_idx,
                             hle_address,
                             name,
-                            self.cpu.reg(0),
-                            self.cpu.reg(1),
-                            self.cpu.reg(2),
-                            self.cpu.reg(3),
+                            args[0],
+                            args[1],
+                            args[2],
+                            args[3],
                         );
                     }
                     if should_service_threads {
@@ -827,6 +855,10 @@ impl NativeRuntime {
             let Some(mut thread) = self.guest_threads.pop_front() else {
                 break;
             };
+            if !thread.wait.is_runnable() {
+                self.guest_threads.push_back(thread);
+                continue;
+            }
             let done = self.run_guest_thread_slice(&mut thread, slice_steps)?;
             self.drain_created_pthreads()?;
             if !done {
@@ -907,6 +939,7 @@ impl NativeRuntime {
         Ok(GuestThread {
             id: created.id,
             cpu,
+            wait: GuestThreadWait::Runnable,
         })
     }
 
@@ -930,6 +963,38 @@ impl NativeRuntime {
         Ok(next_top & !(GUEST_THREAD_STACK_ALIGN - 1))
     }
 
+    fn handle_thread_sync_hle(&mut self, name: &str, args: [u32; 4]) {
+        match name {
+            "pthread_cond_signal" => self.wake_cond_threads(args[0], false),
+            "pthread_cond_broadcast" => self.wake_cond_threads(args[0], true),
+            _ => {}
+        }
+    }
+
+    fn thread_wait_after_hle(&self, name: &str, args: [u32; 4]) -> Option<GuestThreadWait> {
+        match name {
+            "pthread_cond_wait" if args[0] != 0 => Some(GuestThreadWait::Condvar { cond: args[0] }),
+            _ => None,
+        }
+    }
+
+    fn wake_cond_threads(&mut self, cond: u32, broadcast: bool) {
+        if cond == 0 {
+            return;
+        }
+        for thread in &mut self.guest_threads {
+            if thread.wait == (GuestThreadWait::Condvar { cond }) {
+                thread.wait = GuestThreadWait::Runnable;
+                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                    eprintln!("THREAD wake id={} cond={cond:#010x}", thread.id);
+                }
+                if !broadcast {
+                    break;
+                }
+            }
+        }
+    }
+
     fn run_guest_thread_slice(
         &mut self,
         thread: &mut GuestThread,
@@ -944,31 +1009,47 @@ impl NativeRuntime {
                 result = Ok(true);
                 break;
             }
-            if let Err(err) = self.step() {
-                if matches!(
-                    err,
-                    NativeRuntimeError::Hle {
-                        source: HleError::Abort(_),
-                        ..
+            match self.step() {
+                Ok(NativeRuntimeStep::GuestInstruction) => {}
+                Ok(NativeRuntimeStep::HleCall { name, args, .. }) => {
+                    self.handle_thread_sync_hle(&name, args);
+                    if let Some(wait) = self.thread_wait_after_hle(&name, args) {
+                        thread.wait = wait;
+                        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                            eprintln!("THREAD wait id={} {wait:?}", thread.id);
+                        }
+                        break;
                     }
-                ) {
-                    if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
-                        eprintln!(
-                            "THREAD abort id={} pc={:#010x} {:?} r0={:#010x}",
-                            thread.id,
-                            self.cpu.pc(),
-                            self.cpu.isa(),
-                            self.cpu.reg(0),
-                        );
-                    }
-                    result = Ok(true);
-                } else {
-                    result = Err(err);
                 }
-                break;
+                Err(err) => {
+                    if matches!(
+                        err,
+                        NativeRuntimeError::Hle {
+                            source: HleError::Abort(_),
+                            ..
+                        }
+                    ) {
+                        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                            eprintln!(
+                                "THREAD abort id={} pc={:#010x} {:?} r0={:#010x}",
+                                thread.id,
+                                self.cpu.pc(),
+                                self.cpu.isa(),
+                                self.cpu.reg(0),
+                            );
+                        }
+                        result = Ok(true);
+                    } else {
+                        result = Err(err);
+                    }
+                    break;
+                }
             }
         }
-        if matches!(result, Ok(false)) && self.cpu.pc() == THREAD_RETURN_SENTINEL {
+        if thread.wait.is_runnable()
+            && matches!(result, Ok(false))
+            && self.cpu.pc() == THREAD_RETURN_SENTINEL
+        {
             result = Ok(true);
         }
         thread.cpu = self.cpu.clone();
@@ -1456,6 +1537,7 @@ mod tests {
             NativeRuntimeStep::HleCall {
                 name: "strlen".to_string(),
                 address: hle_address,
+                args: [0x5000_0100, 0, 0, 0],
             }
         );
         assert_eq!(runtime.cpu.reg(0), 5);
@@ -1764,6 +1846,88 @@ mod tests {
         assert_eq!(runtime.link.memory.load32(0x4000_0200).unwrap(), 42);
         assert!(runtime.guest_threads.is_empty());
         assert_eq!(runtime.cpu.pc(), 0);
+    }
+
+    #[test]
+    fn blocks_guest_thread_on_pthread_cond_wait_until_signal() {
+        let wait_addr = 0x6f00_0000;
+        let signal_addr = 0x6f00_0004;
+        let cond = 0x6000_0100;
+        let mutex = 0x6000_0200;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x6f00_0000, 0x1000).unwrap();
+        memory.store32(wait_addr, HLE_TRAP_ARM_INSTR).unwrap();
+        memory.store32(signal_addr, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![
+                HleSymbol {
+                    name: "pthread_cond_wait".to_string(),
+                    address: wait_addr,
+                    kind: HleSymbolKind::Libc,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::ReturnZero,
+                },
+                HleSymbol {
+                    name: "pthread_cond_signal".to_string(),
+                    address: signal_addr,
+                    kind: HleSymbolKind::Libc,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::ReturnZero,
+                },
+            ],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_pc(wait_addr);
+        cpu.set_reg(0, cond);
+        cpu.set_reg(1, mutex);
+        cpu.set_reg(14, THREAD_RETURN_SENTINEL);
+        runtime.guest_threads.push_back(GuestThread {
+            id: 7,
+            cpu,
+            wait: GuestThreadWait::Runnable,
+        });
+
+        runtime.service_guest_threads(4).unwrap();
+
+        assert_eq!(runtime.guest_threads.len(), 1);
+        assert_eq!(
+            runtime.guest_threads[0].wait,
+            GuestThreadWait::Condvar { cond }
+        );
+        assert_eq!(runtime.guest_threads[0].cpu.pc(), THREAD_RETURN_SENTINEL);
+
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(signal_addr);
+        runtime.cpu.set_reg(0, cond);
+        runtime.cpu.set_reg(14, CALL_RETURN_SENTINEL);
+        let step = runtime.step().unwrap();
+        let NativeRuntimeStep::HleCall { name, args, .. } = step else {
+            panic!("expected pthread_cond_signal HLE call");
+        };
+        runtime.handle_thread_sync_hle(&name, args);
+
+        assert_eq!(runtime.guest_threads[0].wait, GuestThreadWait::Runnable);
+        runtime.service_guest_threads(4).unwrap();
+        assert!(runtime.guest_threads.is_empty());
     }
 
     #[test]
