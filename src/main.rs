@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -102,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--sdl2]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2]"
                     );
                     std::process::exit(2);
                 }
@@ -122,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--sdl2]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -509,6 +510,7 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
 struct RunApkNativeOptions {
     launch: bool,
     until_swap: bool,
+    gles_summary: bool,
     sdl2: bool,
     sdl2_hold_ms: u64,
 }
@@ -534,6 +536,7 @@ fn parse_run_apk_native_args(
     let mut options = RunApkNativeOptions {
         launch: false,
         until_swap: false,
+        gles_summary: false,
         sdl2: false,
         sdl2_hold_ms: 1000,
     };
@@ -557,6 +560,7 @@ fn parse_run_apk_native_args(
                 options.launch = true;
                 options.until_swap = true;
             }
+            "--gles-summary" => options.gles_summary = true,
             "--sdl2" => {
                 options.launch = true;
                 options.until_swap = true;
@@ -626,15 +630,32 @@ fn run_apk_native(
     if options.launch {
         run_native_activity_launch(&mut runtime, max_steps, options.until_swap)?;
     }
-    if options.sdl2 {
-        replay_sdl2_gles_events(&mut runtime, options.sdl2_hold_ms)?;
+    if options.gles_summary || options.sdl2 {
+        let events = runtime.hle.take_gles_events();
+        if options.gles_summary {
+            print_gles_summary(&events);
+        }
+        if options.sdl2 {
+            replay_sdl2_gles_events(&events, options.sdl2_hold_ms)?;
+        }
     }
     Ok(())
 }
 
+fn print_gles_summary(events: &[aemu::hle_imports::GlesEvent]) {
+    let mut counts = BTreeMap::new();
+    for event in events {
+        *counts.entry(event.kind()).or_insert(0usize) += 1;
+    }
+    println!("gles events: {}", events.len());
+    for (kind, count) in counts {
+        println!("  {kind}: {count}");
+    }
+}
+
 #[cfg(feature = "sdl2")]
 fn replay_sdl2_gles_events(
-    runtime: &mut aemu::native_runtime::NativeRuntime,
+    events: &[aemu::hle_imports::GlesEvent],
     hold_ms: u64,
 ) -> Result<(), String> {
     use std::thread;
@@ -644,9 +665,8 @@ fn replay_sdl2_gles_events(
 
     let mut host = aemu::sdl_shell::Sdl2Host::new(&HostConfig::default())
         .map_err(|err| format!("SDL2 setup failed: {err}"))?;
-    let events = runtime.hle.take_gles_events();
     println!("sdl2: replaying {} GLES events", events.len());
-    host.replay_gles_events(&events)
+    host.replay_gles_events(events)
         .map_err(|err| format!("SDL2 GLES replay failed: {err}"))?;
 
     let deadline = Instant::now() + Duration::from_millis(hold_ms);
@@ -672,7 +692,7 @@ fn replay_sdl2_gles_events(
 
 #[cfg(not(feature = "sdl2"))]
 fn replay_sdl2_gles_events(
-    _runtime: &mut aemu::native_runtime::NativeRuntime,
+    _events: &[aemu::hle_imports::GlesEvent],
     _hold_ms: u64,
 ) -> Result<(), String> {
     Err("--sdl2 requires rebuilding with --features sdl2".to_string())

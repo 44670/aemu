@@ -162,6 +162,14 @@ state, and flush. The SDL2 host can replay the clear, viewport, and swap subset
 into a GLES2 context through `--sdl2`; draw replay and WebGL replay remain
 pending.
 
+The first-frame MCPE event capture no longer saturates the command queue after
+raising the bound to 65,536 events. With `--gles-summary`, the local 0.15.0.1
+APK reaches `eglSwapBuffers` at step `254925219` and reports 20,758 captured
+GLES events: 744 `DrawElements`, 841 `TexImage2D`, 839 `TexSubImage2D`, 1,496
+`VertexAttribPointer`, 719 `Uniform1i`, 752 uniform-vector updates, and one
+swap. The immediate replay target is therefore complete buffer/texture/uniform
+payload capture plus indexed draw submission into SDL2/WebGL.
+
 ## Latest Verification
 
 - `cargo fmt --check`
@@ -181,7 +189,7 @@ pending.
 - `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
 - `cargo check --features sdl2`
 - `cargo build --release`
-- `AEMU_TRACE_MCPE_RESOURCE_BRIDGE=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits 0 after setting `MinecraftClient + 0x23e` to `0x01` and reaching `eglSwapBuffers` at step `254925219`, after broad GLES event recording
+- `AEMU_TRACE_MCPE_RESOURCE_BRIDGE=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap --gles-summary` exits 0 after setting `MinecraftClient + 0x23e` to `0x01`, reaching `eglSwapBuffers` at step `254925219`, and summarizing 20,758 captured GLES events
 - `run-apk-native ... --sdl2` is feature-gated behind `cargo run --features sdl2 -- ...`; this GUI path was build-checked but not opened during the audit run
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
   reports 579 reserved HLE symbols, 906 resolved imports, and zero unresolved imports

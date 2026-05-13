@@ -169,7 +169,7 @@ const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
-const GLES_EVENT_LIMIT: usize = 4096;
+const GLES_EVENT_LIMIT: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -495,6 +495,44 @@ pub enum GlesEvent {
         display: u32,
         surface: u32,
     },
+}
+
+impl GlesEvent {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::ActiveTexture { .. } => "ActiveTexture",
+            Self::BindBuffer { .. } => "BindBuffer",
+            Self::BufferData { .. } => "BufferData",
+            Self::BufferSubData { .. } => "BufferSubData",
+            Self::BindTexture { .. } => "BindTexture",
+            Self::TexParameteri { .. } => "TexParameteri",
+            Self::TexImage2D { .. } => "TexImage2D",
+            Self::TexSubImage2D { .. } => "TexSubImage2D",
+            Self::UseProgram { .. } => "UseProgram",
+            Self::Uniform1i { .. } => "Uniform1i",
+            Self::UniformVector { .. } => "UniformVector",
+            Self::UniformMatrix { .. } => "UniformMatrix",
+            Self::VertexAttribPointer { .. } => "VertexAttribPointer",
+            Self::EnableVertexAttribArray { .. } => "EnableVertexAttribArray",
+            Self::Enable { .. } => "Enable",
+            Self::Disable { .. } => "Disable",
+            Self::BlendFunc { .. } => "BlendFunc",
+            Self::BlendFuncSeparate { .. } => "BlendFuncSeparate",
+            Self::DepthFunc { .. } => "DepthFunc",
+            Self::DepthMask { .. } => "DepthMask",
+            Self::DepthRangef { .. } => "DepthRangef",
+            Self::ColorMask { .. } => "ColorMask",
+            Self::Scissor { .. } => "Scissor",
+            Self::ClearColor { .. } => "ClearColor",
+            Self::ClearDepthf { .. } => "ClearDepthf",
+            Self::Clear { .. } => "Clear",
+            Self::Viewport { .. } => "Viewport",
+            Self::DrawArrays { .. } => "DrawArrays",
+            Self::DrawElements { .. } => "DrawElements",
+            Self::Flush => "Flush",
+            Self::SwapBuffers { .. } => "SwapBuffers",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -157,13 +157,13 @@ shader/program state and reflects active uniforms/attributes from MCPE GLSL
 source, including WebGL/GLES2 `#if __VERSION__ >= 300` handling and filtering of
 declared-but-unused uniforms that real GLES would optimize out.
 
-After that reflection work, a swap-filtered 140M-step probe still reaches
-repeated `eglSwapInterval` and `eglSwapBuffers` at about 82.63M guest steps. A
-`glDraw`-filtered 220M-step probe no longer crashes in
-`mce::ShaderOGL::reflectShaderUniforms()`, but it still does not observe
-`glDraw*`, so the next graphics target is real draw submission after clear/swap
-presentation. The run does not stop on an undefined NEON opcode. An older APK
-with `lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
+After adding the MCPE resource bridge, `GameRenderer::render(float)` calls
+`MinecraftClient::onResourcesLoaded()` when the `MinecraftClient + 0x23e`
+ready byte is still unset. The bounded first-frame probe now reaches
+`eglSwapBuffers` at step `254925219` and, with `--gles-summary`, reports 20,758
+captured GLES events before the first swap, including 744 `glDrawElements`
+calls. The run does not stop on an undefined NEON opcode. An older APK with
+`lib/armeabi/libminecraftpe.so` is still required to validate the ARMv6
 Minecraft PE path.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
