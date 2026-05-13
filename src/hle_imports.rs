@@ -341,6 +341,126 @@ pub struct HleUnwindTable {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlesEvent {
+    ActiveTexture {
+        texture: u32,
+    },
+    BindBuffer {
+        target: u32,
+        buffer: u32,
+    },
+    BufferData {
+        target: u32,
+        size: u32,
+        data: u32,
+        usage: u32,
+    },
+    BufferSubData {
+        target: u32,
+        offset: u32,
+        size: u32,
+        data: u32,
+    },
+    BindTexture {
+        target: u32,
+        texture: u32,
+    },
+    TexParameteri {
+        target: u32,
+        name: u32,
+        value: u32,
+    },
+    TexImage2D {
+        target: u32,
+        level: i32,
+        internal_format: i32,
+        width: i32,
+        height: i32,
+        border: i32,
+        format: u32,
+        ty: u32,
+        pixels: u32,
+    },
+    TexSubImage2D {
+        target: u32,
+        level: i32,
+        xoffset: i32,
+        yoffset: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        ty: u32,
+        pixels: u32,
+    },
+    UseProgram {
+        program: u32,
+    },
+    Uniform1i {
+        location: i32,
+        value: i32,
+    },
+    UniformVector {
+        components: u8,
+        integer: bool,
+        location: i32,
+        count: i32,
+        values: u32,
+    },
+    UniformMatrix {
+        columns: u8,
+        location: i32,
+        count: i32,
+        transpose: bool,
+        values: u32,
+    },
+    VertexAttribPointer {
+        index: u32,
+        size: i32,
+        ty: u32,
+        normalized: bool,
+        stride: i32,
+        pointer: u32,
+    },
+    EnableVertexAttribArray {
+        index: u32,
+    },
+    Enable {
+        cap: u32,
+    },
+    Disable {
+        cap: u32,
+    },
+    BlendFunc {
+        sfactor: u32,
+        dfactor: u32,
+    },
+    BlendFuncSeparate {
+        src_rgb: u32,
+        dst_rgb: u32,
+        src_alpha: u32,
+        dst_alpha: u32,
+    },
+    DepthFunc {
+        func: u32,
+    },
+    DepthMask {
+        enabled: bool,
+    },
+    DepthRangef {
+        near: u32,
+        far: u32,
+    },
+    ColorMask {
+        red: bool,
+        green: bool,
+        blue: bool,
+        alpha: bool,
+    },
+    Scissor {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
     ClearColor {
         red: u32,
         green: u32,
@@ -370,6 +490,7 @@ pub enum GlesEvent {
         ty: u32,
         indices: u32,
     },
+    Flush,
     SwapBuffers {
         display: u32,
         surface: u32,
@@ -2890,6 +3011,200 @@ impl HleRuntime {
             "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
                 self.gl_gen_names(cpu, memory)
             }
+            "glActiveTexture" => {
+                self.push_gles_event(GlesEvent::ActiveTexture {
+                    texture: cpu.reg(0),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBindBuffer" => {
+                self.push_gles_event(GlesEvent::BindBuffer {
+                    target: cpu.reg(0),
+                    buffer: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBufferData" => {
+                let usage = self.stack_arg(cpu, memory, 4)?;
+                self.push_gles_event(GlesEvent::BufferData {
+                    target: cpu.reg(0),
+                    size: cpu.reg(1),
+                    data: cpu.reg(2),
+                    usage,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBufferSubData" => {
+                self.push_gles_event(GlesEvent::BufferSubData {
+                    target: cpu.reg(0),
+                    offset: cpu.reg(1),
+                    size: cpu.reg(2),
+                    data: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBindTexture" => {
+                self.push_gles_event(GlesEvent::BindTexture {
+                    target: cpu.reg(0),
+                    texture: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glTexParameteri" => {
+                self.push_gles_event(GlesEvent::TexParameteri {
+                    target: cpu.reg(0),
+                    name: cpu.reg(1),
+                    value: cpu.reg(2),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glTexImage2D" => {
+                let border = self.stack_arg(cpu, memory, 5)?;
+                let format = self.stack_arg(cpu, memory, 6)?;
+                let ty = self.stack_arg(cpu, memory, 7)?;
+                let pixels = self.stack_arg(cpu, memory, 8)?;
+                self.push_gles_event(GlesEvent::TexImage2D {
+                    target: cpu.reg(0),
+                    level: cpu.reg(1) as i32,
+                    internal_format: cpu.reg(2) as i32,
+                    width: cpu.reg(3) as i32,
+                    height: self.stack_arg(cpu, memory, 4)? as i32,
+                    border: border as i32,
+                    format,
+                    ty,
+                    pixels,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glTexSubImage2D" => {
+                let width = self.stack_arg(cpu, memory, 4)?;
+                let height = self.stack_arg(cpu, memory, 5)?;
+                let format = self.stack_arg(cpu, memory, 6)?;
+                let ty = self.stack_arg(cpu, memory, 7)?;
+                let pixels = self.stack_arg(cpu, memory, 8)?;
+                self.push_gles_event(GlesEvent::TexSubImage2D {
+                    target: cpu.reg(0),
+                    level: cpu.reg(1) as i32,
+                    xoffset: cpu.reg(2) as i32,
+                    yoffset: cpu.reg(3) as i32,
+                    width: width as i32,
+                    height: height as i32,
+                    format,
+                    ty,
+                    pixels,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glUseProgram" => {
+                self.push_gles_event(GlesEvent::UseProgram {
+                    program: cpu.reg(0),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glUniform1i" => {
+                self.push_gles_event(GlesEvent::Uniform1i {
+                    location: cpu.reg(0) as i32,
+                    value: cpu.reg(1) as i32,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv"
+            | "glUniform2iv" | "glUniform3iv" | "glUniform4iv" => {
+                self.push_gles_event(GlesEvent::UniformVector {
+                    components: uniform_vector_components(name),
+                    integer: name.ends_with("iv"),
+                    location: cpu.reg(0) as i32,
+                    count: cpu.reg(1) as i32,
+                    values: cpu.reg(2),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glUniformMatrix2fv" | "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
+                self.push_gles_event(GlesEvent::UniformMatrix {
+                    columns: uniform_matrix_columns(name),
+                    location: cpu.reg(0) as i32,
+                    count: cpu.reg(1) as i32,
+                    transpose: cpu.reg(2) != 0,
+                    values: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glVertexAttribPointer" => {
+                let stride = self.stack_arg(cpu, memory, 4)?;
+                let pointer = self.stack_arg(cpu, memory, 5)?;
+                self.push_gles_event(GlesEvent::VertexAttribPointer {
+                    index: cpu.reg(0),
+                    size: cpu.reg(1) as i32,
+                    ty: cpu.reg(2),
+                    normalized: cpu.reg(3) != 0,
+                    stride: stride as i32,
+                    pointer,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glEnableVertexAttribArray" => {
+                self.push_gles_event(GlesEvent::EnableVertexAttribArray { index: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glEnable" => {
+                self.push_gles_event(GlesEvent::Enable { cap: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDisable" => {
+                self.push_gles_event(GlesEvent::Disable { cap: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBlendFunc" => {
+                self.push_gles_event(GlesEvent::BlendFunc {
+                    sfactor: cpu.reg(0),
+                    dfactor: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBlendFuncSeparate" => {
+                self.push_gles_event(GlesEvent::BlendFuncSeparate {
+                    src_rgb: cpu.reg(0),
+                    dst_rgb: cpu.reg(1),
+                    src_alpha: cpu.reg(2),
+                    dst_alpha: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDepthFunc" => {
+                self.push_gles_event(GlesEvent::DepthFunc { func: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDepthMask" => {
+                self.push_gles_event(GlesEvent::DepthMask {
+                    enabled: cpu.reg(0) != 0,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDepthRangef" => {
+                self.push_gles_event(GlesEvent::DepthRangef {
+                    near: cpu.reg(0),
+                    far: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glColorMask" => {
+                self.push_gles_event(GlesEvent::ColorMask {
+                    red: cpu.reg(0) != 0,
+                    green: cpu.reg(1) != 0,
+                    blue: cpu.reg(2) != 0,
+                    alpha: cpu.reg(3) != 0,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glScissor" => {
+                self.push_gles_event(GlesEvent::Scissor {
+                    x: cpu.reg(0) as i32,
+                    y: cpu.reg(1) as i32,
+                    width: cpu.reg(2) as i32,
+                    height: cpu.reg(3) as i32,
+                });
+                Ok(self.return32(cpu, 0))
+            }
             "glClearColor" => {
                 self.push_gles_event(GlesEvent::ClearColor {
                     red: cpu.reg(0),
@@ -2931,6 +3246,10 @@ impl HleRuntime {
                     ty: cpu.reg(2),
                     indices: cpu.reg(3),
                 });
+                Ok(self.return32(cpu, 0))
+            }
+            "glFlush" => {
+                self.push_gles_event(GlesEvent::Flush);
                 Ok(self.return32(cpu, 0))
             }
             "glCheckFramebufferStatus" => Ok(self.return32(cpu, GL_FRAMEBUFFER_COMPLETE)),
@@ -3014,6 +3333,14 @@ impl HleRuntime {
             self.gles_events.pop_front();
         }
         self.gles_events.push_back(event);
+    }
+
+    fn stack_arg<M: Memory>(&self, cpu: &Cpu, memory: &mut M, index: u32) -> Result<u32, HleError> {
+        load32(
+            memory,
+            cpu.reg(13)
+                .wrapping_add(index.wrapping_sub(4).wrapping_mul(4)),
+        )
     }
 
     fn gl_gen_names<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -5711,6 +6038,28 @@ fn gl_shader_iv(name: u32) -> u32 {
     }
 }
 
+fn uniform_vector_components(name: &str) -> u8 {
+    if name.contains('4') {
+        4
+    } else if name.contains('3') {
+        3
+    } else if name.contains('2') {
+        2
+    } else {
+        1
+    }
+}
+
+fn uniform_matrix_columns(name: &str) -> u8 {
+    if name.contains("4fv") {
+        4
+    } else if name.contains("3fv") {
+        3
+    } else {
+        2
+    }
+}
+
 fn gl_integer(name: u32) -> u32 {
     match name {
         GL_MAX_TEXTURE_SIZE => 4096,
@@ -6418,6 +6767,164 @@ mod tests {
             ]
         );
         assert!(hle.take_gles_events().is_empty());
+    }
+
+    #[test]
+    fn records_gles_draw_state_events_for_host_replay() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x3000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(13, 0x1800);
+        let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 9);
+        hle.dispatch("glUseProgram", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 0x84c0);
+        hle.dispatch("glActiveTexture", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, 0x0de1);
+        cpu.set_reg(1, 7);
+        hle.dispatch("glBindTexture", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, 0x0de1);
+        cpu.set_reg(1, 0x2801);
+        cpu.set_reg(2, 0x2601);
+        hle.dispatch("glTexParameteri", &mut cpu, &mut memory)
+            .unwrap();
+
+        memory.store32(0x1800, 16).unwrap();
+        memory.store32(0x1804, 0).unwrap();
+        memory.store32(0x1808, 0x1908).unwrap();
+        memory.store32(0x180c, 0x1401).unwrap();
+        memory.store32(0x1810, 0x6000_2000).unwrap();
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, 0x0de1);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0x1908);
+        cpu.set_reg(3, 16);
+        hle.dispatch("glTexImage2D", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(14, 0x2014);
+        cpu.set_reg(0, 0x8892);
+        cpu.set_reg(1, 3);
+        hle.dispatch("glBindBuffer", &mut cpu, &mut memory).unwrap();
+
+        memory.store32(0x1800, 0x88e4).unwrap();
+        cpu.set_reg(14, 0x2018);
+        cpu.set_reg(0, 0x8892);
+        cpu.set_reg(1, 96);
+        cpu.set_reg(2, 0x6000_3000);
+        hle.dispatch("glBufferData", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(14, 0x201c);
+        cpu.set_reg(0, 2);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 0x6000_4000);
+        hle.dispatch("glUniformMatrix4fv", &mut cpu, &mut memory)
+            .unwrap();
+
+        memory.store32(0x1800, 20).unwrap();
+        memory.store32(0x1804, 0x6000_5000).unwrap();
+        cpu.set_reg(14, 0x2020);
+        cpu.set_reg(0, 4);
+        cpu.set_reg(1, 3);
+        cpu.set_reg(2, 0x1406);
+        cpu.set_reg(3, 0);
+        hle.dispatch("glVertexAttribPointer", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2024);
+        cpu.set_reg(0, 4);
+        hle.dispatch("glEnableVertexAttribArray", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2028);
+        cpu.set_reg(0, 0x0302);
+        cpu.set_reg(1, 0x0303);
+        cpu.set_reg(2, 0x0001);
+        cpu.set_reg(3, 0x0303);
+        hle.dispatch("glBlendFuncSeparate", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x202c);
+        cpu.set_reg(0, 4);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 6);
+        hle.dispatch("glDrawArrays", &mut cpu, &mut memory).unwrap();
+
+        assert_eq!(
+            hle.take_gles_events(),
+            vec![
+                GlesEvent::UseProgram { program: 9 },
+                GlesEvent::ActiveTexture { texture: 0x84c0 },
+                GlesEvent::BindTexture {
+                    target: 0x0de1,
+                    texture: 7,
+                },
+                GlesEvent::TexParameteri {
+                    target: 0x0de1,
+                    name: 0x2801,
+                    value: 0x2601,
+                },
+                GlesEvent::TexImage2D {
+                    target: 0x0de1,
+                    level: 0,
+                    internal_format: 0x1908,
+                    width: 16,
+                    height: 16,
+                    border: 0,
+                    format: 0x1908,
+                    ty: 0x1401,
+                    pixels: 0x6000_2000,
+                },
+                GlesEvent::BindBuffer {
+                    target: 0x8892,
+                    buffer: 3,
+                },
+                GlesEvent::BufferData {
+                    target: 0x8892,
+                    size: 96,
+                    data: 0x6000_3000,
+                    usage: 0x88e4,
+                },
+                GlesEvent::UniformMatrix {
+                    columns: 4,
+                    location: 2,
+                    count: 1,
+                    transpose: false,
+                    values: 0x6000_4000,
+                },
+                GlesEvent::VertexAttribPointer {
+                    index: 4,
+                    size: 3,
+                    ty: 0x1406,
+                    normalized: false,
+                    stride: 20,
+                    pointer: 0x6000_5000,
+                },
+                GlesEvent::EnableVertexAttribArray { index: 4 },
+                GlesEvent::BlendFuncSeparate {
+                    src_rgb: 0x0302,
+                    dst_rgb: 0x0303,
+                    src_alpha: 0x0001,
+                    dst_alpha: 0x0303,
+                },
+                GlesEvent::DrawArrays {
+                    mode: 4,
+                    first: 0,
+                    count: 6,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
 | Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits successfully after `native activity reached eglSwapBuffers at step 254925219`. | Satisfied for local ARMv7 research APK |
-| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for clear, viewport, draw, and swap calls; `src/sdl_shell.rs` can replay clear/viewport/swap events into an SDL2 GLES2 context. Draw replay and WebGL replay are not wired yet. | Partial |
+| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for clear, viewport, draw, swap, buffer, texture, uniform, vertex-attrib, and common render-state calls; `src/sdl_shell.rs` can replay clear/viewport/swap events into an SDL2 GLES2 context. Draw replay and WebGL replay are not wired yet. | Partial |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
 | Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked for ARMv6 |
@@ -155,9 +155,12 @@ MCPE draw commands into SDL2 or WebGL pixels.
 
 The GLES HLE now records frame-relevant calls into a bounded `GlesEvent` queue:
 `glClearColor`, `glClearDepthf`, `glClear`, `glViewport`, `glDrawArrays`,
-`glDrawElements`, and `eglSwapBuffers`. The SDL2 host can replay the clear,
-viewport, and swap subset into a GLES2 context through `--sdl2`; draw replay and
-WebGL replay remain pending.
+`glDrawElements`, and `eglSwapBuffers`, plus draw-state calls for active/bound
+textures, texture upload parameters, buffer binding/upload, shader program use,
+uniform values, vertex attribute pointers/enables, blend/depth/color/scissor
+state, and flush. The SDL2 host can replay the clear, viewport, and swap subset
+into a GLES2 context through `--sdl2`; draw replay and WebGL replay remain
+pending.
 
 ## Latest Verification
 
@@ -174,11 +177,11 @@ WebGL replay remain pending.
 - `cargo test dispatches_minecraft_transform_interpolation`
 - `cargo test dispatches_minecraft_ogl_unbind_all_textures`
 - `cargo test dispatches_no_network_social_tick_facades`
-- `cargo test` with 153 unit/integration-facing tests and 113 QEMU oracle tests
+- `cargo test` with 154 unit/integration-facing tests and 113 QEMU oracle tests
 - `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl`
 - `cargo check --features sdl2`
 - `cargo build --release`
-- `AEMU_TRACE_MCPE_RESOURCE_BRIDGE=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits 0 after setting `MinecraftClient + 0x23e` to `0x01` and reaching `eglSwapBuffers` at step `254925219`, both before and after GLES event recording
+- `AEMU_TRACE_MCPE_RESOURCE_BRIDGE=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits 0 after setting `MinecraftClient + 0x23e` to `0x01` and reaching `eglSwapBuffers` at step `254925219`, after broad GLES event recording
 - `run-apk-native ... --sdl2` is feature-gated behind `cargo run --features sdl2 -- ...`; this GUI path was build-checked but not opened during the audit run
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
   reports 579 reserved HLE symbols, 906 resolved imports, and zero unresolved imports

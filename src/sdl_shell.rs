@@ -228,7 +228,7 @@ impl HostBackend for Sdl2Host {
                     (self.gl.viewport)(x, y, width, height);
                 },
                 GlesEvent::SwapBuffers { .. } => self.swap_buffers()?,
-                GlesEvent::DrawArrays { .. } | GlesEvent::DrawElements { .. } => {}
+                _ => {}
             }
         }
         Ok(())
