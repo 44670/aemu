@@ -118,7 +118,9 @@ useful, but it does not replace the browser WebGL backend.
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.
    Current status: initial host abstraction exists, with a feature-gated SDL2
-   GLES2 debug shell and WebGL 1/WebGL 2 context-selection scaffolding.
+   GLES2 debug shell and WebGL 1/WebGL 2 context-selection scaffolding. GLES
+   HLE now records clear, viewport, draw, and swap events into a bounded command
+   queue for future SDL2/WebGL replay.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach

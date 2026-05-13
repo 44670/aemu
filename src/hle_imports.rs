@@ -169,6 +169,7 @@ const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
+const GLES_EVENT_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HleSymbolKind {
@@ -306,6 +307,7 @@ pub struct HleRuntime {
     next_gl_name: u32,
     gl_shaders: Vec<GlShader>,
     gl_programs: Vec<GlProgram>,
+    gles_events: VecDeque<GlesEvent>,
     next_fd: u32,
     files: Vec<FakeFile>,
     virtual_files: Vec<VirtualFile>,
@@ -335,6 +337,43 @@ pub struct HleUnwindTable {
     pub memory_end: u32,
     pub exidx_addr: u32,
     pub exidx_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlesEvent {
+    ClearColor {
+        red: u32,
+        green: u32,
+        blue: u32,
+        alpha: u32,
+    },
+    ClearDepthf {
+        depth: u32,
+    },
+    Clear {
+        mask: u32,
+    },
+    Viewport {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
+    DrawArrays {
+        mode: u32,
+        first: i32,
+        count: i32,
+    },
+    DrawElements {
+        mode: u32,
+        count: i32,
+        ty: u32,
+        indices: u32,
+    },
+    SwapBuffers {
+        display: u32,
+        surface: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -422,6 +461,7 @@ impl HleRuntime {
             next_gl_name: 1,
             gl_shaders: Vec::new(),
             gl_programs: Vec::new(),
+            gles_events: VecDeque::new(),
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
             virtual_files: Vec::new(),
@@ -453,6 +493,10 @@ impl HleRuntime {
 
     pub(crate) fn take_created_pthreads(&mut self) -> Vec<CreatedPthread> {
         self.created_pthreads.drain(..).collect()
+    }
+
+    pub fn take_gles_events(&mut self) -> Vec<GlesEvent> {
+        self.gles_events.drain(..).collect()
     }
 
     pub(crate) fn current_pthread(&self) -> u32 {
@@ -2784,9 +2828,16 @@ impl HleRuntime {
             "eglGetCurrentSurface" => Ok(self.return32(cpu, EGL_SURFACE_HANDLE)),
             "eglGetError" => Ok(self.return32(cpu, EGL_SUCCESS)),
             "eglGetProcAddress" => Ok(self.return32(cpu, 0)),
-            "eglBindAPI" | "eglMakeCurrent" | "eglSwapBuffers" | "eglSwapInterval"
-            | "eglDestroySurface" | "eglDestroyContext" | "eglTerminate" | "eglReleaseThread"
-            | "eglSurfaceAttrib" | "eglWaitGL" | "eglWaitNative" => Ok(self.return32(cpu, 1)),
+            "eglSwapBuffers" => {
+                self.push_gles_event(GlesEvent::SwapBuffers {
+                    display: cpu.reg(0),
+                    surface: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 1))
+            }
+            "eglBindAPI" | "eglMakeCurrent" | "eglSwapInterval" | "eglDestroySurface"
+            | "eglDestroyContext" | "eglTerminate" | "eglReleaseThread" | "eglSurfaceAttrib"
+            | "eglWaitGL" | "eglWaitNative" => Ok(self.return32(cpu, 1)),
             _ => Ok(self.return32(cpu, 1)),
         }
     }
@@ -2838,6 +2889,49 @@ impl HleRuntime {
             }
             "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
                 self.gl_gen_names(cpu, memory)
+            }
+            "glClearColor" => {
+                self.push_gles_event(GlesEvent::ClearColor {
+                    red: cpu.reg(0),
+                    green: cpu.reg(1),
+                    blue: cpu.reg(2),
+                    alpha: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glClearDepthf" => {
+                self.push_gles_event(GlesEvent::ClearDepthf { depth: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glClear" => {
+                self.push_gles_event(GlesEvent::Clear { mask: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glViewport" => {
+                self.push_gles_event(GlesEvent::Viewport {
+                    x: cpu.reg(0) as i32,
+                    y: cpu.reg(1) as i32,
+                    width: cpu.reg(2) as i32,
+                    height: cpu.reg(3) as i32,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDrawArrays" => {
+                self.push_gles_event(GlesEvent::DrawArrays {
+                    mode: cpu.reg(0),
+                    first: cpu.reg(1) as i32,
+                    count: cpu.reg(2) as i32,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDrawElements" => {
+                self.push_gles_event(GlesEvent::DrawElements {
+                    mode: cpu.reg(0),
+                    count: cpu.reg(1) as i32,
+                    ty: cpu.reg(2),
+                    indices: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
             }
             "glCheckFramebufferStatus" => Ok(self.return32(cpu, GL_FRAMEBUFFER_COMPLETE)),
             "glGetString" => {
@@ -2913,6 +3007,13 @@ impl HleRuntime {
         let value = self.next_gl_name;
         self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
         value
+    }
+
+    fn push_gles_event(&mut self, event: GlesEvent) {
+        if self.gles_events.len() == GLES_EVENT_LIMIT {
+            self.gles_events.pop_front();
+        }
+        self.gles_events.push_back(event);
     }
 
     fn gl_gen_names<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -6246,6 +6347,77 @@ mod tests {
         hle.dispatch("glCheckFramebufferStatus", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), GL_FRAMEBUFFER_COMPLETE);
+    }
+
+    #[test]
+    fn records_gles_frame_events_for_host_replay() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 0.25f32.to_bits());
+        cpu.set_reg(1, 0.5f32.to_bits());
+        cpu.set_reg(2, 0.75f32.to_bits());
+        cpu.set_reg(3, 1.0f32.to_bits());
+        hle.dispatch("glClearColor", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 0x0000_4100);
+        hle.dispatch("glClear", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 854);
+        cpu.set_reg(3, 480);
+        hle.dispatch("glViewport", &mut cpu, &mut memory).unwrap();
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, 4);
+        cpu.set_reg(1, 6);
+        cpu.set_reg(2, 0x1403);
+        cpu.set_reg(3, 0x6000_1000);
+        hle.dispatch("glDrawElements", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_SURFACE_HANDLE);
+        hle.dispatch("eglSwapBuffers", &mut cpu, &mut memory)
+            .unwrap();
+
+        assert_eq!(
+            hle.take_gles_events(),
+            vec![
+                GlesEvent::ClearColor {
+                    red: 0.25f32.to_bits(),
+                    green: 0.5f32.to_bits(),
+                    blue: 0.75f32.to_bits(),
+                    alpha: 1.0f32.to_bits(),
+                },
+                GlesEvent::Clear { mask: 0x0000_4100 },
+                GlesEvent::Viewport {
+                    x: 0,
+                    y: 0,
+                    width: 854,
+                    height: 480,
+                },
+                GlesEvent::DrawElements {
+                    mode: 4,
+                    count: 6,
+                    ty: 0x1403,
+                    indices: 0x6000_1000,
+                },
+                GlesEvent::SwapBuffers {
+                    display: EGL_DISPLAY_HANDLE,
+                    surface: EGL_SURFACE_HANDLE,
+                },
+            ]
+        );
+        assert!(hle.take_gles_events().is_empty());
     }
 
     #[test]
