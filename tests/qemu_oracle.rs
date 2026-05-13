@@ -6008,6 +6008,107 @@ fn qemu_oracle_neon_mcpe_scalar_long_matches_interpreter() {
 }
 
 #[test]
+fn qemu_oracle_neon_mcpe_f32_scalar_lane_matches_interpreter() {
+    let asm = neon_oracle_program(
+        "ldr r5, =values_q8\n\
+         vld1.32 {d16, d17}, [r5]\n\
+         ldr r5, =values_q6\n\
+         vld1.32 {d12, d13}, [r5]\n\
+         ldr r5, =values_d14\n\
+         vld1.32 {d14}, [r5]\n\
+         .inst 0xf3ec014e\n\
+         ldr r5, =values_q9\n\
+         vld1.32 {d18, d19}, [r5]\n\
+         ldr r5, =values_q13\n\
+         vld1.32 {d26, d27}, [r5]\n\
+         ldr r5, =values_d2\n\
+         vld1.32 {d2}, [r5]\n\
+         .inst 0xf3ea25e2\n\
+         ldr r5, =values_d1\n\
+         vld1.32 {d1}, [r5]\n\
+         .inst 0xf3e269c1\n\
+         ldr r5, =out_scalar_f32\n\
+         vst1.64 {d16, d17}, [r5]!\n\
+         vst1.64 {d18, d19}, [r5]!\n\
+         vst1.64 {d22, d23}, [r5]\n\
+         ldr r5, =out_scalar_f32\n\
+         mov r0, #0\n\
+         ldr r1, [r5]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #4]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #8]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #12]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #16]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #20]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #24]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #28]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #32]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #36]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #40]\n\
+         eor r0, r0, r1\n\
+         ldr r1, [r5, #44]\n\
+         eor r0, r0, r1\n\
+         .pushsection .data\n\
+         .align 3\n\
+         values_q8: .word 0x3f800000, 0x40000000, 0x40400000, 0x40800000\n\
+         values_q6: .word 0x41200000, 0x41a00000, 0x41f00000, 0x42200000\n\
+         values_d14: .word 0x3f000000, 0x42c60000\n\
+         values_q9: .word 0x42c80000, 0x43480000, 0x43960000, 0x43c80000\n\
+         values_q13: .word 0x40800000, 0x40c00000, 0x41000000, 0x41200000\n\
+         values_d2: .word 0x42c60000, 0x40200000\n\
+         values_d1: .word 0xc0000000, 0x42c60000\n\
+         out_scalar_f32: .space 48\n\
+         .popsection\n",
+    );
+    let Some(qemu_exit) = run_armv7_neon_linux_exit(&asm) else {
+        return;
+    };
+
+    let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_dreg(16, pack2(1.0, 2.0));
+    cpu.set_dreg(17, pack2(3.0, 4.0));
+    cpu.set_dreg(12, pack2(10.0, 20.0));
+    cpu.set_dreg(13, pack2(30.0, 40.0));
+    cpu.set_dreg(14, pack2(0.5, 99.0));
+    cpu.execute_arm(0xf3ec_014e, 0, &mut mem).unwrap(); // vmla.f32 q8, q6, d14[0]
+
+    cpu.set_dreg(18, pack2(100.0, 200.0));
+    cpu.set_dreg(19, pack2(300.0, 400.0));
+    cpu.set_dreg(26, pack2(4.0, 6.0));
+    cpu.set_dreg(27, pack2(8.0, 10.0));
+    cpu.set_dreg(2, pack2(99.0, 2.5));
+    cpu.execute_arm(0xf3ea_25e2, 0, &mut mem).unwrap(); // vmls.f32 q9, q13, d2[1]
+
+    cpu.set_dreg(1, pack2(-2.0, 99.0));
+    cpu.execute_arm(0xf3e2_69c1, 0, &mut mem).unwrap(); // vmul.f32 q11, q9, d1[0]
+
+    let folded = [
+        cpu.dreg(16),
+        cpu.dreg(17),
+        cpu.dreg(18),
+        cpu.dreg(19),
+        cpu.dreg(22),
+        cpu.dreg(23),
+    ]
+    .into_iter()
+    .fold(0u32, |acc, value| {
+        acc ^ (value as u32) ^ ((value >> 32) as u32)
+    });
+    assert_eq!(qemu_exit as u32, folded & 0xff);
+}
+
+#[test]
 fn qemu_oracle_vfp_double_lane_moves_match_interpreter() {
     let asm = oracle_program(
         ".fpu vfp\n\

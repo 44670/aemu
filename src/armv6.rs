@@ -9832,6 +9832,35 @@ mod tests {
         cpu.set_dreg(19, 0x0190_012c_00c8_0064);
         cpu.execute_arm(0xf2d2_306c, 0, &mut mem).unwrap(); // vmla.i16 d19, d2, d4[3]
         assert_eq!(cpu.dreg(19), 0x01b8_014a_00dc_006e);
+
+        let pack2 = |a: f32, b: f32| u64::from(a.to_bits()) | (u64::from(b.to_bits()) << 32);
+        let assert_f32_pair = |value: u64, expected: (f32, f32)| {
+            assert_eq!(f32::from_bits(value as u32), expected.0);
+            assert_eq!(f32::from_bits((value >> 32) as u32), expected.1);
+        };
+
+        cpu.set_dreg(16, pack2(1.0, 2.0));
+        cpu.set_dreg(17, pack2(3.0, 4.0));
+        cpu.set_dreg(12, pack2(10.0, 20.0));
+        cpu.set_dreg(13, pack2(30.0, 40.0));
+        cpu.set_dreg(14, pack2(0.5, 99.0));
+        cpu.execute_thumb32(0xffec, 0x014e, 0, &mut mem).unwrap(); // vmla.f32 q8, q6, d14[0]
+        assert_f32_pair(cpu.dreg(16), (6.0, 12.0));
+        assert_f32_pair(cpu.dreg(17), (18.0, 24.0));
+
+        cpu.set_dreg(18, pack2(100.0, 200.0));
+        cpu.set_dreg(19, pack2(300.0, 400.0));
+        cpu.set_dreg(26, pack2(4.0, 6.0));
+        cpu.set_dreg(27, pack2(8.0, 10.0));
+        cpu.set_dreg(2, pack2(99.0, 2.5));
+        cpu.execute_thumb32(0xffea, 0x25e2, 0, &mut mem).unwrap(); // vmls.f32 q9, q13, d2[1]
+        assert_f32_pair(cpu.dreg(18), (90.0, 185.0));
+        assert_f32_pair(cpu.dreg(19), (280.0, 375.0));
+
+        cpu.set_dreg(1, pack2(-2.0, 99.0));
+        cpu.execute_thumb32(0xffe2, 0x69c1, 0, &mut mem).unwrap(); // vmul.f32 q11, q9, d1[0]
+        assert_f32_pair(cpu.dreg(22), (-180.0, -370.0));
+        assert_f32_pair(cpu.dreg(23), (-560.0, -750.0));
     }
 
     #[test]

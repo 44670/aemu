@@ -125,7 +125,9 @@ CPU work.
   3-different-length add/sub/absolute-difference/multiply-long families,
   saturating doubling multiply-long forms, pairwise integer min/max,
   64-bit-lane `VQADD`/`VQSUB`, `VQDMULH`/`VQRDMULH`, ARM-style
-  `VRECPE`/`VRSQRTE` reciprocal estimates, and vector `VABS`/`VNEG`
+  `VRECPE`/`VRSQRTE` reciprocal estimates, vector `VABS`/`VNEG`, and
+  MCPE-hot F32 scalar-lane `VMLA`/`VMLS`/`VMUL` Thumb-2 encodings with QEMU
+  oracle coverage
 - Runtime HLE now reports ARMv7 NEON/VFPv3/VFP-D32 capability through
   `getauxval(AT_HWCAP)` while keeping `AT_HWCAP2` zero to avoid selecting
   ARMv8 crypto instructions before those are implemented.
