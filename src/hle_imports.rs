@@ -1428,6 +1428,7 @@ impl HleRuntime {
             }
             "_ZN18MinecraftTelemetry4tickEv"
             | "_ZN18MinecraftTelemetry15forceSendEventsEv"
+            | "_ZN19RakNetServerLocator11findServersEi"
             | "_ZN6Social11Multiplayer18needToHandleInviteEv"
             | "_ZN6Social11Multiplayer4tickEb"
             | "_ZN6Social11Multiplayer22tickMultiplayerManagerEv"
@@ -5884,6 +5885,7 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd"
             | "_ZN18MinecraftTelemetry4tickEv"
             | "_ZN18MinecraftTelemetry15forceSendEventsEv"
+            | "_ZN19RakNetServerLocator11findServersEi"
             | "_ZN6Social11Multiplayer18needToHandleInviteEv"
             | "_ZN6Social11Multiplayer4tickEb"
             | "_ZN6Social11Multiplayer22tickMultiplayerManagerEv"
@@ -9003,6 +9005,7 @@ mod tests {
             "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd",
             "_ZN18MinecraftTelemetry4tickEv",
             "_ZN18MinecraftTelemetry15forceSendEventsEv",
+            "_ZN19RakNetServerLocator11findServersEi",
             "_ZN6Social11Multiplayer18needToHandleInviteEv",
             "_ZN6Social11Multiplayer4tickEb",
             "_ZN6Social11Multiplayer22tickMultiplayerManagerEv",
