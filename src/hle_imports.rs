@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use flate2::read::ZlibDecoder;
 
 use crate::armv6::{Cpu, Memory};
 use crate::zip_probe::{extract_zip_entry, read_zip_entry};
@@ -106,8 +109,8 @@ const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
 const ACONFIGURATION_SIZE: u32 = 8;
 const AASSET_HANDLE_SIZE: u32 = 0x10;
 const FAKE_GEOMETRY_SIZE: u32 = 0x20;
-const FAKE_TEXTURE_PAIR_SIZE: u32 = 0x44;
-const FAKE_TEXTURE_SIDE: u32 = 256;
+const FAKE_TEXTURE_PAIR_SIZE: u32 = 0x4c;
+const FAKE_TEXTURE_SIDE: u32 = 16;
 const FAKE_TEXTURE_BYTES: u32 = FAKE_TEXTURE_SIDE * FAKE_TEXTURE_SIDE * 4;
 const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
 const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
@@ -190,6 +193,7 @@ const CXX_STRING_REP_HEADER_SIZE: u32 = 12;
 const CXX_STRING_NPOS: u32 = u32::MAX;
 const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MCPE_RESOURCE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
 const GLES_EVENT_LIMIT: usize = 65_536;
@@ -349,8 +353,8 @@ pub struct HleRuntime {
     unwind_tables: Vec<HleUnwindTable>,
     random_state: u32,
     clock_ns: u64,
-    fake_geometry: Option<u32>,
-    fake_texture_pair: Option<u32>,
+    fake_geometries: Vec<NamedGuestObject>,
+    fake_texture_pairs: Vec<NamedGuestObject>,
     cxx_string_recycling: bool,
     input_pointer: HlePointer,
     input_pointer_ids: Option<u32>,
@@ -370,6 +374,26 @@ struct HlePointer {
     dx: f32,
     dy: f32,
     pressure: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamedGuestObject {
+    key: String,
+    address: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResourceLocationDebug {
+    path: String,
+    package: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecodedTexture {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    source: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -467,6 +491,33 @@ pub enum GlesEvent {
         target: u32,
         texture: u32,
     },
+    BindFramebuffer {
+        target: u32,
+        framebuffer: u32,
+    },
+    BindRenderbuffer {
+        target: u32,
+        renderbuffer: u32,
+    },
+    FramebufferTexture2D {
+        target: u32,
+        attachment: u32,
+        textarget: u32,
+        texture: u32,
+        level: i32,
+    },
+    FramebufferRenderbuffer {
+        target: u32,
+        attachment: u32,
+        renderbuffertarget: u32,
+        renderbuffer: u32,
+    },
+    RenderbufferStorage {
+        target: u32,
+        internal_format: u32,
+        width: i32,
+        height: i32,
+    },
     TexParameteri {
         target: u32,
         name: u32,
@@ -546,6 +597,28 @@ pub enum GlesEvent {
         src_alpha: u32,
         dst_alpha: u32,
     },
+    StencilFuncSeparate {
+        face: u32,
+        func: u32,
+        reference: i32,
+        mask: u32,
+    },
+    StencilOpSeparate {
+        face: u32,
+        sfail: u32,
+        dpfail: u32,
+        dppass: u32,
+    },
+    StencilMask {
+        mask: u32,
+    },
+    CullFace {
+        mode: u32,
+    },
+    PolygonOffset {
+        factor: u32,
+        units: u32,
+    },
     DepthFunc {
         func: u32,
     },
@@ -576,6 +649,9 @@ pub enum GlesEvent {
     },
     ClearDepthf {
         depth: u32,
+    },
+    ClearStencil {
+        value: i32,
     },
     Clear {
         mask: u32,
@@ -620,6 +696,11 @@ impl GlesEvent {
             Self::BufferData { .. } => "BufferData",
             Self::BufferSubData { .. } => "BufferSubData",
             Self::BindTexture { .. } => "BindTexture",
+            Self::BindFramebuffer { .. } => "BindFramebuffer",
+            Self::BindRenderbuffer { .. } => "BindRenderbuffer",
+            Self::FramebufferTexture2D { .. } => "FramebufferTexture2D",
+            Self::FramebufferRenderbuffer { .. } => "FramebufferRenderbuffer",
+            Self::RenderbufferStorage { .. } => "RenderbufferStorage",
             Self::TexParameteri { .. } => "TexParameteri",
             Self::TexImage2D { .. } => "TexImage2D",
             Self::TexSubImage2D { .. } => "TexSubImage2D",
@@ -633,6 +714,11 @@ impl GlesEvent {
             Self::Disable { .. } => "Disable",
             Self::BlendFunc { .. } => "BlendFunc",
             Self::BlendFuncSeparate { .. } => "BlendFuncSeparate",
+            Self::StencilFuncSeparate { .. } => "StencilFuncSeparate",
+            Self::StencilOpSeparate { .. } => "StencilOpSeparate",
+            Self::StencilMask { .. } => "StencilMask",
+            Self::CullFace { .. } => "CullFace",
+            Self::PolygonOffset { .. } => "PolygonOffset",
             Self::DepthFunc { .. } => "DepthFunc",
             Self::DepthMask { .. } => "DepthMask",
             Self::DepthRangef { .. } => "DepthRangef",
@@ -640,6 +726,7 @@ impl GlesEvent {
             Self::Scissor { .. } => "Scissor",
             Self::ClearColor { .. } => "ClearColor",
             Self::ClearDepthf { .. } => "ClearDepthf",
+            Self::ClearStencil { .. } => "ClearStencil",
             Self::Clear { .. } => "Clear",
             Self::Viewport { .. } => "Viewport",
             Self::DrawArrays { .. } => "DrawArrays",
@@ -795,8 +882,8 @@ impl HleRuntime {
             unwind_tables: Vec::new(),
             random_state: 0x1234_5678,
             clock_ns: 0,
-            fake_geometry: None,
-            fake_texture_pair: None,
+            fake_geometries: Vec::new(),
+            fake_texture_pairs: Vec::new(),
             cxx_string_recycling: false,
             input_pointer: HlePointer::default(),
             input_pointer_ids: None,
@@ -2928,25 +3015,59 @@ impl HleRuntime {
         cpu: &mut Cpu,
         memory: &mut M,
     ) -> Result<(), HleError> {
-        let pair = match self.fake_texture_pair {
-            Some(pair) => pair,
+        let location = load_resource_location_debug(memory, cpu.reg(1));
+        let key = location
+            .as_ref()
+            .map(resource_location_key)
+            .unwrap_or_else(|_| format!("resource@{:#010x}", cpu.reg(1)));
+        if let Some(pair) = self
+            .fake_texture_pairs
+            .iter()
+            .find(|pair| pair.key == key)
+            .map(|pair| pair.address)
+        {
+            trace_mcpe_resource(format_args!(
+                "TextureGroup::getTexturePair {key:?} -> cached {pair:#010x}"
+            ));
+            return Ok(self.return32(cpu, pair));
+        }
+
+        let decoded = location
+            .as_ref()
+            .ok()
+            .and_then(|location| self.load_png_texture_for_resource(location));
+        let (width, height, pixels, source) = match decoded {
+            Some(texture) => (texture.width, texture.height, texture.rgba, texture.source),
             None => {
-                let pair = self.alloc(FAKE_TEXTURE_PAIR_SIZE, 4)?;
-                for offset in 0..FAKE_TEXTURE_PAIR_SIZE {
-                    store8(memory, pair.wrapping_add(offset), 0)?;
-                }
-                store32(memory, pair.wrapping_add(0x38), FAKE_TEXTURE_SIDE)?;
-                store32(memory, pair.wrapping_add(0x3c), FAKE_TEXTURE_SIDE)?;
-                self.store_cxx_string_bytes(
-                    memory,
-                    pair.wrapping_add(0x40),
-                    &[],
-                    FAKE_TEXTURE_BYTES,
-                )?;
-                self.fake_texture_pair = Some(pair);
-                pair
+                let pixels = fallback_texture_rgba(&key);
+                (
+                    FAKE_TEXTURE_SIDE,
+                    FAKE_TEXTURE_SIDE,
+                    pixels,
+                    "fallback".to_string(),
+                )
             }
         };
+        let pair = self.alloc(FAKE_TEXTURE_PAIR_SIZE, 4)?;
+        for offset in 0..FAKE_TEXTURE_PAIR_SIZE {
+            store8(memory, pair.wrapping_add(offset), 0)?;
+        }
+        store32(memory, pair.wrapping_add(0x38), width)?;
+        store32(memory, pair.wrapping_add(0x3c), height)?;
+        self.store_cxx_string_bytes(
+            memory,
+            pair.wrapping_add(0x40),
+            &pixels,
+            pixels.len() as u32,
+        )?;
+        self.fake_texture_pairs.push(NamedGuestObject {
+            key: key.clone(),
+            address: pair,
+        });
+        trace_mcpe_resource(format_args!(
+            "TextureGroup::getTexturePair {key:?} -> {pair:#010x} {width}x{height} bytes={} source={source:?}",
+            pixels.len()
+        ));
         Ok(self.return32(cpu, pair))
     }
 
@@ -2956,17 +3077,29 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         let out = cpu.reg(0);
-        let geometry = match self.fake_geometry {
-            Some(geometry) => geometry,
-            None => {
-                let geometry = self.alloc(FAKE_GEOMETRY_SIZE, 4)?;
-                for offset in 0..FAKE_GEOMETRY_SIZE {
-                    store8(memory, geometry.wrapping_add(offset), 0)?;
-                }
-                self.fake_geometry = Some(geometry);
-                geometry
+        let key = load_cxx_string_lossy(memory, cpu.reg(2))
+            .unwrap_or_else(|_| format!("geometry@{:#010x}", cpu.reg(2)));
+        let geometry = if let Some(geometry) = self
+            .fake_geometries
+            .iter()
+            .find(|geometry| geometry.key == key)
+            .map(|geometry| geometry.address)
+        {
+            geometry
+        } else {
+            let geometry = self.alloc(FAKE_GEOMETRY_SIZE, 4)?;
+            for offset in 0..FAKE_GEOMETRY_SIZE {
+                store8(memory, geometry.wrapping_add(offset), 0)?;
             }
+            self.fake_geometries.push(NamedGuestObject {
+                key: key.clone(),
+                address: geometry,
+            });
+            geometry
         };
+        trace_mcpe_resource(format_args!(
+            "GeometryGroup::getGeometry {key:?} -> {geometry:#010x}"
+        ));
 
         store32(memory, out, 0)?;
         store32(memory, out.wrapping_add(4), geometry)?;
@@ -3480,6 +3613,41 @@ impl HleRuntime {
         read_zip_entry(apk_path, entry_name).map_err(|err| err.to_string())
     }
 
+    fn load_png_texture_for_resource(
+        &self,
+        location: &ResourceLocationDebug,
+    ) -> Option<DecodedTexture> {
+        for entry_name in texture_asset_entry_candidates(location) {
+            let bytes = match self.read_apk_asset_entry(&entry_name) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    trace_mcpe_resource(format_args!(
+                        "texture asset miss location={:?} entry={entry_name:?}: {err}",
+                        resource_location_key(location)
+                    ));
+                    continue;
+                }
+            };
+            match decode_png_rgba(&bytes) {
+                Ok((width, height, rgba)) => {
+                    return Some(DecodedTexture {
+                        width,
+                        height,
+                        rgba,
+                        source: entry_name,
+                    });
+                }
+                Err(err) => {
+                    trace_mcpe_resource(format_args!(
+                        "texture asset decode failed location={:?} entry={entry_name:?}: {err}",
+                        resource_location_key(location)
+                    ));
+                }
+            }
+        }
+        None
+    }
+
     fn egl<M: Memory>(
         &mut self,
         name: &str,
@@ -3691,6 +3859,49 @@ impl HleRuntime {
                 });
                 Ok(self.return32(cpu, 0))
             }
+            "glBindFramebuffer" => {
+                self.push_gles_event(GlesEvent::BindFramebuffer {
+                    target: cpu.reg(0),
+                    framebuffer: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glBindRenderbuffer" => {
+                self.push_gles_event(GlesEvent::BindRenderbuffer {
+                    target: cpu.reg(0),
+                    renderbuffer: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glFramebufferTexture2D" => {
+                let level = self.stack_arg(cpu, memory, 4)? as i32;
+                self.push_gles_event(GlesEvent::FramebufferTexture2D {
+                    target: cpu.reg(0),
+                    attachment: cpu.reg(1),
+                    textarget: cpu.reg(2),
+                    texture: cpu.reg(3),
+                    level,
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glFramebufferRenderbuffer" => {
+                self.push_gles_event(GlesEvent::FramebufferRenderbuffer {
+                    target: cpu.reg(0),
+                    attachment: cpu.reg(1),
+                    renderbuffertarget: cpu.reg(2),
+                    renderbuffer: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glRenderbufferStorage" => {
+                self.push_gles_event(GlesEvent::RenderbufferStorage {
+                    target: cpu.reg(0),
+                    internal_format: cpu.reg(1),
+                    width: cpu.reg(2) as i32,
+                    height: cpu.reg(3) as i32,
+                });
+                Ok(self.return32(cpu, 0))
+            }
             "glTexParameteri" => {
                 self.push_gles_event(GlesEvent::TexParameteri {
                     target: cpu.reg(0),
@@ -3836,6 +4047,39 @@ impl HleRuntime {
                 });
                 Ok(self.return32(cpu, 0))
             }
+            "glStencilFuncSeparate" => {
+                self.push_gles_event(GlesEvent::StencilFuncSeparate {
+                    face: cpu.reg(0),
+                    func: cpu.reg(1),
+                    reference: cpu.reg(2) as i32,
+                    mask: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glStencilOpSeparate" => {
+                self.push_gles_event(GlesEvent::StencilOpSeparate {
+                    face: cpu.reg(0),
+                    sfail: cpu.reg(1),
+                    dpfail: cpu.reg(2),
+                    dppass: cpu.reg(3),
+                });
+                Ok(self.return32(cpu, 0))
+            }
+            "glStencilMask" => {
+                self.push_gles_event(GlesEvent::StencilMask { mask: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glCullFace" => {
+                self.push_gles_event(GlesEvent::CullFace { mode: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glPolygonOffset" => {
+                self.push_gles_event(GlesEvent::PolygonOffset {
+                    factor: cpu.reg(0),
+                    units: cpu.reg(1),
+                });
+                Ok(self.return32(cpu, 0))
+            }
             "glDepthFunc" => {
                 self.push_gles_event(GlesEvent::DepthFunc { func: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
@@ -3882,6 +4126,12 @@ impl HleRuntime {
             }
             "glClearDepthf" => {
                 self.push_gles_event(GlesEvent::ClearDepthf { depth: cpu.reg(0) });
+                Ok(self.return32(cpu, 0))
+            }
+            "glClearStencil" => {
+                self.push_gles_event(GlesEvent::ClearStencil {
+                    value: cpu.reg(0) as i32,
+                });
                 Ok(self.return32(cpu, 0))
             }
             "glClear" => {
@@ -4867,6 +5117,13 @@ fn is_null_stub(name: &str) -> bool {
 }
 
 fn is_target_symbol(name: &str) -> bool {
+    if matches!(
+        name,
+        "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
+            | "_ZN9UIControl18_resolvePostCreateEv"
+    ) {
+        return std::env::var_os("AEMU_MCPE_NATIVE_UI_CONTROL").is_none();
+    }
     matches!(
         name,
         "_ZN8WebTokenC1ERKS_"
@@ -4875,8 +5132,6 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
             | "_ZN13GeometryGroup11getGeometryERKSs"
             | "_ZN13GeometryGroup14tryGetGeometryERKSs"
-            | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
-            | "_ZN9UIControl18_resolvePostCreateEv"
             | "_ZN14GamePadManager16getGamePadsInUseEv"
             | "_ZN14GamePadManager20getConnectedGamePadsEv"
             | "_ZN13GamePadMapper4tickER15InputEventQueue"
@@ -5560,6 +5815,324 @@ fn load_cxx_string_bytes<M: Memory>(memory: &mut M, string: u32) -> Result<Vec<u
     let data = load32(memory, string)?;
     let len = cxx_string_len_from_data(memory, data)?;
     load_bytes(memory, data, len)
+}
+
+fn load_cxx_string_lossy<M: Memory>(memory: &mut M, string: u32) -> Result<String, HleError> {
+    let bytes = load_cxx_string_bytes(memory, string)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn load_resource_location_debug<M: Memory>(
+    memory: &mut M,
+    resource: u32,
+) -> Result<ResourceLocationDebug, HleError> {
+    if resource == 0 {
+        return Ok(ResourceLocationDebug {
+            path: String::new(),
+            package: String::new(),
+        });
+    }
+    Ok(ResourceLocationDebug {
+        path: load_cxx_string_lossy(memory, resource)?,
+        package: load_cxx_string_lossy(memory, resource.wrapping_add(4))?,
+    })
+}
+
+fn resource_location_key(location: &ResourceLocationDebug) -> String {
+    if location.package.is_empty() {
+        location.path.clone()
+    } else {
+        format!("{}:{}", location.package, location.path)
+    }
+}
+
+fn texture_asset_entry_candidates(location: &ResourceLocationDebug) -> Vec<String> {
+    let mut stems = Vec::new();
+    let path = normalize_resource_path(&location.path);
+    if path.is_empty() {
+        return Vec::new();
+    }
+    push_unique_string(&mut stems, path.clone());
+    if let Some(stripped) = path.strip_prefix("textures/") {
+        push_unique_string(&mut stems, stripped.to_string());
+    }
+    if let Some(stripped) = path.strip_prefix("images/") {
+        push_unique_string(&mut stems, stripped.to_string());
+    }
+
+    let mut candidates = Vec::new();
+    for stem in stems {
+        let has_extension = stem
+            .rsplit_once('/')
+            .map_or(stem.as_str(), |(_, name)| name)
+            .contains('.');
+        if has_extension {
+            push_unique_string(&mut candidates, format!("assets/images/{stem}"));
+            push_unique_string(&mut candidates, format!("assets/{stem}"));
+        } else {
+            push_unique_string(&mut candidates, format!("assets/images/{stem}.png"));
+            push_unique_string(&mut candidates, format!("assets/images/{stem}"));
+            push_unique_string(&mut candidates, format!("assets/{stem}.png"));
+            push_unique_string(&mut candidates, format!("assets/{stem}"));
+        }
+    }
+    candidates
+}
+
+fn normalize_resource_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches('/')
+        .trim_start_matches("assets/")
+        .trim_start_matches("images/")
+        .to_string()
+}
+
+fn fallback_texture_rgba(key: &str) -> Vec<u8> {
+    let mut hash = 0x811c_9dc5u32;
+    for byte in key.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let base = [
+        0x40 | ((hash >> 16) as u8 & 0x7f),
+        0x40 | ((hash >> 8) as u8 & 0x7f),
+        0x40 | (hash as u8 & 0x7f),
+        0xff,
+    ];
+    let hi = [
+        base[0].saturating_add(0x40),
+        base[1].saturating_add(0x40),
+        base[2].saturating_add(0x40),
+        0xff,
+    ];
+    let mut pixels = Vec::with_capacity(FAKE_TEXTURE_BYTES as usize);
+    for y in 0..FAKE_TEXTURE_SIDE {
+        for x in 0..FAKE_TEXTURE_SIDE {
+            let color = if ((x / 4) + (y / 4)) & 1 == 0 {
+                base
+            } else {
+                hi
+            };
+            pixels.extend_from_slice(&color);
+        }
+    }
+    pixels
+}
+
+fn decode_png_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < PNG_SIGNATURE.len() || &bytes[..8] != PNG_SIGNATURE {
+        return Err("bad PNG signature".to_string());
+    }
+
+    let mut offset = 8usize;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut bit_depth = 0u8;
+    let mut color_type = 0u8;
+    let mut interlace = 0u8;
+    let mut palette = Vec::new();
+    let mut transparency = Vec::new();
+    let mut idat = Vec::new();
+
+    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+        let len = u32::from_be_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .map_err(|_| "truncated PNG chunk length".to_string())?,
+        ) as usize;
+        let chunk_type = &bytes[offset + 4..offset + 8];
+        let data_start = offset + 8;
+        let data_end = data_start
+            .checked_add(len)
+            .ok_or_else(|| "PNG chunk length overflow".to_string())?;
+        let next = data_end
+            .checked_add(4)
+            .ok_or_else(|| "PNG chunk CRC overflow".to_string())?;
+        if next > bytes.len() {
+            return Err("truncated PNG chunk".to_string());
+        }
+        let data = &bytes[data_start..data_end];
+        match chunk_type {
+            b"IHDR" => {
+                if data.len() != 13 {
+                    return Err("invalid IHDR length".to_string());
+                }
+                width = u32::from_be_bytes(data[0..4].try_into().unwrap());
+                height = u32::from_be_bytes(data[4..8].try_into().unwrap());
+                bit_depth = data[8];
+                color_type = data[9];
+                if data[10] != 0 || data[11] != 0 {
+                    return Err("unsupported PNG compression/filter method".to_string());
+                }
+                interlace = data[12];
+            }
+            b"PLTE" => {
+                if data.len() % 3 != 0 {
+                    return Err("invalid PLTE length".to_string());
+                }
+                palette.clear();
+                for rgb in data.chunks_exact(3) {
+                    palette.push([rgb[0], rgb[1], rgb[2]]);
+                }
+            }
+            b"tRNS" => transparency.extend_from_slice(data),
+            b"IDAT" => idat.extend_from_slice(data),
+            b"IEND" => break,
+            _ => {}
+        }
+        offset = next;
+    }
+
+    if width == 0 || height == 0 {
+        return Err("missing or empty IHDR".to_string());
+    }
+    if bit_depth != 8 {
+        return Err(format!("unsupported PNG bit depth {bit_depth}"));
+    }
+    if interlace != 0 {
+        return Err("interlaced PNG is not supported".to_string());
+    }
+    let channels = png_channels(color_type)?;
+    let bytes_per_pixel = channels;
+    let row_bytes = (width as usize)
+        .checked_mul(channels)
+        .ok_or_else(|| "PNG row size overflow".to_string())?;
+    let expected = (row_bytes + 1)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "PNG image size overflow".to_string())?;
+
+    let mut zlib = ZlibDecoder::new(idat.as_slice());
+    let mut filtered = Vec::new();
+    zlib.read_to_end(&mut filtered)
+        .map_err(|err| format!("PNG zlib decode failed: {err}"))?;
+    if filtered.len() < expected {
+        return Err(format!(
+            "truncated PNG image data: got {} expected {expected}",
+            filtered.len()
+        ));
+    }
+
+    let mut rgba = Vec::with_capacity(
+        (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| "PNG RGBA size overflow".to_string())?,
+    );
+    let mut prev = vec![0u8; row_bytes];
+    let mut row = vec![0u8; row_bytes];
+    let mut input = 0usize;
+    for _ in 0..height {
+        let filter = filtered[input];
+        input += 1;
+        row.copy_from_slice(&filtered[input..input + row_bytes]);
+        input += row_bytes;
+        unfilter_png_row(filter, &mut row, &prev, bytes_per_pixel)?;
+        append_png_rgba_row(color_type, &row, &palette, &transparency, &mut rgba)?;
+        prev.copy_from_slice(&row);
+    }
+
+    Ok((width, height, rgba))
+}
+
+fn png_channels(color_type: u8) -> Result<usize, String> {
+    match color_type {
+        0 | 3 => Ok(1),
+        2 => Ok(3),
+        4 => Ok(2),
+        6 => Ok(4),
+        _ => Err(format!("unsupported PNG color type {color_type}")),
+    }
+}
+
+fn unfilter_png_row(
+    filter: u8,
+    row: &mut [u8],
+    prev: &[u8],
+    bytes_per_pixel: usize,
+) -> Result<(), String> {
+    for idx in 0..row.len() {
+        let left = if idx >= bytes_per_pixel {
+            row[idx - bytes_per_pixel]
+        } else {
+            0
+        };
+        let up = prev[idx];
+        let up_left = if idx >= bytes_per_pixel {
+            prev[idx - bytes_per_pixel]
+        } else {
+            0
+        };
+        row[idx] = match filter {
+            0 => row[idx],
+            1 => row[idx].wrapping_add(left),
+            2 => row[idx].wrapping_add(up),
+            3 => row[idx].wrapping_add(((u16::from(left) + u16::from(up)) / 2) as u8),
+            4 => row[idx].wrapping_add(paeth_predictor(left, up, up_left)),
+            _ => return Err(format!("unsupported PNG filter {filter}")),
+        };
+    }
+    Ok(())
+}
+
+fn paeth_predictor(left: u8, up: u8, up_left: u8) -> u8 {
+    let left = i32::from(left);
+    let up = i32::from(up);
+    let up_left = i32::from(up_left);
+    let estimate = left + up - up_left;
+    let left_delta = (estimate - left).abs();
+    let up_delta = (estimate - up).abs();
+    let up_left_delta = (estimate - up_left).abs();
+    if left_delta <= up_delta && left_delta <= up_left_delta {
+        left as u8
+    } else if up_delta <= up_left_delta {
+        up as u8
+    } else {
+        up_left as u8
+    }
+}
+
+fn append_png_rgba_row(
+    color_type: u8,
+    row: &[u8],
+    palette: &[[u8; 3]],
+    transparency: &[u8],
+    rgba: &mut Vec<u8>,
+) -> Result<(), String> {
+    match color_type {
+        0 => {
+            for &gray in row {
+                rgba.extend_from_slice(&[gray, gray, gray, 0xff]);
+            }
+        }
+        2 => {
+            for rgb in row.chunks_exact(3) {
+                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 0xff]);
+            }
+        }
+        3 => {
+            for &index in row {
+                let Some(rgb) = palette.get(index as usize) else {
+                    return Err(format!("palette index {index} out of range"));
+                };
+                let alpha = transparency.get(index as usize).copied().unwrap_or(0xff);
+                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+            }
+        }
+        4 => {
+            for gray_alpha in row.chunks_exact(2) {
+                rgba.extend_from_slice(&[
+                    gray_alpha[0],
+                    gray_alpha[0],
+                    gray_alpha[0],
+                    gray_alpha[1],
+                ]);
+            }
+        }
+        6 => rgba.extend_from_slice(row),
+        _ => return Err(format!("unsupported PNG color type {color_type}")),
+    }
+    Ok(())
 }
 
 fn cxx_string_len_from_data<M: Memory>(memory: &mut M, data: u32) -> Result<u32, HleError> {
@@ -6348,6 +6921,28 @@ fn push_unique_string(values: &mut Vec<String>, value: String) {
 fn trace_android_asset(args: fmt::Arguments<'_>) {
     if std::env::var_os("AEMU_TRACE_HLE_ASSET").is_some() {
         eprintln!("HLE asset {args}");
+    }
+}
+
+fn trace_mcpe_resource(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_MCPE_RESOURCE").is_some() {
+        let text = args.to_string();
+        if let Some(needle) = std::env::var("AEMU_TRACE_MCPE_RESOURCE_CONTAINS")
+            .ok()
+            .filter(|needle| !needle.is_empty())
+        {
+            if !text.contains(&needle) {
+                return;
+            }
+        }
+        let count = MCPE_RESOURCE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let limit = std::env::var("AEMU_TRACE_MCPE_RESOURCE_LIMIT")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok());
+        if limit.is_some_and(|limit| count >= limit) {
+            return;
+        }
+        eprintln!("HLE mcpe-resource {text}");
     }
 }
 
@@ -8894,10 +9489,10 @@ mod tests {
         assert_ne!(pixels, 0);
         assert_eq!(
             memory.load32(pixels - CXX_STRING_REP_HEADER_SIZE).unwrap(),
-            0
+            FAKE_TEXTURE_BYTES
         );
         assert_eq!(memory.load32(pixels - 8).unwrap(), FAKE_TEXTURE_BYTES);
-        assert_eq!(memory.load8(pixels).unwrap(), 0);
+        assert_eq!(memory.load8(pixels + 3).unwrap(), 0xff);
         assert_eq!(cpu.pc(), 0x2000);
 
         cpu.set_reg(14, 0x2004);

@@ -107,6 +107,8 @@ mod browser {
         height: u32,
         buffers: HashMap<u32, JsValue>,
         textures: HashMap<u32, JsValue>,
+        framebuffers: HashMap<u32, JsValue>,
+        renderbuffers: HashMap<u32, JsValue>,
         shaders: HashMap<u32, JsValue>,
         programs: HashMap<u32, WebGlReplayProgram>,
         enabled_vertex_attribs: HashMap<u32, bool>,
@@ -117,6 +119,7 @@ mod browser {
         current_program: u32,
         bound_array_buffer: u32,
         bound_element_array_buffer: u32,
+        bound_renderbuffer: u32,
         stats: WebGlReplayStats,
     }
 
@@ -153,6 +156,8 @@ mod browser {
                 height,
                 buffers: HashMap::new(),
                 textures: HashMap::new(),
+                framebuffers: HashMap::new(),
+                renderbuffers: HashMap::new(),
                 shaders: HashMap::new(),
                 programs: HashMap::new(),
                 enabled_vertex_attribs: HashMap::new(),
@@ -163,6 +168,7 @@ mod browser {
                 current_program: 0,
                 bound_array_buffer: 0,
                 bound_element_array_buffer: 0,
+                bound_renderbuffer: 0,
                 stats: WebGlReplayStats::default(),
             };
             host.call("activeTexture", &[number(GL_TEXTURE0)])?;
@@ -268,6 +274,73 @@ mod browser {
                 GlesEvent::BindTexture { target, texture } => {
                     let host = self.host_texture(*texture)?;
                     self.call("bindTexture", &[number(*target), host])?;
+                }
+                GlesEvent::BindFramebuffer {
+                    target,
+                    framebuffer,
+                } => {
+                    let host = self.host_framebuffer(*framebuffer)?;
+                    self.call("bindFramebuffer", &[number(*target), host])?;
+                }
+                GlesEvent::BindRenderbuffer {
+                    target,
+                    renderbuffer,
+                } => {
+                    let host = self.host_renderbuffer(*renderbuffer)?;
+                    self.bound_renderbuffer = *renderbuffer;
+                    self.call("bindRenderbuffer", &[number(*target), host])?;
+                }
+                GlesEvent::FramebufferTexture2D {
+                    target,
+                    attachment,
+                    textarget,
+                    texture,
+                    level,
+                } => {
+                    let host = self.host_texture(*texture)?;
+                    self.call(
+                        "framebufferTexture2D",
+                        &[
+                            number(*target),
+                            number(*attachment),
+                            number(*textarget),
+                            host,
+                            i32_number(*level),
+                        ],
+                    )?;
+                }
+                GlesEvent::FramebufferRenderbuffer {
+                    target,
+                    attachment,
+                    renderbuffertarget,
+                    renderbuffer,
+                } => {
+                    let host = self.host_renderbuffer(*renderbuffer)?;
+                    self.call(
+                        "framebufferRenderbuffer",
+                        &[
+                            number(*target),
+                            number(*attachment),
+                            number(*renderbuffertarget),
+                            host,
+                        ],
+                    )?;
+                }
+                GlesEvent::RenderbufferStorage {
+                    target,
+                    internal_format,
+                    width,
+                    height,
+                } => {
+                    self.call(
+                        "renderbufferStorage",
+                        &[
+                            number(*target),
+                            number(*internal_format),
+                            i32_number(*width),
+                            i32_number(*height),
+                        ],
+                    )?;
                 }
                 GlesEvent::TexParameteri {
                     target,
@@ -434,6 +507,50 @@ mod browser {
                         ],
                     )?;
                 }
+                GlesEvent::StencilFuncSeparate {
+                    face,
+                    func,
+                    reference,
+                    mask,
+                } => {
+                    self.call(
+                        "stencilFuncSeparate",
+                        &[
+                            number(*face),
+                            number(*func),
+                            i32_number(*reference),
+                            number(*mask),
+                        ],
+                    )?;
+                }
+                GlesEvent::StencilOpSeparate {
+                    face,
+                    sfail,
+                    dpfail,
+                    dppass,
+                } => {
+                    self.call(
+                        "stencilOpSeparate",
+                        &[
+                            number(*face),
+                            number(*sfail),
+                            number(*dpfail),
+                            number(*dppass),
+                        ],
+                    )?;
+                }
+                GlesEvent::StencilMask { mask } => {
+                    self.call("stencilMask", &[number(*mask)])?;
+                }
+                GlesEvent::CullFace { mode } => {
+                    self.call("cullFace", &[number(*mode)])?;
+                }
+                GlesEvent::PolygonOffset { factor, units } => {
+                    self.call(
+                        "polygonOffset",
+                        &[float_bits_number(*factor), float_bits_number(*units)],
+                    )?;
+                }
                 GlesEvent::DepthFunc { func } => {
                     self.call("depthFunc", &[number(*func)])?;
                 }
@@ -496,6 +613,9 @@ mod browser {
                 }
                 GlesEvent::ClearDepthf { depth } => {
                     self.call("clearDepth", &[float_bits_number(*depth)])?;
+                }
+                GlesEvent::ClearStencil { value } => {
+                    self.call("clearStencil", &[i32_number(*value)])?;
                 }
                 GlesEvent::Clear { mask } => {
                     self.call("clear", &[number(*mask)])?;
@@ -839,6 +959,40 @@ mod browser {
                 )));
             }
             self.textures.insert(guest, host.clone());
+            Ok(host)
+        }
+
+        fn host_framebuffer(&mut self, guest: u32) -> HostResult<JsValue> {
+            if guest == 0 {
+                return Ok(JsValue::NULL);
+            }
+            if let Some(host) = self.framebuffers.get(&guest).cloned() {
+                return Ok(host);
+            }
+            let host = self.call("createFramebuffer", &[])?;
+            if host.is_null() || host.is_undefined() {
+                return Err(HostError::new(format!(
+                    "WebGL createFramebuffer failed for guest framebuffer {guest}"
+                )));
+            }
+            self.framebuffers.insert(guest, host.clone());
+            Ok(host)
+        }
+
+        fn host_renderbuffer(&mut self, guest: u32) -> HostResult<JsValue> {
+            if guest == 0 {
+                return Ok(JsValue::NULL);
+            }
+            if let Some(host) = self.renderbuffers.get(&guest).cloned() {
+                return Ok(host);
+            }
+            let host = self.call("createRenderbuffer", &[])?;
+            if host.is_null() || host.is_undefined() {
+                return Err(HostError::new(format!(
+                    "WebGL createRenderbuffer failed for guest renderbuffer {guest}"
+                )));
+            }
+            self.renderbuffers.insert(guest, host.clone());
             Ok(host)
         }
 

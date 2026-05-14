@@ -30,9 +30,9 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address and linked runtime HLE entries such as `__dynamic_cast`; `run_function_with_args_until_hle` can now turn a selected HLE call into a bounded success condition. | Initial coverage |
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
-| Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits successfully after `native activity reached eglSwapBuffers at step 254925219`. | Satisfied for local ARMv7 research APK |
-| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` replays the first MCPE frame into an SDL2 GLES2 context, submits all 744 captured indexed draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and reports zero host GL errors. `src/wasm_webgl.rs` now has a wasm-only WebGL host that mirrors the SDL2 replay state model and compiles for the browser target. | SDL2 first-frame visual replay satisfied; browser harness pending |
-| SDL2 live frames | `NativeRuntime::continue_until_hle` can resume guest execution after a stopped HLE call. With `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1`, `run-apk-native --sdl2-live` reaches the first MCPE swap at step `254925219`, replays live frame batches to an SDL2 GLES window, and reports nonzero `854x480` readback with zero host GL errors. WebSocket screenshots such as `target/aemu-display0-screenshot.ppm` verify `854x480`, `372` colors, and `409920` nonblack pixels. A later run passed frame 2000 without the old HLE `std::string` heap exhaustion. | Live rendering satisfied; menu/resource progression still pending |
+| Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap` exits successfully after `native activity reached eglSwapBuffers at step 254627090` in the current FBO/resource bridge build. | Satisfied for local ARMv7 research APK |
+| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, framebuffer/renderbuffer, stencil, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` replays the first MCPE frame into an SDL2 GLES2 context, submits all 744 captured indexed draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and reports zero host GL errors. `src/wasm_webgl.rs` mirrors the SDL2 framebuffer/renderbuffer/state replay model for the browser target. | SDL2 first-frame visual replay satisfied; browser harness pending |
+| SDL2 live frames | `NativeRuntime::continue_until_hle` can resume guest execution after a stopped HLE call. With `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1`, `run-apk-native --sdl2-live` reaches the first MCPE swap at step `254627090`, replays live frame batches to an SDL2 GLES window, and reports nonzero `854x480` readback with zero host GL errors. WebSocket screenshots such as `target/aemu-display0-fbo.ppm` verify `854x480`, `372` colors, `409920` nonblack pixels, and SHA256 `fb264d18933619212f2f9a7ea8502258655cfe29389a64372e4da000e2bb583d`. The visible output remains the static gradient/loading frame. | Live rendering satisfied; menu/resource progression still pending |
 | SDL2 WebSocket harness and input | `src/ws_harness.rs` and `tools/ws_cli.py` provide `debug`, `screenshot`, `pointer`, and `tap`. A traced `tools/ws_cli.py --url ws://127.0.0.1:8768 tap 427 240 --duration-ms 180` reached `AInputQueue_getEvent`, `AMotionEvent_getX/Y`, and `_ZN10Multitouch4feedEccssi` for both down and up, with guest coordinates `427,240`. Before/after screenshots `target/aemu-inputqueue-before.ppm` and `target/aemu-inputqueue-after.ppm` were byte-identical, so input delivery is no longer the only blocker. | Harness/input bridge satisfied; not playable |
 | Browser-fed APK bytes | `load_apk_native_libraries_bytes` links APK native libraries from bytes, and `HleRuntime::set_apk_bytes` lets Android asset HLE serve `AAssetManager_open` from the same byte source. | Initial browser data path |
 | Browser MCPE entrypoint | `src/wasm_api.rs` exports `runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)` for wasm builds. It runs the byte-backed APK path through constructors, `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, and `android_main` until `eglSwapBuffers`, then replays captured GLES events into a WebGL 1 canvas and returns draw/readback/error stats. `web/mcpe_first_frame.html` wires that export to a file input and canvas. | Initial browser harness path |
@@ -153,31 +153,31 @@ the only terminator.
 
 The current blocker is no longer instruction decode, import resolution, EGL
 startup, shader reflection, resource readiness, reaching draw/swap calls,
-submitting the first captured MCPE draw stream through SDL2, or producing
-nonblack first-swap host pixels. The remaining graphics gap is wiring the
-wasm-only WebGL replay host into a browser harness and validating browser
-readback against the same first-swap stream.
+submitting the first captured MCPE draw stream through SDL2, replaying
+framebuffer/renderbuffer state, or producing nonblack first-swap host pixels.
+The visible result is still the static gradient/loading frame, so the next
+graphics blocker is either missing UI batch content/state before replay or a
+shader/texture/uniform mismatch that leaves the drawn UI visually absent.
 
 The GLES HLE now records frame-relevant calls into a bounded `GlesEvent` queue:
 shader/program creation and linking, active/bound textures, texture upload
-parameters, buffer binding/upload, shader program use, uniform values, vertex
-attribute pointers/enables, blend/depth/color/scissor state, clear/viewport,
-draws, flush, and swap. Buffer, texture, uniform, draw-index, and client-side
-vertex attribute data now include copied guest payload bytes when mapped and
-bounded. The SDL2 host replays the captured GLES2 stream into a host GLES2
-context, including shader compilation/linking, guest-to-host object mapping,
-uniform location mapping, texture/buffer uploads, client-attribute staging VBOs,
-state calls, and indexed draw submission.
+parameters, buffer binding/upload, framebuffer/renderbuffer binding and
+attachments, stencil/cull/polygon-offset state, shader program use, uniform
+values, vertex attribute pointers/enables, blend/depth/color/scissor state,
+clear/viewport, draws, flush, and swap. Buffer, texture, uniform, draw-index,
+and client-side vertex attribute data now include copied guest payload bytes
+when mapped and bounded. The SDL2 host replays the captured GLES2 stream into a
+host GLES2 context, including shader compilation/linking, guest-to-host object
+mapping, uniform location mapping, texture/buffer/framebuffer/renderbuffer
+uploads, client-attribute staging VBOs, state calls, and indexed draw
+submission.
 
 The first-frame MCPE event capture no longer saturates the command queue after
-raising the bound to 65,536 events. With `--gles-summary`, the local 0.15.0.1
-APK reaches `eglSwapBuffers` at step `254925219` and reports 21,674 captured
-GLES events: 157 `CreateProgram`, 144 `ShaderSource`, 157 `LinkProgram`, 744
-`DrawElements`, 841 `TexImage2D`, 839 `TexSubImage2D`, 1,496
-`VertexAttribPointer`, 719 `Uniform1i`, 752 uniform-vector updates, and one
-swap. The same probe records 3,811,776 bytes of GLES payload data. The SDL2
-replay path submits all 744 captured indexed draws with zero skipped client
-attribute or index draws. Framebuffer readback after replay reports
+raising the bound to 65,536 events. In the current resource/FBO build, the local
+0.15.0.1 APK reaches `eglSwapBuffers` at step `254627090` and reports 21,695
+captured GLES events with 3,811,776 bytes of GLES payload data. The SDL2 replay
+path submits all 744 captured indexed draws with zero skipped client attribute
+or index draws. Framebuffer readback after replay reports
 `854x480 nonzero_rgb_pixels=409920 nonzero_alpha_pixels=409920` and
 `gl_errors count=0`.
 
@@ -201,6 +201,8 @@ attribute or index draws. Framebuffer readback after replay reports
 - `cargo check --features sdl2`
 - `cargo build --release`
 - `cargo build --release --features sdl2`
+- `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 2` exits 0 after reaching `eglSwapBuffers` at step `254627090`; frame 1 reports `events=21695 payload=3811776 draws arrays=0 elements=744 readback=854x480 rgb=409920 alpha=409920 gl_errors=0`, and frame 2 reports `events=276 payload=6776 draws arrays=0 elements=767 readback=854x480 rgb=409920 alpha=409920 gl_errors=0`.
+- `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --ws 127.0.0.1:8773` reaches live rendering on the real X display. `tools/ws_cli.py --url ws://127.0.0.1:8773 screenshot --out target/aemu-display0-fbo.ppm` captures a `1229775` byte `854x480` PPM; `sha256sum target/aemu-display0-fbo.ppm` reports `fb264d18933619212f2f9a7ea8502258655cfe29389a64372e4da000e2bb583d`, and `magick identify` reports `372` colors. The screenshot is still byte-identical to the previous static gradient/loading frame.
 - `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 300000000 --until-swap --gles-summary --sdl2 --sdl2-hold-ms 250` exits 0 after reaching `eglSwapBuffers` at step `254925219`, summarizing 21,674 captured GLES events with 3,811,776 copied payload bytes, reporting `sdl2: submitted draws arrays=0 elements=744 skipped_client_attrib=0 skipped_missing_indices=0`, `sdl2: readback 854x480 nonzero_rgb_pixels=409920 nonzero_alpha_pixels=409920`, and `sdl2: gl_errors count=0`
 - `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --ws 127.0.0.1:8766` reaches live rendering on the real X display. A run passed frame `2000` without the previous HLE heap exhaustion; every reported frame had `readback=854x480 rgb=409920 alpha=409920 gl_errors=0`. WebSocket screenshot capture verifies `854x480`, `372` colors, and `409920` nonblack pixels.
 - `AEMU_TRACE_HLE=AInput,AMotion,Multitouch,MenuPointer DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --ws 127.0.0.1:8768` plus `tools/ws_cli.py --url ws://127.0.0.1:8768 tap 427 240 --duration-ms 180` shows the tap entering `AInputQueue_getEvent`, `AMotionEvent_getX/Y`, and `_ZN10Multitouch4feedEccssi` for both down and up. `target/aemu-inputqueue-before.ppm` and `target/aemu-inputqueue-after.ppm` are byte-identical, so MCPE remains on the gradient/loading frame.

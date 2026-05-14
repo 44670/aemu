@@ -81,6 +81,13 @@ type GlBufferData = unsafe extern "C" fn(u32, isize, *const c_void, u32);
 type GlBufferSubData = unsafe extern "C" fn(u32, isize, isize, *const c_void);
 type GlGenTextures = unsafe extern "C" fn(i32, *mut u32);
 type GlBindTexture = unsafe extern "C" fn(u32, u32);
+type GlGenFramebuffers = unsafe extern "C" fn(i32, *mut u32);
+type GlGenRenderbuffers = unsafe extern "C" fn(i32, *mut u32);
+type GlBindFramebuffer = unsafe extern "C" fn(u32, u32);
+type GlBindRenderbuffer = unsafe extern "C" fn(u32, u32);
+type GlFramebufferTexture2D = unsafe extern "C" fn(u32, u32, u32, u32, i32);
+type GlFramebufferRenderbuffer = unsafe extern "C" fn(u32, u32, u32, u32);
+type GlRenderbufferStorage = unsafe extern "C" fn(u32, u32, i32, i32);
 type GlTexParameteri = unsafe extern "C" fn(u32, u32, i32);
 type GlTexImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
 type GlTexSubImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
@@ -103,11 +110,17 @@ type GlEnable = unsafe extern "C" fn(u32);
 type GlDisable = unsafe extern "C" fn(u32);
 type GlBlendFunc = unsafe extern "C" fn(u32, u32);
 type GlBlendFuncSeparate = unsafe extern "C" fn(u32, u32, u32, u32);
+type GlStencilFuncSeparate = unsafe extern "C" fn(u32, u32, i32, u32);
+type GlStencilOpSeparate = unsafe extern "C" fn(u32, u32, u32, u32);
+type GlStencilMask = unsafe extern "C" fn(u32);
+type GlCullFace = unsafe extern "C" fn(u32);
+type GlPolygonOffset = unsafe extern "C" fn(f32, f32);
 type GlDepthFunc = unsafe extern "C" fn(u32);
 type GlDepthMask = unsafe extern "C" fn(u8);
 type GlDepthRangef = unsafe extern "C" fn(f32, f32);
 type GlColorMask = unsafe extern "C" fn(u8, u8, u8, u8);
 type GlScissor = unsafe extern "C" fn(i32, i32, i32, i32);
+type GlClearStencil = unsafe extern "C" fn(i32);
 type GlDrawArrays = unsafe extern "C" fn(u32, i32, i32);
 type GlDrawElements = unsafe extern "C" fn(u32, i32, u32, *const c_void);
 type GlFlush = unsafe extern "C" fn();
@@ -139,6 +152,13 @@ struct SdlGl {
     buffer_sub_data: GlBufferSubData,
     gen_textures: GlGenTextures,
     bind_texture: GlBindTexture,
+    gen_framebuffers: GlGenFramebuffers,
+    gen_renderbuffers: GlGenRenderbuffers,
+    bind_framebuffer: GlBindFramebuffer,
+    bind_renderbuffer: GlBindRenderbuffer,
+    framebuffer_texture_2d: GlFramebufferTexture2D,
+    framebuffer_renderbuffer: GlFramebufferRenderbuffer,
+    renderbuffer_storage: GlRenderbufferStorage,
     tex_parameteri: GlTexParameteri,
     tex_image_2d: GlTexImage2D,
     tex_sub_image_2d: GlTexSubImage2D,
@@ -161,11 +181,17 @@ struct SdlGl {
     disable: GlDisable,
     blend_func: GlBlendFunc,
     blend_func_separate: GlBlendFuncSeparate,
+    stencil_func_separate: GlStencilFuncSeparate,
+    stencil_op_separate: GlStencilOpSeparate,
+    stencil_mask: GlStencilMask,
+    cull_face: GlCullFace,
+    polygon_offset: GlPolygonOffset,
     depth_func: GlDepthFunc,
     depth_mask: GlDepthMask,
     depth_rangef: GlDepthRangef,
     color_mask: GlColorMask,
     scissor: GlScissor,
+    clear_stencil: GlClearStencil,
     draw_arrays: GlDrawArrays,
     draw_elements: GlDrawElements,
     flush: GlFlush,
@@ -178,6 +204,8 @@ struct SdlGl {
 struct SdlGlesReplay {
     buffers: HashMap<u32, u32>,
     textures: HashMap<u32, u32>,
+    framebuffers: HashMap<u32, u32>,
+    renderbuffers: HashMap<u32, u32>,
     shaders: HashMap<u32, u32>,
     programs: HashMap<u32, ReplayProgram>,
     enabled_vertex_attribs: HashMap<u32, bool>,
@@ -187,6 +215,7 @@ struct SdlGlesReplay {
     current_program: u32,
     bound_array_buffer: u32,
     bound_element_array_buffer: u32,
+    bound_renderbuffer: u32,
     stats: SdlGlesReplayStats,
 }
 
@@ -288,6 +317,13 @@ impl SdlGl {
             buffer_sub_data: load_required_gl(video, "glBufferSubData")?,
             gen_textures: load_required_gl(video, "glGenTextures")?,
             bind_texture: load_required_gl(video, "glBindTexture")?,
+            gen_framebuffers: load_required_gl(video, "glGenFramebuffers")?,
+            gen_renderbuffers: load_required_gl(video, "glGenRenderbuffers")?,
+            bind_framebuffer: load_required_gl(video, "glBindFramebuffer")?,
+            bind_renderbuffer: load_required_gl(video, "glBindRenderbuffer")?,
+            framebuffer_texture_2d: load_required_gl(video, "glFramebufferTexture2D")?,
+            framebuffer_renderbuffer: load_required_gl(video, "glFramebufferRenderbuffer")?,
+            renderbuffer_storage: load_required_gl(video, "glRenderbufferStorage")?,
             tex_parameteri: load_required_gl(video, "glTexParameteri")?,
             tex_image_2d: load_required_gl(video, "glTexImage2D")?,
             tex_sub_image_2d: load_required_gl(video, "glTexSubImage2D")?,
@@ -310,11 +346,17 @@ impl SdlGl {
             disable: load_required_gl(video, "glDisable")?,
             blend_func: load_required_gl(video, "glBlendFunc")?,
             blend_func_separate: load_required_gl(video, "glBlendFuncSeparate")?,
+            stencil_func_separate: load_required_gl(video, "glStencilFuncSeparate")?,
+            stencil_op_separate: load_required_gl(video, "glStencilOpSeparate")?,
+            stencil_mask: load_required_gl(video, "glStencilMask")?,
+            cull_face: load_required_gl(video, "glCullFace")?,
+            polygon_offset: load_required_gl(video, "glPolygonOffset")?,
             depth_func: load_required_gl(video, "glDepthFunc")?,
             depth_mask: load_required_gl(video, "glDepthMask")?,
             depth_rangef: load_required_gl(video, "glDepthRangef")?,
             color_mask: load_required_gl(video, "glColorMask")?,
             scissor: load_required_gl(video, "glScissor")?,
+            clear_stencil: load_required_gl(video, "glClearStencil")?,
             draw_arrays: load_required_gl(video, "glDrawArrays")?,
             draw_elements: load_required_gl(video, "glDrawElements")?,
             flush: load_required_gl(video, "glFlush")?,
@@ -429,6 +471,67 @@ impl Sdl2Host {
                     (self.gl.bind_texture)(*target, host);
                 }
             }
+            GlesEvent::BindFramebuffer {
+                target,
+                framebuffer,
+            } => {
+                let host = self.host_framebuffer(*framebuffer);
+                unsafe {
+                    (self.gl.bind_framebuffer)(*target, host);
+                }
+            }
+            GlesEvent::BindRenderbuffer {
+                target,
+                renderbuffer,
+            } => {
+                let host = self.host_renderbuffer(*renderbuffer);
+                self.replay.bound_renderbuffer = *renderbuffer;
+                unsafe {
+                    (self.gl.bind_renderbuffer)(*target, host);
+                }
+            }
+            GlesEvent::FramebufferTexture2D {
+                target,
+                attachment,
+                textarget,
+                texture,
+                level,
+            } => {
+                let host = self.host_texture(*texture);
+                unsafe {
+                    (self.gl.framebuffer_texture_2d)(
+                        *target,
+                        *attachment,
+                        *textarget,
+                        host,
+                        *level,
+                    );
+                }
+            }
+            GlesEvent::FramebufferRenderbuffer {
+                target,
+                attachment,
+                renderbuffertarget,
+                renderbuffer,
+            } => {
+                let host = self.host_renderbuffer(*renderbuffer);
+                unsafe {
+                    (self.gl.framebuffer_renderbuffer)(
+                        *target,
+                        *attachment,
+                        *renderbuffertarget,
+                        host,
+                    );
+                }
+            }
+            GlesEvent::RenderbufferStorage {
+                target,
+                internal_format,
+                width,
+                height,
+            } => unsafe {
+                (self.gl.renderbuffer_storage)(*target, *internal_format, *width, *height);
+            },
             GlesEvent::TexParameteri {
                 target,
                 name,
@@ -582,6 +685,31 @@ impl Sdl2Host {
             } => unsafe {
                 (self.gl.blend_func_separate)(*src_rgb, *dst_rgb, *src_alpha, *dst_alpha);
             },
+            GlesEvent::StencilFuncSeparate {
+                face,
+                func,
+                reference,
+                mask,
+            } => unsafe {
+                (self.gl.stencil_func_separate)(*face, *func, *reference, *mask);
+            },
+            GlesEvent::StencilOpSeparate {
+                face,
+                sfail,
+                dpfail,
+                dppass,
+            } => unsafe {
+                (self.gl.stencil_op_separate)(*face, *sfail, *dpfail, *dppass);
+            },
+            GlesEvent::StencilMask { mask } => unsafe {
+                (self.gl.stencil_mask)(*mask);
+            },
+            GlesEvent::CullFace { mode } => unsafe {
+                (self.gl.cull_face)(*mode);
+            },
+            GlesEvent::PolygonOffset { factor, units } => unsafe {
+                (self.gl.polygon_offset)(f32::from_bits(*factor), f32::from_bits(*units));
+            },
             GlesEvent::DepthFunc { func } => unsafe {
                 (self.gl.depth_func)(*func);
             },
@@ -632,6 +760,9 @@ impl Sdl2Host {
                     }
                 }
             }
+            GlesEvent::ClearStencil { value } => unsafe {
+                (self.gl.clear_stencil)(*value);
+            },
             GlesEvent::Clear { mask } => unsafe {
                 (self.gl.clear)(*mask);
             },
@@ -949,6 +1080,36 @@ impl Sdl2Host {
             (self.gl.gen_textures)(1, &mut host);
         }
         self.replay.textures.insert(guest, host);
+        host
+    }
+
+    fn host_framebuffer(&mut self, guest: u32) -> u32 {
+        if guest == 0 {
+            return 0;
+        }
+        if let Some(host) = self.replay.framebuffers.get(&guest).copied() {
+            return host;
+        }
+        let mut host = 0;
+        unsafe {
+            (self.gl.gen_framebuffers)(1, &mut host);
+        }
+        self.replay.framebuffers.insert(guest, host);
+        host
+    }
+
+    fn host_renderbuffer(&mut self, guest: u32) -> u32 {
+        if guest == 0 {
+            return 0;
+        }
+        if let Some(host) = self.replay.renderbuffers.get(&guest).copied() {
+            return host;
+        }
+        let mut host = 0;
+        unsafe {
+            (self.gl.gen_renderbuffers)(1, &mut host);
+        }
+        self.replay.renderbuffers.insert(guest, host);
         host
     }
 
