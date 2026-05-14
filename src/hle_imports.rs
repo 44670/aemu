@@ -397,6 +397,14 @@ struct DecodedTexture {
     source: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageFormat {
+    Any,
+    Png,
+    Tga,
+    Jpeg,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HleInputEvent {
     handle: u32,
@@ -1173,6 +1181,22 @@ impl HleRuntime {
                 self.minecraft_texture_group_get_texture_pair(cpu, memory)
             }
             "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation" => Ok(self.return32(cpu, 1)),
+            "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
+            | "_ZN11AppPlatform7loadPNGER11TextureDataRKSs"
+            | "_ZN11AppPlatform7loadTGAER11TextureDataRKSs"
+            | "_ZN11AppPlatform8loadJPEGER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android7loadPNGER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android7loadTGAER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android8loadJPEGER11TextureDataRKSs" => {
+                self.minecraft_app_platform_load_image(name, cpu, memory)
+            }
+            "_ZN10ImageUtils17loadImageFromFileER11TextureDataRKSs" => {
+                self.minecraft_image_utils_load_image_from_file(cpu, memory)
+            }
+            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai" => {
+                self.minecraft_image_utils_load_image_from_memory(cpu, memory)
+            }
             "_ZN13GeometryGroup11getGeometryERKSs" | "_ZN13GeometryGroup14tryGetGeometryERKSs" => {
                 self.minecraft_geometry_group_get_geometry(cpu, memory)
             }
@@ -3099,6 +3123,127 @@ impl HleRuntime {
         Ok(())
     }
 
+    fn minecraft_app_platform_load_image<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let texture_data = cpu.reg(1);
+        let path_addr = cpu.reg(2);
+        let format = image_format_for_loader(name);
+        self.minecraft_load_image_path(texture_data, path_addr, format, cpu, memory)
+    }
+
+    fn minecraft_image_utils_load_image_from_file<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let texture_data = cpu.reg(0);
+        let path_addr = cpu.reg(1);
+        self.minecraft_load_image_path(texture_data, path_addr, ImageFormat::Any, cpu, memory)
+    }
+
+    fn minecraft_image_utils_load_image_from_memory<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let texture_data = cpu.reg(0);
+        let bytes_addr = cpu.reg(1);
+        let len = cpu.reg(2);
+        let result = if bytes_addr == 0 || len == 0 {
+            Err("empty image memory".to_string())
+        } else {
+            let bytes = load_bytes(memory, bytes_addr, len)?;
+            decode_image_rgba("<memory>", &bytes, ImageFormat::Any)
+        };
+
+        match result {
+            Ok(texture) => {
+                self.store_minecraft_texture_data(memory, texture_data, &texture)?;
+                trace_mcpe_resource(format_args!(
+                    "ImageUtils::loadImageFromMemory data={texture_data:#010x} {}x{} bytes={} source={:?}",
+                    texture.width,
+                    texture.height,
+                    texture.rgba.len(),
+                    texture.source
+                ));
+                Ok(self.return32(cpu, 1))
+            }
+            Err(err) => {
+                self.clear_minecraft_texture_data(memory, texture_data)?;
+                trace_mcpe_resource(format_args!(
+                    "ImageUtils::loadImageFromMemory data={texture_data:#010x} failed: {err}"
+                ));
+                Ok(self.return32(cpu, 0))
+            }
+        }
+    }
+
+    fn minecraft_load_image_path<M: Memory>(
+        &mut self,
+        texture_data: u32,
+        path_addr: u32,
+        format: ImageFormat,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let path = load_cxx_string_lossy(memory, path_addr)?;
+        match self.load_image_texture_for_path(&path, format) {
+            Ok(texture) => {
+                self.store_minecraft_texture_data(memory, texture_data, &texture)?;
+                trace_mcpe_resource(format_args!(
+                    "AppPlatform::loadImage path={path:?} data={texture_data:#010x} {}x{} bytes={} source={:?}",
+                    texture.width,
+                    texture.height,
+                    texture.rgba.len(),
+                    texture.source
+                ));
+                Ok(self.return32(cpu, 1))
+            }
+            Err(err) => {
+                self.clear_minecraft_texture_data(memory, texture_data)?;
+                trace_mcpe_resource(format_args!(
+                    "AppPlatform::loadImage path={path:?} data={texture_data:#010x} failed: {err}"
+                ));
+                Ok(self.return32(cpu, 0))
+            }
+        }
+    }
+
+    fn store_minecraft_texture_data<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        texture_data: u32,
+        texture: &DecodedTexture,
+    ) -> Result<(), HleError> {
+        store32(memory, texture_data, texture.width)?;
+        store32(memory, texture_data.wrapping_add(0x04), texture.height)?;
+        self.replace_cxx_string_bytes(
+            memory,
+            texture_data.wrapping_add(0x08),
+            &texture.rgba,
+            texture.rgba.len() as u32,
+        )?;
+        Ok(())
+    }
+
+    fn clear_minecraft_texture_data<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        texture_data: u32,
+    ) -> Result<(), HleError> {
+        if texture_data == 0 {
+            return Ok(());
+        }
+        store32(memory, texture_data, 0)?;
+        store32(memory, texture_data.wrapping_add(0x04), 0)?;
+        self.replace_cxx_string_bytes(memory, texture_data.wrapping_add(0x08), &[], 0)?;
+        Ok(())
+    }
+
     fn minecraft_geometry_group_get_geometry<M: Memory>(
         &mut self,
         cpu: &mut Cpu,
@@ -3674,6 +3819,38 @@ impl HleRuntime {
             }
         }
         None
+    }
+
+    fn load_image_texture_for_path(
+        &self,
+        path: &str,
+        format: ImageFormat,
+    ) -> Result<DecodedTexture, String> {
+        let mut failures = Vec::new();
+        for entry_name in image_asset_entry_candidates(path, format) {
+            let bytes = match self.read_apk_asset_entry(&entry_name) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    failures.push(format!("{entry_name}: {err}"));
+                    continue;
+                }
+            };
+            match decode_image_rgba(&entry_name, &bytes, format) {
+                Ok(mut texture) => {
+                    texture.source = entry_name;
+                    return Ok(texture);
+                }
+                Err(err) => {
+                    failures.push(format!("{entry_name}: {err}"));
+                }
+            }
+        }
+        let detail = if failures.is_empty() {
+            "no candidates".to_string()
+        } else {
+            failures.join("; ")
+        };
+        Err(detail)
     }
 
     fn egl<M: Memory>(
@@ -5174,6 +5351,16 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN8WebTokenC2ERKS_"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
             | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
+            | "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
+            | "_ZN11AppPlatform7loadPNGER11TextureDataRKSs"
+            | "_ZN11AppPlatform7loadTGAER11TextureDataRKSs"
+            | "_ZN11AppPlatform8loadJPEGER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android7loadPNGER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android7loadTGAER11TextureDataRKSs"
+            | "_ZN19AppPlatform_android8loadJPEGER11TextureDataRKSs"
+            | "_ZN10ImageUtils17loadImageFromFileER11TextureDataRKSs"
+            | "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai"
             | "_ZN13GeometryGroup11getGeometryERKSs"
             | "_ZN13GeometryGroup14tryGetGeometryERKSs"
             | "_ZN14GamePadManager16getGamePadsInUseEv"
@@ -5935,6 +6122,79 @@ fn texture_asset_entry_candidates(location: &ResourceLocationDebug) -> Vec<Strin
     candidates
 }
 
+fn image_format_for_loader(name: &str) -> ImageFormat {
+    if name.contains("loadPNG") {
+        ImageFormat::Png
+    } else if name.contains("loadTGA") {
+        ImageFormat::Tga
+    } else if name.contains("loadJPEG") {
+        ImageFormat::Jpeg
+    } else {
+        ImageFormat::Any
+    }
+}
+
+fn image_asset_entry_candidates(path: &str, format: ImageFormat) -> Vec<String> {
+    let clean = normalize_resource_path(path);
+    if clean.is_empty() {
+        return Vec::new();
+    }
+
+    let mut stems = Vec::new();
+    push_unique_string(&mut stems, clean.clone());
+    if let Some(stripped) = clean.strip_prefix("textures/") {
+        push_unique_string(&mut stems, stripped.to_string());
+    }
+    if let Some(stripped) = clean.strip_prefix("images/") {
+        push_unique_string(&mut stems, stripped.to_string());
+    }
+
+    let mut candidates = Vec::new();
+    for stem in stems {
+        let names = image_stem_names(&stem, format);
+        for name in names {
+            if name.starts_with("assets/") {
+                push_unique_string(&mut candidates, name);
+                continue;
+            }
+            push_unique_string(&mut candidates, name.clone());
+            push_unique_string(&mut candidates, format!("assets/{name}"));
+            push_unique_string(&mut candidates, format!("assets/images/{name}"));
+            push_unique_string(
+                &mut candidates,
+                format!("assets/resourcepacks/vanilla/images/{name}"),
+            );
+        }
+    }
+    candidates
+}
+
+fn image_stem_names(stem: &str, format: ImageFormat) -> Vec<String> {
+    let has_extension = stem
+        .rsplit_once('/')
+        .map_or(stem, |(_, name)| name)
+        .contains('.');
+    let mut names = Vec::new();
+    push_unique_string(&mut names, stem.to_string());
+    if !has_extension {
+        match format {
+            ImageFormat::Png => push_unique_string(&mut names, format!("{stem}.png")),
+            ImageFormat::Tga => push_unique_string(&mut names, format!("{stem}.tga")),
+            ImageFormat::Jpeg => {
+                push_unique_string(&mut names, format!("{stem}.jpg"));
+                push_unique_string(&mut names, format!("{stem}.jpeg"));
+            }
+            ImageFormat::Any => {
+                push_unique_string(&mut names, format!("{stem}.png"));
+                push_unique_string(&mut names, format!("{stem}.tga"));
+                push_unique_string(&mut names, format!("{stem}.jpg"));
+                push_unique_string(&mut names, format!("{stem}.jpeg"));
+            }
+        }
+    }
+    names
+}
+
 fn normalize_resource_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches('/')
@@ -5973,6 +6233,36 @@ fn fallback_texture_rgba(key: &str) -> Vec<u8> {
         }
     }
     pixels
+}
+
+fn decode_image_rgba(
+    source: &str,
+    bytes: &[u8],
+    format: ImageFormat,
+) -> Result<DecodedTexture, String> {
+    let lower = source.to_ascii_lowercase();
+    let decoded = match format {
+        ImageFormat::Png => decode_png_rgba(bytes),
+        ImageFormat::Tga => decode_tga_rgba(bytes),
+        ImageFormat::Jpeg => Err("JPEG decoding is not implemented".to_string()),
+        ImageFormat::Any => {
+            if bytes.starts_with(b"\x89PNG\r\n\x1a\n") || lower.ends_with(".png") {
+                decode_png_rgba(bytes)
+            } else if lower.ends_with(".tga") {
+                decode_tga_rgba(bytes)
+            } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                Err("JPEG decoding is not implemented".to_string())
+            } else {
+                decode_png_rgba(bytes).or_else(|_| decode_tga_rgba(bytes))
+            }
+        }
+    }?;
+    Ok(DecodedTexture {
+        width: decoded.0,
+        height: decoded.1,
+        rgba: decoded.2,
+        source: source.to_string(),
+    })
 }
 
 fn decode_png_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
@@ -6089,6 +6379,169 @@ fn decode_png_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     }
 
     Ok((width, height, rgba))
+}
+
+fn decode_tga_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    if bytes.len() < 18 {
+        return Err("truncated TGA header".to_string());
+    }
+    let id_len = bytes[0] as usize;
+    let color_map_type = bytes[1];
+    let image_type = bytes[2];
+    if color_map_type != 0 {
+        return Err("TGA color maps are not supported".to_string());
+    }
+    let width = u16::from_le_bytes([bytes[12], bytes[13]]) as u32;
+    let height = u16::from_le_bytes([bytes[14], bytes[15]]) as u32;
+    if width == 0 || height == 0 {
+        return Err("empty TGA image".to_string());
+    }
+    let depth = bytes[16];
+    let bytes_per_pixel = match (image_type, depth) {
+        (2 | 10, 16 | 24 | 32) => usize::from(depth / 8),
+        (3 | 11, 8) => 1,
+        _ => {
+            return Err(format!(
+                "unsupported TGA image type {image_type} depth {depth}"
+            ));
+        }
+    };
+    let data_start = 18usize
+        .checked_add(id_len)
+        .ok_or_else(|| "TGA image id overflow".to_string())?;
+    if data_start > bytes.len() {
+        return Err("truncated TGA image id".to_string());
+    }
+
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "TGA image size overflow".to_string())?;
+    let mut pixels = Vec::with_capacity(
+        pixel_count
+            .checked_mul(4)
+            .ok_or_else(|| "TGA RGBA size overflow".to_string())?,
+    );
+    let mut input = data_start;
+    match image_type {
+        2 | 3 => {
+            for _ in 0..pixel_count {
+                pixels.extend_from_slice(&read_tga_pixel(
+                    bytes,
+                    &mut input,
+                    image_type,
+                    bytes_per_pixel,
+                )?);
+            }
+        }
+        10 | 11 => {
+            while pixels.len() / 4 < pixel_count {
+                let Some(&packet) = bytes.get(input) else {
+                    return Err("truncated TGA RLE packet".to_string());
+                };
+                input += 1;
+                let count = usize::from(packet & 0x7f) + 1;
+                if packet & 0x80 != 0 {
+                    let pixel = read_tga_pixel(bytes, &mut input, image_type, bytes_per_pixel)?;
+                    for _ in 0..count {
+                        pixels.extend_from_slice(&pixel);
+                    }
+                } else {
+                    for _ in 0..count {
+                        pixels.extend_from_slice(&read_tga_pixel(
+                            bytes,
+                            &mut input,
+                            image_type,
+                            bytes_per_pixel,
+                        )?);
+                    }
+                }
+                if pixels.len() / 4 > pixel_count {
+                    return Err("TGA RLE packet overflows image".to_string());
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    orient_tga_rgba(&mut pixels, width as usize, height as usize, bytes[17])?;
+    Ok((width, height, pixels))
+}
+
+fn read_tga_pixel(
+    bytes: &[u8],
+    input: &mut usize,
+    image_type: u8,
+    bytes_per_pixel: usize,
+) -> Result<[u8; 4], String> {
+    let end = input
+        .checked_add(bytes_per_pixel)
+        .ok_or_else(|| "TGA pixel offset overflow".to_string())?;
+    if end > bytes.len() {
+        return Err("truncated TGA pixel data".to_string());
+    }
+    let pixel = match (image_type, bytes_per_pixel) {
+        (2 | 10, 2) => {
+            let value = u16::from_le_bytes([bytes[*input], bytes[*input + 1]]);
+            let r = ((value >> 10) & 0x1f) as u8;
+            let g = ((value >> 5) & 0x1f) as u8;
+            let b = (value & 0x1f) as u8;
+            [
+                (r << 3) | (r >> 2),
+                (g << 3) | (g >> 2),
+                (b << 3) | (b >> 2),
+                if value & 0x8000 != 0 { 0xff } else { 0x00 },
+            ]
+        }
+        (2 | 10, 3) => [bytes[*input + 2], bytes[*input + 1], bytes[*input], 0xff],
+        (2 | 10, 4) => [
+            bytes[*input + 2],
+            bytes[*input + 1],
+            bytes[*input],
+            bytes[*input + 3],
+        ],
+        (3 | 11, 1) => {
+            let gray = bytes[*input];
+            [gray, gray, gray, 0xff]
+        }
+        _ => return Err("unsupported TGA pixel format".to_string()),
+    };
+    *input = end;
+    Ok(pixel)
+}
+
+fn orient_tga_rgba(
+    pixels: &mut Vec<u8>,
+    width: usize,
+    height: usize,
+    descriptor: u8,
+) -> Result<(), String> {
+    let top_origin = descriptor & 0x20 != 0;
+    let right_origin = descriptor & 0x10 != 0;
+    if top_origin && !right_origin {
+        return Ok(());
+    }
+
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "TGA row size overflow".to_string())?;
+    let mut oriented = vec![0u8; pixels.len()];
+    for y in 0..height {
+        let source_y = if top_origin { y } else { height - 1 - y };
+        for x in 0..width {
+            let source_x = if right_origin { width - 1 - x } else { x };
+            let src = source_y
+                .checked_mul(row_bytes)
+                .and_then(|off| off.checked_add(source_x * 4))
+                .ok_or_else(|| "TGA source offset overflow".to_string())?;
+            let dst = y
+                .checked_mul(row_bytes)
+                .and_then(|off| off.checked_add(x * 4))
+                .ok_or_else(|| "TGA destination offset overflow".to_string())?;
+            oriented[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+        }
+    }
+    *pixels = oriented;
+    Ok(())
 }
 
 fn png_channels(color_type: u8) -> Result<usize, String> {
@@ -7631,7 +8084,9 @@ fn trace_gles_buffer_upload(
     let summary = std::env::var("AEMU_TRACE_GLES_BUFFER_UPLOADS_STRIDE")
         .ok()
         .and_then(|raw| parse_env_usize(&raw))
-        .and_then(|stride| payload.and_then(|payload| summarize_interleaved_vertices(payload, stride)));
+        .and_then(|stride| {
+            payload.and_then(|payload| summarize_interleaved_vertices(payload, stride))
+        });
     eprintln!(
         "GLES_UPLOAD {name} target=0x{target:04x} offset=0x{offset:x} size=0x{size:x} data=0x{data:08x} payload_len={} nonzero={}{}",
         payload_len,
@@ -7703,7 +8158,10 @@ fn parse_env_usize(raw: &str) -> Option<usize> {
     }
     raw.strip_prefix("0x")
         .or_else(|| raw.strip_prefix("0X"))
-        .map_or_else(|| raw.parse().ok(), |hex| usize::from_str_radix(hex, 16).ok())
+        .map_or_else(
+            || raw.parse().ok(),
+            |hex| usize::from_str_radix(hex, 16).ok(),
+        )
 }
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -7897,6 +8355,11 @@ mod tests {
             "_ZSt11_Hash_bytesPKvjj",
             "_ZN8WebTokenC2ERKS_",
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            "_ZN11AppPlatform9loadImageER11TextureDataRKSs",
+            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
+            "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs",
+            "_ZN10ImageUtils17loadImageFromFileER11TextureDataRKSs",
+            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai",
             "_ZN13GeometryGroup11getGeometryERKSs",
             "_ZN13GeometryGroup14tryGetGeometryERKSs",
             "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
@@ -9710,6 +10173,83 @@ mod tests {
     }
 
     #[test]
+    fn minecraft_image_candidates_include_images_root() {
+        let candidates = image_asset_entry_candidates("gui/title.png", ImageFormat::Png);
+
+        assert!(candidates.contains(&"assets/images/gui/title.png".to_string()));
+        assert!(candidates.contains(&"assets/gui/title.png".to_string()));
+    }
+
+    #[test]
+    fn dispatches_minecraft_app_platform_load_png_from_apk_asset() {
+        let apk_bytes =
+            stored_zip_with_one_file("assets/images/gui/title.png", one_by_one_rgba_png());
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x8000).unwrap();
+
+        let path = 0x1100;
+        let texture_data = 0x1200;
+        let mut hle = HleRuntime::new(0, 0x3000, 0x5000);
+        hle.set_apk_bytes(apk_bytes);
+        hle.store_cxx_string_bytes(&mut memory, path, b"gui/title.png", 13)
+            .unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x4444);
+        cpu.set_reg(1, texture_data);
+        cpu.set_reg(2, path);
+        hle.dispatch(
+            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+        assert_eq!(memory.load32(texture_data).unwrap(), 1);
+        assert_eq!(memory.load32(texture_data + 4).unwrap(), 1);
+        assert_eq!(
+            load_test_cxx_string(&mut memory, texture_data + 8),
+            [0x11, 0x22, 0x33, 0x44]
+        );
+    }
+
+    #[test]
+    fn dispatches_minecraft_image_utils_load_image_from_memory() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x8000).unwrap();
+        memory.load_bytes(0x1400, one_by_one_rgba_png()).unwrap();
+
+        let texture_data = 0x1200;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, texture_data);
+        cpu.set_reg(1, 0x1400);
+        cpu.set_reg(2, one_by_one_rgba_png().len() as u32);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x5000);
+
+        hle.dispatch(
+            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load32(texture_data).unwrap(), 1);
+        assert_eq!(memory.load32(texture_data + 4).unwrap(), 1);
+        assert_eq!(
+            load_test_cxx_string(&mut memory, texture_data + 8),
+            [0x11, 0x22, 0x33, 0x44]
+        );
+    }
+
+    #[test]
     fn dispatches_minecraft_texture_group_is_loaded_facade() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
@@ -10430,6 +10970,16 @@ mod tests {
                 .map(|idx| self.load8(addr.wrapping_add(idx as u32)).unwrap())
                 .collect()
         }
+    }
+
+    fn one_by_one_rgba_png() -> &'static [u8] {
+        &[
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x78,
+            0x9c, 0x63, 0x10, 0x54, 0x32, 0x76, 0x01, 0x00, 0x01, 0x59, 0x00, 0xab, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0x00, 0x00, 0x00, 0x00,
+        ]
     }
 
     fn stored_zip_with_one_file(name: &str, contents: &[u8]) -> Vec<u8> {
