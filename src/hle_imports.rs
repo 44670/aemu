@@ -195,6 +195,7 @@ const CXX_STRING_NPOS: u32 = u32::MAX;
 const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MCPE_RESOURCE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static HLE_SCANF_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
 const GLES_EVENT_LIMIT: usize = 65_536;
@@ -356,6 +357,7 @@ pub struct HleRuntime {
     clock_ns: u64,
     fake_geometries: Vec<NamedGuestObject>,
     fake_texture_pairs: Vec<NamedGuestObject>,
+    resource_texture_aliases: Option<Vec<(String, String)>>,
     cxx_string_recycling: bool,
     input_pointer: HlePointer,
     input_pointer_ids: Option<u32>,
@@ -893,6 +895,7 @@ impl HleRuntime {
             clock_ns: 0,
             fake_geometries: Vec::new(),
             fake_texture_pairs: Vec::new(),
+            resource_texture_aliases: None,
             cxx_string_recycling: false,
             input_pointer: HlePointer::default(),
             input_pointer_ids: None,
@@ -908,10 +911,12 @@ impl HleRuntime {
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
+        self.resource_texture_aliases = None;
     }
 
     pub fn set_apk_bytes(&mut self, apk_bytes: Vec<u8>) {
         self.apk_bytes = Some(apk_bytes);
+        self.resource_texture_aliases = None;
     }
 
     pub fn set_unwind_tables(&mut self, unwind_tables: Vec<HleUnwindTable>) {
@@ -1085,6 +1090,25 @@ impl HleRuntime {
             "__aeabi_uidiv" => self.aeabi_uidiv(cpu),
             "__aeabi_idivmod" => self.aeabi_idivmod(cpu),
             "__aeabi_uidivmod" => self.aeabi_uidivmod(cpu),
+            "__aeabi_ldivmod" => self.aeabi_ldivmod(cpu),
+            "__aeabi_uldivmod" => self.aeabi_uldivmod(cpu),
+            "__aeabi_idiv0" | "__aeabi_ldiv0" => Ok(self.return32(cpu, 0)),
+            "__aeabi_i2d" => self.aeabi_i2d(cpu),
+            "__aeabi_l2f" => self.aeabi_l2f(cpu),
+            "__aeabi_l2d" => self.aeabi_l2d(cpu),
+            "__aeabi_ul2f" => self.aeabi_ul2f(cpu),
+            "__aeabi_ul2d" => self.aeabi_ul2d(cpu),
+            "__aeabi_f2lz" => self.aeabi_f2lz(cpu),
+            "__aeabi_d2iz" => self.aeabi_d2iz(cpu),
+            "__aeabi_d2lz" => self.aeabi_d2lz(cpu),
+            "__aeabi_d2ulz" => self.aeabi_d2ulz(cpu),
+            "__aeabi_dadd" => self.aeabi_dadd(cpu),
+            "__aeabi_dsub" => self.aeabi_dsub(cpu),
+            "__aeabi_dmul" => self.aeabi_dmul(cpu),
+            "__aeabi_dcmplt" => self.aeabi_dcmplt(cpu),
+            "__aeabi_dcmpge" => self.aeabi_dcmpge(cpu),
+            "__aeabi_llsl" => self.aeabi_llsl(cpu),
+            "__aeabi_llsr" => self.aeabi_llsr(cpu),
             "__divsi3" => self.aeabi_idiv(cpu),
             "__udivsi3" => self.aeabi_uidiv(cpu),
             "__modsi3" => self.modsi3(cpu),
@@ -1674,6 +1698,12 @@ impl HleRuntime {
         let ptr = cpu.reg(0);
         let endptr = cpu.reg(1);
         let parsed = parse_c_float(memory, ptr)?;
+        trace_hle_scanf(format_args!(
+            "strtod input={:?} value={} consumed={}",
+            trace_c_string_lossy(memory, ptr, 96),
+            parsed.value,
+            parsed.consumed
+        ));
         if endptr != 0 {
             store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
         }
@@ -1684,6 +1714,12 @@ impl HleRuntime {
         let ptr = cpu.reg(0);
         let endptr = cpu.reg(1);
         let parsed = parse_c_float(memory, ptr)?;
+        trace_hle_scanf(format_args!(
+            "strtof input={:?} value={} consumed={}",
+            trace_c_string_lossy(memory, ptr, 96),
+            parsed.value,
+            parsed.consumed
+        ));
         if endptr != 0 {
             store32(memory, endptr, ptr.wrapping_add(parsed.consumed))?;
         }
@@ -1734,6 +1770,11 @@ impl HleRuntime {
         let input = load_c_string_bytes(memory, cpu.reg(0), 4096)?;
         let format = load_c_string_bytes(memory, cpu.reg(1), 512)?;
         let assigned = scan_input(memory, cpu, &input, &format)?;
+        trace_hle_scanf(format_args!(
+            "sscanf input={:?} format={:?} assigned={assigned}",
+            String::from_utf8_lossy(&input),
+            String::from_utf8_lossy(&format)
+        ));
         Ok(self.return32(cpu, assigned))
     }
 
@@ -1923,6 +1964,108 @@ impl HleRuntime {
         };
         cpu.set_reg(1, r);
         Ok(self.return32(cpu, q))
+    }
+
+    fn aeabi_ldivmod(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = i64_arg(cpu, 0);
+        let rhs = i64_arg(cpu, 2);
+        let (q, r) = if rhs == 0 {
+            (0, 0)
+        } else {
+            (lhs.wrapping_div(rhs), lhs.wrapping_rem(rhs))
+        };
+        cpu.set_reg(2, r as u64 as u32);
+        cpu.set_reg(3, ((r as u64) >> 32) as u32);
+        Ok(self.return_u64(cpu, q as u64))
+    }
+
+    fn aeabi_uldivmod(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = u64_arg(cpu, 0);
+        let rhs = u64_arg(cpu, 2);
+        let (q, r) = if rhs == 0 {
+            (0, 0)
+        } else {
+            (lhs / rhs, lhs % rhs)
+        };
+        cpu.set_reg(2, r as u32);
+        cpu.set_reg(3, (r >> 32) as u32);
+        Ok(self.return_u64(cpu, q))
+    }
+
+    fn aeabi_i2d(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f64(cpu, (cpu.reg(0) as i32) as f64))
+    }
+
+    fn aeabi_l2f(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f32(cpu, i64_arg(cpu, 0) as f32))
+    }
+
+    fn aeabi_l2d(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f64(cpu, i64_arg(cpu, 0) as f64))
+    }
+
+    fn aeabi_ul2f(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f32(cpu, u64_arg(cpu, 0) as f32))
+    }
+
+    fn aeabi_ul2d(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f64(cpu, u64_arg(cpu, 0) as f64))
+    }
+
+    fn aeabi_f2lz(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_u64(cpu, (f32_arg(cpu, 0) as i64) as u64))
+    }
+
+    fn aeabi_d2iz(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return32(cpu, (f64_arg(cpu, 0) as i32) as u32))
+    }
+
+    fn aeabi_d2lz(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_u64(cpu, (f64_arg(cpu, 0) as i64) as u64))
+    }
+
+    fn aeabi_d2ulz(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_u64(cpu, f64_arg(cpu, 0) as u64))
+    }
+
+    fn aeabi_dadd(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f64(cpu, f64_arg(cpu, 0) + f64_arg(cpu, 2)))
+    }
+
+    fn aeabi_dsub(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f64(cpu, f64_arg(cpu, 0) - f64_arg(cpu, 2)))
+    }
+
+    fn aeabi_dmul(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return_f64(cpu, f64_arg(cpu, 0) * f64_arg(cpu, 2)))
+    }
+
+    fn aeabi_dcmplt(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return32(cpu, u32::from(f64_arg(cpu, 0) < f64_arg(cpu, 2))))
+    }
+
+    fn aeabi_dcmpge(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        Ok(self.return32(cpu, u32::from(f64_arg(cpu, 0) >= f64_arg(cpu, 2))))
+    }
+
+    fn aeabi_llsl(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let shift = cpu.reg(2);
+        let value = if shift >= 64 {
+            0
+        } else {
+            u64_arg(cpu, 0) << shift
+        };
+        Ok(self.return_u64(cpu, value))
+    }
+
+    fn aeabi_llsr(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let shift = cpu.reg(2);
+        let value = if shift >= 64 {
+            0
+        } else {
+            u64_arg(cpu, 0) >> shift
+        };
+        Ok(self.return_u64(cpu, value))
     }
 
     fn modsi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
@@ -3060,7 +3203,7 @@ impl HleRuntime {
         let decoded = location
             .as_ref()
             .ok()
-            .and_then(|location| self.load_png_texture_for_resource(location));
+            .and_then(|location| self.load_texture_for_resource(location));
         let (width, height, pixels, source) = match decoded {
             Some(texture) => (texture.width, texture.height, texture.rgba, texture.source),
             None => {
@@ -3786,11 +3929,21 @@ impl HleRuntime {
         read_zip_entry(apk_path, entry_name).map_err(|err| err.to_string())
     }
 
-    fn load_png_texture_for_resource(
-        &self,
+    fn load_texture_for_resource(
+        &mut self,
         location: &ResourceLocationDebug,
     ) -> Option<DecodedTexture> {
+        let mut candidates = Vec::new();
+        if let Some(alias) = self.resource_texture_alias(&location.path) {
+            for entry_name in texture_alias_entry_candidates(&alias) {
+                push_unique_string(&mut candidates, entry_name);
+            }
+        }
         for entry_name in texture_asset_entry_candidates(location) {
+            push_unique_string(&mut candidates, entry_name);
+        }
+
+        for entry_name in candidates {
             let bytes = match self.read_apk_asset_entry(&entry_name) {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -3801,14 +3954,10 @@ impl HleRuntime {
                     continue;
                 }
             };
-            match decode_png_rgba(&bytes) {
-                Ok((width, height, rgba)) => {
-                    return Some(DecodedTexture {
-                        width,
-                        height,
-                        rgba,
-                        source: entry_name,
-                    });
+            match decode_image_rgba(&entry_name, &bytes, ImageFormat::Any) {
+                Ok(mut texture) => {
+                    texture.source = entry_name;
+                    return Some(texture);
                 }
                 Err(err) => {
                     trace_mcpe_resource(format_args!(
@@ -3819,6 +3968,59 @@ impl HleRuntime {
             }
         }
         None
+    }
+
+    fn resource_texture_alias(&mut self, key: &str) -> Option<String> {
+        if key == "atlas.terrain" {
+            return Some("assets/images/terrain-atlas_mip3.tga".to_string());
+        }
+        self.resource_texture_aliases()
+            .iter()
+            .find_map(|(alias_key, path)| (alias_key == key).then(|| path.clone()))
+    }
+
+    fn resource_texture_aliases(&mut self) -> &[(String, String)] {
+        if self.resource_texture_aliases.is_none() {
+            self.resource_texture_aliases = Some(self.load_resource_texture_aliases());
+        }
+        self.resource_texture_aliases.as_deref().unwrap_or(&[])
+    }
+
+    fn load_resource_texture_aliases(&self) -> Vec<(String, String)> {
+        let entry_name = "assets/resourcepacks/vanilla/resources.json";
+        let bytes = match self.read_apk_asset_entry(entry_name) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                trace_mcpe_resource(format_args!(
+                    "resource texture alias miss {entry_name:?}: {err}"
+                ));
+                return Vec::new();
+            }
+        };
+        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => value,
+            Err(err) => {
+                trace_mcpe_resource(format_args!(
+                    "resource texture alias decode failed {entry_name:?}: {err}"
+                ));
+                return Vec::new();
+            }
+        };
+        let Some(textures) = value
+            .get("resources")
+            .and_then(|resources| resources.get("textures"))
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Vec::new();
+        };
+        let mut aliases = Vec::with_capacity(textures.len());
+        for (key, path) in textures {
+            if let Some(path) = path.as_str() {
+                aliases.push((key.clone(), path.to_string()));
+            }
+        }
+        aliases.sort_by(|left, right| left.0.cmp(&right.0));
+        aliases
     }
 
     fn load_image_texture_for_path(
@@ -5205,6 +5407,26 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "__aeabi_uidiv"
                 | "__aeabi_idivmod"
                 | "__aeabi_uidivmod"
+                | "__aeabi_ldivmod"
+                | "__aeabi_uldivmod"
+                | "__aeabi_idiv0"
+                | "__aeabi_ldiv0"
+                | "__aeabi_i2d"
+                | "__aeabi_l2f"
+                | "__aeabi_l2d"
+                | "__aeabi_ul2f"
+                | "__aeabi_ul2d"
+                | "__aeabi_f2lz"
+                | "__aeabi_d2iz"
+                | "__aeabi_d2lz"
+                | "__aeabi_d2ulz"
+                | "__aeabi_dadd"
+                | "__aeabi_dsub"
+                | "__aeabi_dmul"
+                | "__aeabi_dcmplt"
+                | "__aeabi_dcmpge"
+                | "__aeabi_llsl"
+                | "__aeabi_llsr"
                 | "__divsi3"
                 | "__udivsi3"
                 | "__modsi3"
@@ -6090,13 +6312,13 @@ fn texture_asset_entry_candidates(location: &ResourceLocationDebug) -> Vec<Strin
     if let Some(stripped) = path.strip_prefix("images/") {
         push_unique_string(&mut stems, stripped.to_string());
     }
+    for dotted in dotted_resource_path_stems(&path) {
+        push_unique_string(&mut stems, dotted);
+    }
 
     let mut candidates = Vec::new();
     for stem in stems {
-        let has_extension = stem
-            .rsplit_once('/')
-            .map_or(stem.as_str(), |(_, name)| name)
-            .contains('.');
+        let has_extension = has_known_image_extension(&stem);
         if has_extension {
             push_unique_string(&mut candidates, format!("assets/images/{stem}"));
             push_unique_string(
@@ -6105,21 +6327,57 @@ fn texture_asset_entry_candidates(location: &ResourceLocationDebug) -> Vec<Strin
             );
             push_unique_string(&mut candidates, format!("assets/{stem}"));
         } else {
-            push_unique_string(&mut candidates, format!("assets/images/{stem}.png"));
-            push_unique_string(&mut candidates, format!("assets/images/{stem}"));
-            push_unique_string(
-                &mut candidates,
-                format!("assets/resourcepacks/vanilla/images/{stem}.png"),
-            );
-            push_unique_string(
-                &mut candidates,
-                format!("assets/resourcepacks/vanilla/images/{stem}"),
-            );
-            push_unique_string(&mut candidates, format!("assets/{stem}.png"));
-            push_unique_string(&mut candidates, format!("assets/{stem}"));
+            for name in image_stem_names(&stem, ImageFormat::Any) {
+                push_unique_string(&mut candidates, format!("assets/images/{name}"));
+                push_unique_string(
+                    &mut candidates,
+                    format!("assets/resourcepacks/vanilla/images/{name}"),
+                );
+                push_unique_string(&mut candidates, format!("assets/{name}"));
+            }
         }
     }
     candidates
+}
+
+fn texture_alias_entry_candidates(alias: &str) -> Vec<String> {
+    let raw = alias.replace('\\', "/").trim_start_matches('/').to_string();
+    let mut candidates = Vec::new();
+    if raw.starts_with("assets/") {
+        for name in image_stem_names(&raw, ImageFormat::Any) {
+            push_unique_string(&mut candidates, name);
+        }
+    }
+
+    let stem = normalize_resource_path(&raw);
+    for name in image_stem_names(&stem, ImageFormat::Any) {
+        push_unique_string(
+            &mut candidates,
+            format!("assets/resourcepacks/vanilla/images/{name}"),
+        );
+        push_unique_string(&mut candidates, format!("assets/images/{name}"));
+        push_unique_string(&mut candidates, format!("assets/{name}"));
+    }
+    candidates
+}
+
+fn dotted_resource_path_stems(path: &str) -> Vec<String> {
+    let mut stems = Vec::new();
+    if let Some(block) = path.strip_prefix("block.") {
+        push_unique_string(&mut stems, format!("blocks/{}", block.replace('.', "_")));
+    }
+    if let Some(item) = path.strip_prefix("item.") {
+        push_unique_string(&mut stems, format!("items/{}", item.replace('.', "_")));
+        push_unique_string(&mut stems, format!("item/{}", item.replace('.', "_")));
+    }
+    if path == "atlas.compass" {
+        push_unique_string(&mut stems, "compass-atlas".to_string());
+    } else if path == "atlas.watch" {
+        push_unique_string(&mut stems, "watch-atlas".to_string());
+    } else if path == "atlas.terrain" {
+        push_unique_string(&mut stems, "terrain-atlas_mip3".to_string());
+    }
+    stems
 }
 
 fn image_format_for_loader(name: &str) -> ImageFormat {
@@ -6170,10 +6428,7 @@ fn image_asset_entry_candidates(path: &str, format: ImageFormat) -> Vec<String> 
 }
 
 fn image_stem_names(stem: &str, format: ImageFormat) -> Vec<String> {
-    let has_extension = stem
-        .rsplit_once('/')
-        .map_or(stem, |(_, name)| name)
-        .contains('.');
+    let has_extension = has_known_image_extension(stem);
     let mut names = Vec::new();
     push_unique_string(&mut names, stem.to_string());
     if !has_extension {
@@ -6193,6 +6448,17 @@ fn image_stem_names(stem: &str, format: ImageFormat) -> Vec<String> {
         }
     }
     names
+}
+
+fn has_known_image_extension(path: &str) -> bool {
+    let lower = path
+        .rsplit_once('/')
+        .map_or(path, |(_, name)| name)
+        .to_ascii_lowercase();
+    lower.ends_with(".png")
+        || lower.ends_with(".tga")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
 }
 
 fn normalize_resource_path(path: &str) -> String {
@@ -7239,6 +7505,34 @@ fn trace_hle_string_compare(
     );
 }
 
+fn trace_hle_scanf(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_HLE_SCANF").is_none() {
+        return;
+    }
+    let text = args.to_string();
+    if let Some(needle) = std::env::var("AEMU_TRACE_HLE_SCANF_CONTAINS")
+        .ok()
+        .filter(|needle| !needle.is_empty())
+    {
+        if !text.contains(&needle) {
+            return;
+        }
+    }
+    let count = HLE_SCANF_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let limit = std::env::var("AEMU_TRACE_HLE_SCANF_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(200);
+    if count >= limit {
+        return;
+    }
+    eprintln!("HLE_SCANF {text}");
+}
+
+fn trace_c_string_lossy<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> String {
+    load_c_string(memory, ptr, max_len).unwrap_or_else(|err| format!("<{err}>"))
+}
+
 fn format_trace_bytes(bytes: &[u8]) -> String {
     let mut out = String::new();
     out.push('"');
@@ -7567,6 +7861,16 @@ fn f64_arg(cpu: &Cpu, reg: usize) -> f64 {
     let lo = u64::from(cpu.reg(reg));
     let hi = u64::from(cpu.reg(reg + 1));
     f64::from_bits(lo | (hi << 32))
+}
+
+fn u64_arg(cpu: &Cpu, reg: usize) -> u64 {
+    let lo = u64::from(cpu.reg(reg));
+    let hi = u64::from(cpu.reg(reg + 1));
+    lo | (hi << 32)
+}
+
+fn i64_arg(cpu: &Cpu, reg: usize) -> i64 {
+    u64_arg(cpu, reg) as i64
 }
 
 fn i32_to_u32(value: i32) -> u32 {
@@ -8334,6 +8638,19 @@ mod tests {
         let data = memory.load32(string).unwrap();
         let len = memory.load32(data - CXX_STRING_REP_HEADER_SIZE).unwrap();
         memory.load_bytes_for_test(data, len as usize).to_vec()
+    }
+
+    fn set_reg64(cpu: &mut Cpu, reg: usize, value: u64) {
+        cpu.set_reg(reg, value as u32);
+        cpu.set_reg(reg + 1, (value >> 32) as u32);
+    }
+
+    fn reg64(cpu: &Cpu, reg: usize) -> u64 {
+        u64::from(cpu.reg(reg)) | (u64::from(cpu.reg(reg + 1)) << 32)
+    }
+
+    fn set_f64_regs(cpu: &mut Cpu, reg: usize, value: f64) {
+        set_reg64(cpu, reg, value.to_bits());
     }
 
     #[test]
@@ -9359,6 +9676,117 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_aeabi_numeric_helpers() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        for name in [
+            "__aeabi_ldivmod",
+            "__aeabi_uldivmod",
+            "__aeabi_i2d",
+            "__aeabi_l2f",
+            "__aeabi_l2d",
+            "__aeabi_ul2f",
+            "__aeabi_ul2d",
+            "__aeabi_f2lz",
+            "__aeabi_d2iz",
+            "__aeabi_d2lz",
+            "__aeabi_d2ulz",
+            "__aeabi_dadd",
+            "__aeabi_dsub",
+            "__aeabi_dmul",
+            "__aeabi_dcmplt",
+            "__aeabi_dcmpge",
+            "__aeabi_llsl",
+            "__aeabi_llsr",
+        ] {
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Implemented
+            );
+        }
+
+        set_reg64(&mut cpu, 0, (-100i64) as u64);
+        set_reg64(&mut cpu, 2, 9);
+        hle.dispatch("__aeabi_ldivmod", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(reg64(&cpu, 0) as i64, -11);
+        assert_eq!(reg64(&cpu, 2) as i64, -1);
+
+        set_reg64(&mut cpu, 0, 100);
+        set_reg64(&mut cpu, 2, 9);
+        hle.dispatch("__aeabi_uldivmod", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(reg64(&cpu, 0), 11);
+        assert_eq!(reg64(&cpu, 2), 1);
+
+        cpu.set_reg(0, (-42i32) as u32);
+        hle.dispatch("__aeabi_i2d", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), -42.0);
+
+        set_reg64(&mut cpu, 0, (-123i64) as u64);
+        hle.dispatch("__aeabi_l2f", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), -123.0);
+
+        set_reg64(&mut cpu, 0, 123);
+        hle.dispatch("__aeabi_ul2d", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), 123.0);
+
+        cpu.set_reg(0, (-12.75f32).to_bits());
+        hle.dispatch("__aeabi_f2lz", &mut cpu, &mut memory).unwrap();
+        assert_eq!(reg64(&cpu, 0) as i64, -12);
+
+        set_f64_regs(&mut cpu, 0, 12.75);
+        hle.dispatch("__aeabi_d2iz", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 12);
+
+        set_f64_regs(&mut cpu, 0, -12.75);
+        hle.dispatch("__aeabi_d2lz", &mut cpu, &mut memory).unwrap();
+        assert_eq!(reg64(&cpu, 0) as i64, -12);
+
+        set_f64_regs(&mut cpu, 0, 12.75);
+        hle.dispatch("__aeabi_d2ulz", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(reg64(&cpu, 0), 12);
+
+        set_f64_regs(&mut cpu, 0, 1.5);
+        set_f64_regs(&mut cpu, 2, 2.25);
+        hle.dispatch("__aeabi_dadd", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), 3.75);
+
+        set_f64_regs(&mut cpu, 0, 5.0);
+        set_f64_regs(&mut cpu, 2, 2.0);
+        hle.dispatch("__aeabi_dmul", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), 10.0);
+
+        set_f64_regs(&mut cpu, 0, 3.0);
+        set_f64_regs(&mut cpu, 2, 4.0);
+        hle.dispatch("__aeabi_dcmplt", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        set_f64_regs(&mut cpu, 0, 4.0);
+        set_f64_regs(&mut cpu, 2, 4.0);
+        hle.dispatch("__aeabi_dcmpge", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        set_reg64(&mut cpu, 0, 0x0000_0001_0000_0001);
+        cpu.set_reg(2, 4);
+        hle.dispatch("__aeabi_llsl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(reg64(&cpu, 0), 0x0000_0010_0000_0010);
+
+        set_reg64(&mut cpu, 0, 0x8000_0000_0000_0000);
+        cpu.set_reg(2, 63);
+        hle.dispatch("__aeabi_llsr", &mut cpu, &mut memory).unwrap();
+        assert_eq!(reg64(&cpu, 0), 1);
+    }
+
+    #[test]
     fn dispatches_sysconf_for_android_runtime_values() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
@@ -10173,6 +10601,93 @@ mod tests {
     }
 
     #[test]
+    fn minecraft_texture_candidates_include_dotted_resource_names() {
+        let candidates = texture_asset_entry_candidates(&ResourceLocationDebug {
+            path: "block.sapling.oak".to_string(),
+            package: "InUserPackage".to_string(),
+        });
+
+        assert!(
+            candidates.contains(
+                &"assets/resourcepacks/vanilla/images/blocks/sapling_oak.png".to_string()
+            )
+        );
+        assert!(
+            candidates.contains(
+                &"assets/resourcepacks/vanilla/images/blocks/sapling_oak.tga".to_string()
+            )
+        );
+
+        let atlas = texture_asset_entry_candidates(&ResourceLocationDebug {
+            path: "atlas.terrain".to_string(),
+            package: "InUserPackage".to_string(),
+        });
+        assert!(atlas.contains(&"assets/images/terrain-atlas_mip3.tga".to_string()));
+    }
+
+    #[test]
+    fn minecraft_texture_alias_candidates_try_expected_archive_entry_first() {
+        let candidates = texture_alias_entry_candidates("images/blocks/sapling_oak.png");
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some("assets/resourcepacks/vanilla/images/blocks/sapling_oak.png")
+        );
+
+        let app_candidates = texture_alias_entry_candidates("assets/images/terrain-atlas_mip3.tga");
+        assert_eq!(
+            app_candidates.first().map(String::as_str),
+            Some("assets/images/terrain-atlas_mip3.tga")
+        );
+    }
+
+    #[test]
+    fn dispatches_minecraft_texture_group_loads_resourcepack_alias() {
+        let apk_bytes = stored_zip_with_files(&[
+            (
+                "assets/resourcepacks/vanilla/resources.json",
+                br#"{"resources":{"textures":{"block.sapling.oak":"images/blocks/sapling_oak.png"}}}"#,
+            ),
+            (
+                "assets/resourcepacks/vanilla/images/blocks/sapling_oak.png",
+                one_by_one_rgba_png(),
+            ),
+        ]);
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x50000).unwrap();
+
+        let resource = 0x1200;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(1, resource);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x48000);
+        hle.set_apk_bytes(apk_bytes);
+        hle.store_cxx_string_bytes(&mut memory, resource, b"block.sapling.oak", 17)
+            .unwrap();
+        hle.store_cxx_string_bytes(&mut memory, resource + 4, b"InUserPackage", 13)
+            .unwrap();
+
+        hle.dispatch(
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        let pair = cpu.reg(0);
+        assert_eq!(memory.load32(pair).unwrap(), 1);
+        assert_eq!(memory.load32(pair + 0x04).unwrap(), 1);
+        let pixels = memory.load32(pair + 0x40).unwrap();
+        assert_eq!(
+            memory.load32(pixels - CXX_STRING_REP_HEADER_SIZE).unwrap(),
+            4
+        );
+        assert_eq!(memory.load32(pixels - 8).unwrap(), 4);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
     fn minecraft_image_candidates_include_images_root() {
         let candidates = image_asset_entry_candidates("gui/title.png", ImageFormat::Png);
 
@@ -10983,49 +11498,59 @@ mod tests {
     }
 
     fn stored_zip_with_one_file(name: &str, contents: &[u8]) -> Vec<u8> {
-        let name = name.as_bytes();
+        stored_zip_with_files(&[(name, contents)])
+    }
+
+    fn stored_zip_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        let local_offset = bytes.len() as u32;
-        push_u32(&mut bytes, 0x0403_4b50);
-        push_u16(&mut bytes, 20);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, contents.len() as u32);
-        push_u32(&mut bytes, contents.len() as u32);
-        push_u16(&mut bytes, name.len() as u16);
-        push_u16(&mut bytes, 0);
-        bytes.extend_from_slice(name);
-        bytes.extend_from_slice(contents);
+        let mut local_offsets = Vec::with_capacity(files.len());
+        for (name, contents) in files {
+            let name = name.as_bytes();
+            local_offsets.push(bytes.len() as u32);
+            push_u32(&mut bytes, 0x0403_4b50);
+            push_u16(&mut bytes, 20);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u32(&mut bytes, 0);
+            push_u32(&mut bytes, contents.len() as u32);
+            push_u32(&mut bytes, contents.len() as u32);
+            push_u16(&mut bytes, name.len() as u16);
+            push_u16(&mut bytes, 0);
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(contents);
+        }
 
         let central_offset = bytes.len() as u32;
-        push_u32(&mut bytes, 0x0201_4b50);
-        push_u16(&mut bytes, 20);
-        push_u16(&mut bytes, 20);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, contents.len() as u32);
-        push_u32(&mut bytes, contents.len() as u32);
-        push_u16(&mut bytes, name.len() as u16);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 0);
-        push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, local_offset);
-        bytes.extend_from_slice(name);
+        for ((name, contents), local_offset) in files.iter().zip(local_offsets) {
+            let name = name.as_bytes();
+            push_u32(&mut bytes, 0x0201_4b50);
+            push_u16(&mut bytes, 20);
+            push_u16(&mut bytes, 20);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u32(&mut bytes, 0);
+            push_u32(&mut bytes, contents.len() as u32);
+            push_u32(&mut bytes, contents.len() as u32);
+            push_u16(&mut bytes, name.len() as u16);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u16(&mut bytes, 0);
+            push_u32(&mut bytes, 0);
+            push_u32(&mut bytes, local_offset);
+            bytes.extend_from_slice(name);
+        }
 
         let central_size = bytes.len() as u32 - central_offset;
         push_u32(&mut bytes, 0x0605_4b50);
         push_u16(&mut bytes, 0);
         push_u16(&mut bytes, 0);
-        push_u16(&mut bytes, 1);
-        push_u16(&mut bytes, 1);
+        push_u16(&mut bytes, files.len() as u16);
+        push_u16(&mut bytes, files.len() as u16);
         push_u32(&mut bytes, central_size);
         push_u32(&mut bytes, central_offset);
         push_u16(&mut bytes, 0);

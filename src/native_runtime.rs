@@ -389,7 +389,10 @@ impl NativeRuntime {
             .checked_add(ERRNO_OFFSET)
             .ok_or(NativeRuntimeError::AddressOverflow)?;
         let mut hle = HleRuntime::new(errno_addr, config.heap_base, config.heap_size as u32);
-        hle.set_apk_path(link.apk_path.clone());
+        match std::fs::read(&link.apk_path) {
+            Ok(bytes) => hle.set_apk_bytes(bytes),
+            Err(_) => hle.set_apk_path(link.apk_path.clone()),
+        }
         hle.set_unwind_tables(collect_unwind_tables(&link));
 
         let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
