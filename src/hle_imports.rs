@@ -49,6 +49,7 @@ const AINPUT_SOURCE_TOUCHSCREEN: u32 = 0x0000_1002;
 const AMOTION_EVENT_ACTION_DOWN: u32 = 0;
 const AMOTION_EVENT_ACTION_UP: u32 = 1;
 const AMOTION_EVENT_ACTION_MOVE: u32 = 2;
+const MINECRAFT_TOUCH_INPUT_MODE: i32 = 2;
 const ARMV7_NEON_HWCAP: u32 = HWCAP_SWP
     | HWCAP_HALF
     | HWCAP_THUMB
@@ -195,6 +196,7 @@ const CXX_STRING_NPOS: u32 = u32::MAX;
 const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MCPE_RESOURCE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MCPE_INPUT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static HLE_SCANF_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
@@ -364,14 +366,18 @@ pub struct HleRuntime {
     input_poll_source: Option<u32>,
     pending_input_events: VecDeque<HleInputEvent>,
     active_input_events: Vec<HleInputEvent>,
+    minecraft_input_events: VecDeque<HleMinecraftInputEvent>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct HlePointer {
     id: i64,
     down: bool,
+    was_pressed: bool,
+    was_released: bool,
     pressed_this_update: bool,
     released_this_update: bool,
+    dirty_since_commit: bool,
     x: f32,
     y: f32,
     dx: f32,
@@ -417,6 +423,14 @@ struct HleInputEvent {
     pointer_id: i32,
     x: f32,
     y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HleMinecraftInputEvent {
+    Button { id: i16, state: u8, repeat: bool },
+    PointerLocation { mode: i32, x: i16, y: i16 },
+    Direction { id: i16, x: f32, y: f32 },
+    Vector { id: i16, x: f32, y: f32, z: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -902,6 +916,7 @@ impl HleRuntime {
             input_poll_source: None,
             pending_input_events: VecDeque::new(),
             active_input_events: Vec::new(),
+            minecraft_input_events: VecDeque::new(),
         }
     }
 
@@ -967,9 +982,11 @@ impl HleRuntime {
         self.input_pointer.dx = x - old_x;
         self.input_pointer.dy = y - old_y;
         self.input_pointer.pressure = pressure;
+        self.input_pointer.dirty_since_commit = true;
         match phase {
             HlePointerPhase::Down => {
                 if !self.input_pointer.down {
+                    self.input_pointer.was_pressed = true;
                     self.input_pointer.pressed_this_update = true;
                 }
                 self.input_pointer.down = true;
@@ -977,6 +994,7 @@ impl HleRuntime {
             }
             HlePointerPhase::Up => {
                 if self.input_pointer.down {
+                    self.input_pointer.was_released = true;
                     self.input_pointer.released_this_update = true;
                 }
                 self.input_pointer.down = false;
@@ -984,6 +1002,7 @@ impl HleRuntime {
             HlePointerPhase::Move => {}
         }
         if queue_android_input {
+            self.enqueue_minecraft_pointer_location(x, y);
             let action = match phase {
                 HlePointerPhase::Down => AMOTION_EVENT_ACTION_DOWN,
                 HlePointerPhase::Up => AMOTION_EVENT_ACTION_UP,
@@ -1003,6 +1022,16 @@ impl HleRuntime {
                 self.alooper_events.push_back(source);
             }
         }
+    }
+
+    fn enqueue_minecraft_pointer_location(&mut self, x: f32, y: f32) {
+        let event = HleMinecraftInputEvent::PointerLocation {
+            mode: MINECRAFT_TOUCH_INPUT_MODE,
+            x: minecraft_pointer_coord(x),
+            y: minecraft_pointer_coord(y),
+        };
+        trace_mcpe_input(format_args!("enqueue_host_pointer {event:?}"));
+        self.minecraft_input_events.push_back(event);
     }
 
     pub(crate) fn current_pthread(&self) -> u32 {
@@ -1259,9 +1288,11 @@ impl HleRuntime {
             "_ZN11MenuPointer10setPressedEb" => {
                 let pressed = cpu.reg(0) != 0;
                 if pressed && !self.input_pointer.down {
+                    self.input_pointer.was_pressed = true;
                     self.input_pointer.pressed_this_update = true;
                     self.input_pointer.released_this_update = false;
                 } else if !pressed && self.input_pointer.down {
+                    self.input_pointer.was_released = true;
                     self.input_pointer.released_this_update = true;
                     self.input_pointer.pressed_this_update = false;
                 }
@@ -1272,12 +1303,29 @@ impl HleRuntime {
             "_ZN11MouseDevice4feedEccss" | "_ZN11MouseDevice4feedEccssss" => {
                 self.minecraft_mouse_device_feed(cpu, memory)
             }
+            "_ZN15InputEventQueue9nextEventER10InputEvent" => {
+                self.minecraft_input_queue_next_event(cpu, memory)
+            }
+            "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb" => {
+                self.minecraft_input_queue_enqueue_button(cpu)
+            }
+            "_ZN15InputEventQueue28enqueueButtonPressAndReleaseEs" => {
+                self.minecraft_input_queue_enqueue_button_press_and_release(cpu)
+            }
+            "_ZN15InputEventQueue22enqueuePointerLocationE9InputModess" => {
+                self.minecraft_input_queue_enqueue_pointer_location(cpu)
+            }
+            "_ZN15InputEventQueue16enqueueDirectionE11DirectionIdff" => {
+                self.minecraft_input_queue_enqueue_direction(cpu)
+            }
+            "_ZN15InputEventQueue13enqueueVectorEsfff" => {
+                self.minecraft_input_queue_enqueue_vector(cpu)
+            }
             "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
             | "_ZN14KeyboardMapper4tickER15InputEventQueue"
             | "_ZN11MouseMapper21clearInputDeviceQueueEv"
             | "_ZN11MouseMapper4tickER15InputEventQueue"
             | "_ZN11TouchMapper21clearInputDeviceQueueEv"
-            | "_ZN11TouchMapper4tickER15InputEventQueue"
             | "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv"
             | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
             | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
@@ -1293,42 +1341,77 @@ impl HleRuntime {
                 cpu,
                 u32::from(self.input_pointer.dx != 0.0 || self.input_pointer.dy != 0.0),
             )),
-            "_ZN11MouseDevice4getXEv" => Ok(self.return_f32(cpu, self.input_pointer.x)),
-            "_ZN11MouseDevice4getYEv" => Ok(self.return_f32(cpu, self.input_pointer.y)),
-            "_ZN11MouseDevice5getDXEv" => Ok(self.return_f32(cpu, self.input_pointer.dx)),
-            "_ZN11MouseDevice5getDYEv" => Ok(self.return_f32(cpu, self.input_pointer.dy)),
+            "_ZN11MouseDevice4getXEv" => Ok(self.return32(
+                cpu,
+                minecraft_pointer_coord(self.input_pointer.x) as i32 as u32,
+            )),
+            "_ZN11MouseDevice4getYEv" => Ok(self.return32(
+                cpu,
+                minecraft_pointer_coord(self.input_pointer.y) as i32 as u32,
+            )),
+            "_ZN11MouseDevice5getDXEv" => Ok(self.return32(
+                cpu,
+                minecraft_pointer_coord(self.input_pointer.dx) as i32 as u32,
+            )),
+            "_ZN11MouseDevice5getDYEv" => Ok(self.return32(
+                cpu,
+                minecraft_pointer_coord(self.input_pointer.dy) as i32 as u32,
+            )),
             "_ZN11MouseDevice4nextEv"
             | "_ZN11MouseDevice5resetEv"
             | "_ZN11MouseDevice6reset2Ev"
             | "_ZN11MouseDevice6rewindEv"
             | "_ZN11MouseDevice8getEventEv" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch10isReleasedEi" | "_ZN10Multitouch20isReleasedThisUpdateEi" => {
+            "_ZN10Multitouch10isReleasedEi" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.was_released)))
+            }
+            "_ZN10Multitouch20isReleasedThisUpdateEi" => {
                 Ok(self.return32(cpu, u32::from(self.input_pointer.released_this_update)))
             }
             "_ZN10Multitouch11isEdgeTouchEi" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch13isPointerDownEi" | "_ZN10Multitouch9isPressedEi" => {
+            "_ZN10Multitouch13isPointerDownEi" => {
                 Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
+            }
+            "_ZN10Multitouch9isPressedEi" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.was_pressed)))
             }
             "_ZN10Multitouch19isPressedThisUpdateEi" => {
                 Ok(self.return32(cpu, u32::from(self.input_pointer.pressed_this_update)))
             }
-            "_ZN10Multitouch15resetThisUpdateEv" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch4nextEv" | "_ZN10Multitouch5resetEv" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch6commitEv" => {
-                self.input_pointer.pressed_this_update = false;
-                self.input_pointer.released_this_update = false;
-                self.input_pointer.dx = 0.0;
-                self.input_pointer.dy = 0.0;
+            "_ZN10Multitouch15resetThisUpdateEv" => {
+                self.clear_pointer_update_flags();
                 Ok(self.return32(cpu, 0))
             }
-            "_ZN10Multitouch19getActivePointerIdsEPPKi"
-            | "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi" => {
-                self.minecraft_pointer_ids_return(cpu, memory)
+            "_ZN10Multitouch4nextEv" => Ok(self.return32(cpu, 0)),
+            "_ZN10Multitouch5resetEv" => {
+                self.clear_pointer_state();
+                Ok(self.return32(cpu, 0))
             }
-            "_ZN10Multitouch25getFirstActivePointerIdExEv"
-            | "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv" => Ok(self.return32(
+            "_ZN10Multitouch6commitEv" => {
+                if self.input_pointer.dirty_since_commit {
+                    self.input_pointer.dirty_since_commit = false;
+                } else {
+                    self.clear_pointer_update_flags();
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "_ZN10Multitouch19getActivePointerIdsEPPKi" => {
+                self.minecraft_pointer_ids_return(cpu, memory, self.input_pointer.down)
+            }
+            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi" => {
+                self.minecraft_pointer_ids_return(cpu, memory, self.pointer_active_this_update())
+            }
+            "_ZN10Multitouch25getFirstActivePointerIdExEv" => Ok(self.return32(
                 cpu,
-                if self.input_pointer.down {
+                if self.input_pointer.down || self.input_pointer.was_released {
+                    self.input_pointer.id as u32
+                } else {
+                    u32::MAX
+                },
+            )),
+            "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv" => Ok(self.return32(
+                cpu,
+                if self.input_pointer.down || self.input_pointer.released_this_update {
                     self.input_pointer.id as u32
                 } else {
                     u32::MAX
@@ -3493,6 +3576,126 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn minecraft_input_queue_next_event<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let out = cpu.reg(1);
+        let Some(event) = self.minecraft_input_events.pop_front() else {
+            trace_mcpe_input_empty(format_args!("next_event empty"));
+            return Ok(self.return32(cpu, 0));
+        };
+        trace_mcpe_input(format_args!(
+            "next_event out={out:#010x} event={event:?} remaining={}",
+            self.minecraft_input_events.len()
+        ));
+        if out != 0 {
+            for offset in 0..20 {
+                store8(memory, out.wrapping_add(offset), 0)?;
+            }
+            match event {
+                HleMinecraftInputEvent::Button { id, state, repeat } => {
+                    store8(memory, out, 0)?;
+                    store16(memory, out.wrapping_add(4), id as u16)?;
+                    store8(memory, out.wrapping_add(6), state)?;
+                    store8(memory, out.wrapping_add(7), u8::from(repeat))?;
+                }
+                HleMinecraftInputEvent::PointerLocation { mode, x, y } => {
+                    store8(memory, out, 1)?;
+                    store32(memory, out.wrapping_add(4), mode as u32)?;
+                    store16(memory, out.wrapping_add(8), x as u16)?;
+                    store16(memory, out.wrapping_add(10), y as u16)?;
+                }
+                HleMinecraftInputEvent::Direction { id, x, y } => {
+                    store8(memory, out, 4)?;
+                    store16(memory, out.wrapping_add(4), id as u16)?;
+                    store32(memory, out.wrapping_add(8), x.to_bits())?;
+                    store32(memory, out.wrapping_add(12), y.to_bits())?;
+                }
+                HleMinecraftInputEvent::Vector { id, x, y, z } => {
+                    store8(memory, out, 5)?;
+                    store16(memory, out.wrapping_add(4), id as u16)?;
+                    store32(memory, out.wrapping_add(8), x.to_bits())?;
+                    store32(memory, out.wrapping_add(12), y.to_bits())?;
+                    store32(memory, out.wrapping_add(16), z.to_bits())?;
+                }
+            }
+        }
+        Ok(self.return32(cpu, 1))
+    }
+
+    fn minecraft_input_queue_enqueue_button(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let event = HleMinecraftInputEvent::Button {
+            id: cpu.reg(1) as u16 as i16,
+            state: cpu.reg(2) as u8,
+            repeat: cpu.reg(3) != 0,
+        };
+        trace_mcpe_input(format_args!("enqueue_button {event:?}"));
+        self.minecraft_input_events.push_back(event);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn minecraft_input_queue_enqueue_button_press_and_release(
+        &mut self,
+        cpu: &mut Cpu,
+    ) -> Result<(), HleError> {
+        let id = cpu.reg(1) as u16 as i16;
+        let down = HleMinecraftInputEvent::Button {
+            id,
+            state: 1,
+            repeat: false,
+        };
+        let up = HleMinecraftInputEvent::Button {
+            id,
+            state: 0,
+            repeat: false,
+        };
+        trace_mcpe_input(format_args!(
+            "enqueue_button_press_and_release {down:?} {up:?}"
+        ));
+        self.minecraft_input_events.push_back(down);
+        self.minecraft_input_events.push_back(up);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn minecraft_input_queue_enqueue_pointer_location(
+        &mut self,
+        cpu: &mut Cpu,
+    ) -> Result<(), HleError> {
+        let event = HleMinecraftInputEvent::PointerLocation {
+            mode: cpu.reg(1) as i32,
+            x: cpu.reg(2) as u16 as i16,
+            y: cpu.reg(3) as u16 as i16,
+        };
+        trace_mcpe_input(format_args!("enqueue_pointer_location {event:?}"));
+        self.minecraft_input_events.push_back(event);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn minecraft_input_queue_enqueue_direction(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let event = HleMinecraftInputEvent::Direction {
+            id: cpu.reg(1) as u16 as i16,
+            x: f32::from_bits(cpu.reg(2)),
+            y: f32::from_bits(cpu.reg(3)),
+        };
+        trace_mcpe_input(format_args!("enqueue_direction {event:?}"));
+        self.minecraft_input_events.push_back(event);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn minecraft_input_queue_enqueue_vector(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let event = HleMinecraftInputEvent::Vector {
+            id: cpu.reg(1) as u16 as i16,
+            x: f32::from_bits(cpu.reg(2)),
+            y: f32::from_bits(cpu.reg(3)),
+            z: f32::from_bits(cpu.reg(4)),
+        };
+        trace_mcpe_input(format_args!("enqueue_vector {event:?}"));
+        self.minecraft_input_events.push_back(event);
+        Ok(self.return32(cpu, 0))
+    }
+
     fn minecraft_empty_pointer_ids_return<M: Memory>(
         &mut self,
         cpu: &mut Cpu,
@@ -3505,12 +3708,37 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn pointer_active_this_update(&self) -> bool {
+        self.input_pointer.down || self.input_pointer.was_released
+    }
+
+    fn clear_pointer_update_flags(&mut self) {
+        self.input_pointer.pressed_this_update = false;
+        self.input_pointer.released_this_update = false;
+        self.input_pointer.dirty_since_commit = false;
+        self.input_pointer.was_pressed = self.input_pointer.down;
+        if !self.input_pointer.down {
+            self.input_pointer.was_released = false;
+        }
+        self.input_pointer.dx = 0.0;
+        self.input_pointer.dy = 0.0;
+    }
+
+    fn clear_pointer_state(&mut self) {
+        let id = self.input_pointer.id;
+        self.input_pointer = HlePointer {
+            id,
+            ..HlePointer::default()
+        };
+    }
+
     fn minecraft_pointer_ids_return<M: Memory>(
         &mut self,
         cpu: &mut Cpu,
         memory: &mut M,
+        active: bool,
     ) -> Result<(), HleError> {
-        if !self.input_pointer.down {
+        if !active {
             return self.minecraft_empty_pointer_ids_return(cpu, memory);
         }
         let ids = match self.input_pointer_ids {
@@ -5606,12 +5834,17 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN10Multitouch4feedEccssi"
             | "_ZN11MouseDevice4feedEccss"
             | "_ZN11MouseDevice4feedEccssss"
+            | "_ZN15InputEventQueue9nextEventER10InputEvent"
+            | "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb"
+            | "_ZN15InputEventQueue28enqueueButtonPressAndReleaseEs"
+            | "_ZN15InputEventQueue22enqueuePointerLocationE9InputModess"
+            | "_ZN15InputEventQueue16enqueueDirectionE11DirectionIdff"
+            | "_ZN15InputEventQueue13enqueueVectorEsfff"
             | "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
             | "_ZN14KeyboardMapper4tickER15InputEventQueue"
             | "_ZN11MouseMapper21clearInputDeviceQueueEv"
             | "_ZN11MouseMapper4tickER15InputEventQueue"
             | "_ZN11TouchMapper21clearInputDeviceQueueEv"
-            | "_ZN11TouchMapper4tickER15InputEventQueue"
             | "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv"
             | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
             | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
@@ -7755,6 +7988,26 @@ fn trace_hle_file(args: fmt::Arguments<'_>) {
     }
 }
 
+fn trace_mcpe_input(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_MCPE_INPUT_EVENTS").is_none() {
+        return;
+    }
+    let count = MCPE_INPUT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let limit = std::env::var("AEMU_TRACE_MCPE_INPUT_EVENTS_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(400);
+    if count < limit {
+        eprintln!("HLE_MCPE_INPUT {args}");
+    }
+}
+
+fn trace_mcpe_input_empty(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_MCPE_INPUT_EMPTY").is_some() {
+        trace_mcpe_input(args);
+    }
+}
+
 fn trace_hle_write<M: Memory>(name: &str, memory: &mut M, ptr: u32, len: u32) {
     if std::env::var_os("AEMU_TRACE_HLE_FILE").is_none() {
         return;
@@ -7792,6 +8045,10 @@ fn load8<M: Memory>(memory: &mut M, addr: u32) -> Result<u8, HleError> {
     memory
         .load8(addr)
         .map_err(|err| HleError::Memory(err.to_string()))
+}
+
+fn minecraft_pointer_coord(value: f32) -> i16 {
+    value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 fn load16<M: Memory>(memory: &mut M, addr: u32) -> Result<u16, HleError> {
@@ -8707,7 +8964,6 @@ mod tests {
             "_ZN11MouseMapper21clearInputDeviceQueueEv",
             "_ZN11MouseMapper4tickER15InputEventQueue",
             "_ZN11TouchMapper21clearInputDeviceQueueEv",
-            "_ZN11TouchMapper4tickER15InputEventQueue",
             "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv",
             "_ZN19TestAutoInputMapper4tickER15InputEventQueue",
             "_ZN18DeviceButtonMapper4tickER15InputEventQueue",
@@ -10915,7 +11171,6 @@ mod tests {
             "_ZN11MouseMapper21clearInputDeviceQueueEv",
             "_ZN11MouseMapper4tickER15InputEventQueue",
             "_ZN11TouchMapper21clearInputDeviceQueueEv",
-            "_ZN11TouchMapper4tickER15InputEventQueue",
             "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv",
             "_ZN19TestAutoInputMapper4tickER15InputEventQueue",
             "_ZN18DeviceButtonMapper4tickER15InputEventQueue",
@@ -11046,7 +11301,7 @@ mod tests {
         cpu.set_reg(14, 0x2010);
         hle.dispatch("_ZN11MouseDevice4getXEv", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(f32::from_bits(cpu.reg(0)), 123.0);
+        assert_eq!(cpu.reg(0), 123);
 
         cpu.set_reg(14, 0x2012);
         hle.dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
@@ -11074,10 +11329,23 @@ mod tests {
             &mut memory,
         )
         .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(14, 0x201c);
+        hle.dispatch("_ZN10Multitouch6commitEv", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2020);
+        hle.dispatch(
+            "_ZN10Multitouch19isPressedThisUpdateEi",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
         assert_eq!(cpu.reg(0), 0);
 
         hle.push_pointer_event(0, HlePointerPhase::Up, 123.0, 45.0, 0.0);
-        cpu.set_reg(14, 0x201c);
+        cpu.set_reg(14, 0x2024);
         hle.dispatch(
             "_ZN10Multitouch20isReleasedThisUpdateEi",
             &mut cpu,
@@ -11086,11 +11354,25 @@ mod tests {
         .unwrap();
         assert_eq!(cpu.reg(0), 1);
 
-        cpu.set_reg(14, 0x2020);
+        memory.store32(0x1110, 0).unwrap();
+        cpu.set_reg(14, 0x2028);
+        cpu.set_reg(0, 0x1110);
+        hle.dispatch(
+            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        let ids = memory.load32(0x1110).unwrap();
+        assert_ne!(ids, 0);
+        assert_eq!(memory.load32(ids).unwrap(), 0);
+
+        cpu.set_reg(14, 0x202c);
         cpu.set_reg(0, (-7i16) as u16 as u32);
         hle.dispatch("_ZN11MenuPointer4setXEs", &mut cpu, &mut memory)
             .unwrap();
-        cpu.set_reg(14, 0x2024);
+        cpu.set_reg(14, 0x2030);
         cpu.set_reg(0, 88);
         hle.dispatch("_ZN11MenuPointer4setYEs", &mut cpu, &mut memory)
             .unwrap();
@@ -11203,6 +11485,246 @@ mod tests {
             .dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 1);
+    }
+
+    #[test]
+    fn dispatches_minecraft_input_queue_pointer_location() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
+
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 2);
+        cpu.set_reg(2, (-12i16) as u16 as u32);
+        cpu.set_reg(3, 345);
+        hle.dispatch(
+            "_ZN15InputEventQueue22enqueuePointerLocationE9InputModess",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+
+        for offset in 0..20 {
+            memory.store8(0x1100 + offset, 0xaa).unwrap();
+        }
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2005);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(cpu.pc(), 0x2004);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+        assert_eq!(memory.load8(0x1100).unwrap(), 1);
+        assert_eq!(memory.load32(0x1104).unwrap(), 2);
+        assert_eq!(memory.load16(0x1108).unwrap() as i16, -12);
+        assert_eq!(memory.load16(0x110a).unwrap(), 345);
+        for offset in [1, 2, 3, 12, 13, 14, 15, 16, 17, 18, 19] {
+            assert_eq!(memory.load8(0x1100 + offset).unwrap(), 0);
+        }
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2009);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn mirrors_host_pointer_to_minecraft_pointer_location_event() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
+        hle.push_pointer_event(0, HlePointerPhase::Down, 279.6, 386.4, 1.0);
+
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1100).unwrap(), 1);
+        assert_eq!(
+            memory.load32(0x1104).unwrap(),
+            MINECRAFT_TOUCH_INPUT_MODE as u32
+        );
+        assert_eq!(memory.load16(0x1108).unwrap(), 280);
+        assert_eq!(memory.load16(0x110a).unwrap(), 386);
+    }
+
+    #[test]
+    fn dispatches_minecraft_input_queue_button_events() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
+
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, (-3i16) as u16 as u32);
+        hle.dispatch(
+            "_ZN15InputEventQueue28enqueueButtonPressAndReleaseEs",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        for (idx, expected_state) in [1, 0].into_iter().enumerate() {
+            let out = 0x1100 + (idx as u32) * 0x20;
+            cpu.set_isa(Isa::Arm);
+            cpu.set_reg(14, 0x2005 + (idx as u32) * 4);
+            cpu.set_reg(0, 0x4000);
+            cpu.set_reg(1, out);
+            hle.dispatch(
+                "_ZN15InputEventQueue9nextEventER10InputEvent",
+                &mut cpu,
+                &mut memory,
+            )
+            .unwrap();
+            assert_eq!(cpu.reg(0), 1);
+            assert_eq!(memory.load8(out).unwrap(), 0);
+            assert_eq!(memory.load16(out + 4).unwrap() as i16, -3);
+            assert_eq!(memory.load8(out + 6).unwrap(), expected_state);
+            assert_eq!(memory.load8(out + 7).unwrap(), 0);
+        }
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2014);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 77);
+        cpu.set_reg(2, 2);
+        cpu.set_reg(3, 1);
+        hle.dispatch(
+            "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2018);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1140);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1140).unwrap(), 0);
+        assert_eq!(memory.load16(0x1144).unwrap(), 77);
+        assert_eq!(memory.load8(0x1146).unwrap(), 2);
+        assert_eq!(memory.load8(0x1147).unwrap(), 1);
+    }
+
+    #[test]
+    fn dispatches_minecraft_input_queue_direction_and_vector_events() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
+
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 9);
+        cpu.set_reg(2, 1.5f32.to_bits());
+        cpu.set_reg(3, (-2.25f32).to_bits());
+        hle.dispatch(
+            "_ZN15InputEventQueue16enqueueDirectionE11DirectionIdff",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2005);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, (-4i16) as u16 as u32);
+        cpu.set_reg(2, 3.25f32.to_bits());
+        cpu.set_reg(3, 4.5f32.to_bits());
+        cpu.set_reg(4, (-5.75f32).to_bits());
+        hle.dispatch(
+            "_ZN15InputEventQueue13enqueueVectorEsfff",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2009);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1100).unwrap(), 4);
+        assert_eq!(memory.load16(0x1104).unwrap(), 9);
+        assert_eq!(f32::from_bits(memory.load32(0x1108).unwrap()), 1.5);
+        assert_eq!(f32::from_bits(memory.load32(0x110c).unwrap()), -2.25);
+
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x200d);
+        cpu.set_reg(0, 0x4000);
+        cpu.set_reg(1, 0x1120);
+        hle.dispatch(
+            "_ZN15InputEventQueue9nextEventER10InputEvent",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1120).unwrap(), 5);
+        assert_eq!(memory.load16(0x1124).unwrap() as i16, -4);
+        assert_eq!(f32::from_bits(memory.load32(0x1128).unwrap()), 3.25);
+        assert_eq!(f32::from_bits(memory.load32(0x112c).unwrap()), 4.5);
+        assert_eq!(f32::from_bits(memory.load32(0x1130).unwrap()), -5.75);
     }
 
     #[test]
