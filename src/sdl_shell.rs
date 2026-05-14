@@ -36,6 +36,12 @@ pub struct Sdl2Host {
     replay: SdlGlesReplay,
 }
 
+pub struct SdlFramebufferCapture {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SdlGlesReplayStats {
     pub draw_arrays: usize,
@@ -238,6 +244,21 @@ impl Sdl2Host {
 
     pub fn replay_stats(&self) -> SdlGlesReplayStats {
         self.replay.stats
+    }
+
+    pub fn capture_framebuffer_rgb(&self) -> HostResult<SdlFramebufferCapture> {
+        let (width, height, rgba) = self.read_framebuffer_rgba()?;
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let mut rgb = Vec::with_capacity(width_usize * height_usize * 3);
+        for y in (0..height_usize).rev() {
+            let row = y * width_usize * 4;
+            for x in 0..width_usize {
+                let pixel = row + x * 4;
+                rgb.extend_from_slice(&rgba[pixel..pixel + 3]);
+            }
+        }
+        Ok(SdlFramebufferCapture { width, height, rgb })
     }
 }
 
@@ -964,6 +985,25 @@ impl Sdl2Host {
     }
 
     fn capture_framebuffer_readback(&mut self) -> HostResult<()> {
+        let (width, height, pixels) = self.read_framebuffer_rgba()?;
+        let mut nonzero_rgb = 0usize;
+        let mut nonzero_alpha = 0usize;
+        for pixel in pixels.chunks_exact(4) {
+            if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                nonzero_rgb += 1;
+            }
+            if pixel[3] != 0 {
+                nonzero_alpha += 1;
+            }
+        }
+        self.replay.stats.readback_width = width;
+        self.replay.stats.readback_height = height;
+        self.replay.stats.readback_nonzero_rgb_pixels = nonzero_rgb;
+        self.replay.stats.readback_nonzero_alpha_pixels = nonzero_alpha;
+        Ok(())
+    }
+
+    fn read_framebuffer_rgba(&self) -> HostResult<(u32, u32, Vec<u8>)> {
         let (width, height) = self.window.drawable_size();
         let Some(byte_len) = usize::try_from(width)
             .ok()
@@ -990,21 +1030,7 @@ impl Sdl2Host {
                 pixels.as_mut_ptr().cast(),
             );
         }
-        let mut nonzero_rgb = 0usize;
-        let mut nonzero_alpha = 0usize;
-        for pixel in pixels.chunks_exact(4) {
-            if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
-                nonzero_rgb += 1;
-            }
-            if pixel[3] != 0 {
-                nonzero_alpha += 1;
-            }
-        }
-        self.replay.stats.readback_width = width;
-        self.replay.stats.readback_height = height;
-        self.replay.stats.readback_nonzero_rgb_pixels = nonzero_rgb;
-        self.replay.stats.readback_nonzero_alpha_pixels = nonzero_alpha;
-        Ok(())
+        Ok((width, height, pixels))
     }
 
     fn record_gl_errors(&mut self, event_index: usize, event_kind: &'static str) {

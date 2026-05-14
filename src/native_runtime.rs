@@ -1540,7 +1540,13 @@ impl NativeRuntime {
         for &word in words {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
-        self.write_guest_bytes(&bytes)
+        let len = u32::try_from(bytes.len()).map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let ptr = self.alloc_guest_zeroed(len.max(1), 4)?;
+        self.link
+            .memory
+            .load_bytes(ptr, &bytes)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        Ok(ptr)
     }
 
     fn write_runtime_trap(
@@ -2267,6 +2273,36 @@ mod tests {
         assert_eq!(parse_nonzero_usize("250000000"), Some(250_000_000));
         assert_eq!(parse_nonzero_usize("0"), None);
         assert_eq!(parse_nonzero_usize("not-a-number"), None);
+    }
+
+    #[test]
+    fn write_guest_words_preserves_arm_alignment_after_byte_allocations() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+
+        runtime.write_guest_bytes(&[0xaa]).unwrap();
+        let words = runtime.write_guest_words(&[0xe12f_ff1e]).unwrap();
+
+        assert_eq!(words % 4, 0);
+        assert_eq!(runtime.link.memory.load32(words).unwrap(), 0xe12f_ff1e);
     }
 
     #[test]

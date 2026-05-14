@@ -201,8 +201,23 @@ staging, and all captured indexed draw submissions.
 swap, drains and replays each frame's GLES event batch, and resumes to the next
 `eglSwapBuffers`; use `--sdl2-frames N` for bounded verification runs. On the
 local X11 display, use `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1` so SDL creates a
-GLES context through EGL. Current live rendering works, but guest input and
-audio are still stubbed and a long run can exhaust the current HLE heap.
+GLES context through EGL. The SDL2 live loop can also expose a small local
+WebSocket control harness:
+
+```sh
+DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --ws 127.0.0.1:8766
+tools/ws_cli.py --url ws://127.0.0.1:8766 debug
+tools/ws_cli.py --url ws://127.0.0.1:8766 screenshot --out target/aemu-ws-screenshot.ppm
+tools/ws_cli.py --url ws://127.0.0.1:8766 tap 427 240
+```
+
+Current live rendering reaches MCPE's first `eglSwapBuffers`, replays frames in
+SDL2, and the harness can capture framebuffer screenshots. A run on
+`DISPLAY=:0` has been verified past frame 2000 without the previous HLE
+`std::string` heap exhaustion. Input is still an approximate one-pointer
+Minecraft facade and audio remains stubbed; do not call this playable until the
+menu/game flow responds correctly and audio/input are wired through real enough
+Android paths.
 Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,

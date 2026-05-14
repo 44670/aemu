@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -506,7 +506,7 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RunApkNativeOptions {
     launch: bool,
     until_swap: bool,
@@ -515,6 +515,7 @@ struct RunApkNativeOptions {
     sdl2_live: bool,
     sdl2_frames: Option<u64>,
     sdl2_hold_ms: u64,
+    ws_addr: Option<String>,
 }
 
 fn parse_run_apk_native_args(
@@ -544,6 +545,7 @@ fn parse_run_apk_native_args(
         sdl2_live: false,
         sdl2_frames: None,
         sdl2_hold_ms: 1000,
+        ws_addr: None,
     };
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -585,6 +587,15 @@ fn parse_run_apk_native_args(
                     value
                         .parse()
                         .map_err(|_| format!("invalid --sdl2-frames value: {value}"))?,
+                );
+            }
+            "--ws" => {
+                options.launch = true;
+                options.until_swap = true;
+                options.sdl2_live = true;
+                options.ws_addr = Some(
+                    iter.next()
+                        .ok_or_else(|| "--ws needs a listen address".to_string())?,
                 );
             }
             "--sdl2-hold-ms" => {
@@ -664,7 +675,13 @@ fn run_apk_native(
         run_native_activity_launch(&mut runtime, max_steps, options.until_swap)?;
     }
     if options.sdl2_live {
-        replay_sdl2_live_gles_frames(&mut runtime, max_steps, options.sdl2_frames)?;
+        runtime.hle.enable_cxx_string_recycling();
+        replay_sdl2_live_gles_frames(
+            &mut runtime,
+            max_steps,
+            options.sdl2_frames,
+            options.ws_addr.as_deref(),
+        )?;
     } else if options.gles_summary || options.sdl2 {
         let events = runtime.hle.take_gles_events();
         if options.gles_summary {
@@ -838,12 +855,22 @@ fn replay_sdl2_live_gles_frames(
     runtime: &mut aemu::native_runtime::NativeRuntime,
     max_steps_per_frame: usize,
     max_frames: Option<u64>,
+    ws_addr: Option<&str>,
 ) -> Result<(), String> {
     use aemu::hle_imports::GlesEvent;
     use aemu::host::{HostBackend, HostConfig, HostEvent, HostKey};
+    use aemu::ws_harness::{WsCommand, WsHarness};
+    use base64::Engine;
+    use serde_json::json;
 
     let mut host = aemu::sdl_shell::Sdl2Host::new(&HostConfig::default())
         .map_err(|err| format!("SDL2 setup failed: {err}"))?;
+    let ws = ws_addr
+        .map(|addr| WsHarness::start(addr).map_err(|err| format!("WebSocket setup failed: {err}")))
+        .transpose()?;
+    if let Some(ws) = ws.as_ref() {
+        println!("sdl2-live: websocket ws://{}", ws.local_addr());
+    }
     let mut frames = 0_u64;
     let mut total_events = 0_usize;
     let mut total_payload_bytes = 0_usize;
@@ -912,7 +939,82 @@ fn replay_sdl2_live_gles_frames(
                     );
                     return Ok(());
                 }
+                HostEvent::Pointer {
+                    id,
+                    phase,
+                    x,
+                    y,
+                    pressure,
+                } => {
+                    runtime
+                        .hle
+                        .push_pointer_event(id, hle_pointer_phase(phase), x, y, pressure);
+                }
                 _ => {}
+            }
+        }
+
+        if let Some(ws) = ws.as_ref() {
+            while let Some(request) = ws.try_recv() {
+                match request.command {
+                    WsCommand::Debug => {
+                        let stats = host.replay_stats();
+                        request.respond_ok(json!({
+                            "ok": true,
+                            "frames": frames,
+                            "total_events": total_events,
+                            "total_payload_bytes": total_payload_bytes,
+                            "draw_arrays": stats.draw_arrays,
+                            "draw_elements": stats.draw_elements,
+                            "skipped_client_attrib_draws": stats.skipped_client_attrib_draws,
+                            "skipped_missing_index_draws": stats.skipped_missing_index_draws,
+                            "readback_width": stats.readback_width,
+                            "readback_height": stats.readback_height,
+                            "readback_nonzero_rgb_pixels": stats.readback_nonzero_rgb_pixels,
+                            "readback_nonzero_alpha_pixels": stats.readback_nonzero_alpha_pixels,
+                            "gl_error_count": stats.gl_error_count,
+                            "first_gl_error_event_index": stats.first_gl_error_event_index,
+                            "first_gl_error_event_kind": stats.first_gl_error_event_kind,
+                            "first_gl_error_code": stats.first_gl_error_code,
+                        }));
+                    }
+                    WsCommand::Screenshot => match host.capture_framebuffer_rgb() {
+                        Ok(capture) => {
+                            let mut ppm =
+                                format!("P6\n{} {}\n255\n", capture.width, capture.height)
+                                    .into_bytes();
+                            ppm.extend_from_slice(&capture.rgb);
+                            let data_base64 = base64::engine::general_purpose::STANDARD.encode(ppm);
+                            request.respond_ok(json!({
+                                "ok": true,
+                                "format": "ppm",
+                                "width": capture.width,
+                                "height": capture.height,
+                                "data_base64": data_base64,
+                            }));
+                        }
+                        Err(err) => request.respond_error(format!("screenshot failed: {err}")),
+                    },
+                    WsCommand::Pointer {
+                        id,
+                        phase,
+                        x,
+                        y,
+                        pressure,
+                    } => {
+                        runtime
+                            .hle
+                            .push_pointer_event(id, ws_pointer_phase(phase), x, y, pressure);
+                        request.respond_ok(json!({
+                            "ok": true,
+                            "id": id,
+                            "phase": format!("{phase:?}").to_lowercase(),
+                            "x": x,
+                            "y": y,
+                            "pressure": pressure,
+                        }));
+                    }
+                }
             }
         }
 
@@ -940,11 +1042,30 @@ fn replay_sdl2_live_gles_frames(
     }
 }
 
+#[cfg(feature = "sdl2")]
+fn hle_pointer_phase(phase: aemu::host::PointerPhase) -> aemu::hle_imports::HlePointerPhase {
+    match phase {
+        aemu::host::PointerPhase::Down => aemu::hle_imports::HlePointerPhase::Down,
+        aemu::host::PointerPhase::Up => aemu::hle_imports::HlePointerPhase::Up,
+        aemu::host::PointerPhase::Move => aemu::hle_imports::HlePointerPhase::Move,
+    }
+}
+
+#[cfg(feature = "sdl2")]
+fn ws_pointer_phase(phase: aemu::ws_harness::WsPointerPhase) -> aemu::hle_imports::HlePointerPhase {
+    match phase {
+        aemu::ws_harness::WsPointerPhase::Down => aemu::hle_imports::HlePointerPhase::Down,
+        aemu::ws_harness::WsPointerPhase::Up => aemu::hle_imports::HlePointerPhase::Up,
+        aemu::ws_harness::WsPointerPhase::Move => aemu::hle_imports::HlePointerPhase::Move,
+    }
+}
+
 #[cfg(not(feature = "sdl2"))]
 fn replay_sdl2_live_gles_frames(
     _runtime: &mut aemu::native_runtime::NativeRuntime,
     _max_steps_per_frame: usize,
     _max_frames: Option<u64>,
+    _ws_addr: Option<&str>,
 ) -> Result<(), String> {
     Err("--sdl2-live requires rebuilding with --features sdl2".to_string())
 }

@@ -14,4 +14,6 @@ pub mod sdl_shell;
 #[cfg(all(feature = "webgl", target_arch = "wasm32"))]
 pub mod wasm_api;
 pub mod wasm_webgl;
+#[cfg(feature = "sdl2")]
+pub mod ws_harness;
 pub mod zip_probe;

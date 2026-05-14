@@ -346,6 +346,29 @@ pub struct HleRuntime {
     clock_ns: u64,
     fake_geometry: Option<u32>,
     fake_texture_pair: Option<u32>,
+    cxx_string_recycling: bool,
+    input_pointer: HlePointer,
+    input_pointer_ids: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct HlePointer {
+    id: i64,
+    down: bool,
+    pressed_this_update: bool,
+    released_this_update: bool,
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    pressure: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlePointerPhase {
+    Down,
+    Up,
+    Move,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,7 +777,14 @@ impl HleRuntime {
             clock_ns: 0,
             fake_geometry: None,
             fake_texture_pair: None,
+            cxx_string_recycling: false,
+            input_pointer: HlePointer::default(),
+            input_pointer_ids: None,
         }
+    }
+
+    pub fn enable_cxx_string_recycling(&mut self) {
+        self.cxx_string_recycling = true;
     }
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
@@ -779,6 +809,40 @@ impl HleRuntime {
 
     pub fn take_gles_events(&mut self) -> Vec<GlesEvent> {
         self.gles_events.drain(..).collect()
+    }
+
+    pub fn push_pointer_event(
+        &mut self,
+        id: i64,
+        phase: HlePointerPhase,
+        x: f32,
+        y: f32,
+        pressure: f32,
+    ) {
+        let old_x = self.input_pointer.x;
+        let old_y = self.input_pointer.y;
+        self.input_pointer.id = id;
+        self.input_pointer.x = x;
+        self.input_pointer.y = y;
+        self.input_pointer.dx = x - old_x;
+        self.input_pointer.dy = y - old_y;
+        self.input_pointer.pressure = pressure;
+        match phase {
+            HlePointerPhase::Down => {
+                if !self.input_pointer.down {
+                    self.input_pointer.pressed_this_update = true;
+                }
+                self.input_pointer.down = true;
+                self.input_pointer.released_this_update = false;
+            }
+            HlePointerPhase::Up => {
+                if self.input_pointer.down {
+                    self.input_pointer.released_this_update = true;
+                }
+                self.input_pointer.down = false;
+            }
+            HlePointerPhase::Move => {}
+        }
     }
 
     pub(crate) fn current_pthread(&self) -> u32 {
@@ -917,8 +981,8 @@ impl HleRuntime {
                 self.libstdcxx_string_fill_ctor(cpu, memory)
             }
             "_ZNSsC1ERKSsjj" | "_ZNSsC2ERKSsjj" => self.libstdcxx_string_substr_ctor(cpu, memory),
-            "_ZNSsD1Ev" | "_ZNSsD2Ev" => Ok(self.return32(cpu, 0)),
-            "_ZNSs4_Rep10_M_destroyERKSaIcE" => Ok(self.return32(cpu, 0)),
+            "_ZNSsD1Ev" | "_ZNSsD2Ev" => self.libstdcxx_string_dtor(cpu, memory),
+            "_ZNSs4_Rep10_M_destroyERKSaIcE" => self.libstdcxx_string_rep_destroy(cpu),
             "_ZNSs4_Rep9_S_createEjjRKSaIcE" => self.libstdcxx_string_rep_create(cpu, memory),
             "_ZNSs12_S_constructEjcRKSaIcE" => self.libstdcxx_string_construct_fill(cpu, memory),
             "_ZNSs4swapERSs" => self.libstdcxx_string_swap(cpu, memory),
@@ -990,39 +1054,58 @@ impl HleRuntime {
             | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
             | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
             | "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv"
-            | "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue"
-            | "_ZN11MouseDevice12isButtonDownEi"
+            | "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue" => Ok(self.return32(cpu, 0)),
+            "_ZN11MouseDevice12isButtonDownEi"
             | "_ZN11MouseDevice14getButtonStateEi"
-            | "_ZN11MouseDevice14getEventButtonEv"
-            | "_ZN11MouseDevice16wasFirstMovementEv"
-            | "_ZN11MouseDevice19getEventButtonStateEv"
-            | "_ZN11MouseDevice4getXEv"
-            | "_ZN11MouseDevice4getYEv"
-            | "_ZN11MouseDevice4nextEv"
-            | "_ZN11MouseDevice5getDXEv"
-            | "_ZN11MouseDevice5getDYEv"
+            | "_ZN11MouseDevice19getEventButtonStateEv" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
+            }
+            "_ZN11MouseDevice14getEventButtonEv" => Ok(self.return32(cpu, 0)),
+            "_ZN11MouseDevice16wasFirstMovementEv" => Ok(self.return32(
+                cpu,
+                u32::from(self.input_pointer.dx != 0.0 || self.input_pointer.dy != 0.0),
+            )),
+            "_ZN11MouseDevice4getXEv" => Ok(self.return_f32(cpu, self.input_pointer.x)),
+            "_ZN11MouseDevice4getYEv" => Ok(self.return_f32(cpu, self.input_pointer.y)),
+            "_ZN11MouseDevice5getDXEv" => Ok(self.return_f32(cpu, self.input_pointer.dx)),
+            "_ZN11MouseDevice5getDYEv" => Ok(self.return_f32(cpu, self.input_pointer.dy)),
+            "_ZN11MouseDevice4nextEv"
             | "_ZN11MouseDevice5resetEv"
             | "_ZN11MouseDevice6reset2Ev"
             | "_ZN11MouseDevice6rewindEv"
-            | "_ZN11MouseDevice8getEventEv"
-            | "_ZN10Multitouch10isReleasedEi"
-            | "_ZN10Multitouch11isEdgeTouchEi"
-            | "_ZN10Multitouch13isPointerDownEi"
-            | "_ZN10Multitouch15resetThisUpdateEv"
-            | "_ZN10Multitouch19isPressedThisUpdateEi"
-            | "_ZN10Multitouch20isReleasedThisUpdateEi"
-            | "_ZN10Multitouch4nextEv"
-            | "_ZN10Multitouch5resetEv"
-            | "_ZN10Multitouch6commitEv"
-            | "_ZN10Multitouch9isPressedEi" => Ok(self.return32(cpu, 0)),
+            | "_ZN11MouseDevice8getEventEv" => Ok(self.return32(cpu, 0)),
+            "_ZN10Multitouch10isReleasedEi" | "_ZN10Multitouch20isReleasedThisUpdateEi" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.released_this_update)))
+            }
+            "_ZN10Multitouch11isEdgeTouchEi" => Ok(self.return32(cpu, 0)),
+            "_ZN10Multitouch13isPointerDownEi" | "_ZN10Multitouch9isPressedEi" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
+            }
+            "_ZN10Multitouch19isPressedThisUpdateEi" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.pressed_this_update)))
+            }
+            "_ZN10Multitouch15resetThisUpdateEv" => Ok(self.return32(cpu, 0)),
+            "_ZN10Multitouch4nextEv" | "_ZN10Multitouch5resetEv" => Ok(self.return32(cpu, 0)),
+            "_ZN10Multitouch6commitEv" => {
+                self.input_pointer.pressed_this_update = false;
+                self.input_pointer.released_this_update = false;
+                self.input_pointer.dx = 0.0;
+                self.input_pointer.dy = 0.0;
+                Ok(self.return32(cpu, 0))
+            }
             "_ZN10Multitouch19getActivePointerIdsEPPKi"
             | "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi" => {
-                self.minecraft_empty_pointer_ids_return(cpu, memory)
+                self.minecraft_pointer_ids_return(cpu, memory)
             }
             "_ZN10Multitouch25getFirstActivePointerIdExEv"
-            | "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv" => {
-                Ok(self.return32(cpu, u32::MAX))
-            }
+            | "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv" => Ok(self.return32(
+                cpu,
+                if self.input_pointer.down {
+                    self.input_pointer.id as u32
+                } else {
+                    u32::MAX
+                },
+            )),
             "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f" => {
                 self.minecraft_interpolate_transforms(cpu, memory)
             }
@@ -2172,17 +2255,10 @@ impl HleRuntime {
         } else {
             let doubled = old_capacity.saturating_mul(2);
             let capacity = new_len.max(doubled).max(15);
-            let allocation = self.alloc(
-                capacity.checked_add(13).ok_or(HleError::HeapExhausted {
-                    requested: capacity,
-                })?,
-                4,
-            )?;
-            store32(memory, allocation, new_len)?;
-            store32(memory, allocation.wrapping_add(4), capacity)?;
-            store32(memory, allocation.wrapping_add(8), 0)?;
+            let allocation = self.alloc_cxx_string_rep(memory, &bytes, capacity)?;
             let out_data = allocation.wrapping_add(12);
             store32(memory, string, out_data)?;
+            self.dispose_cxx_string_data(memory, data)?;
             out_data
         };
 
@@ -2293,6 +2369,22 @@ impl HleRuntime {
         };
         self.store_cxx_string_bytes(memory, string, &source[pos..pos + len], len as u32)?;
         Ok(self.return32(cpu, string))
+    }
+
+    fn libstdcxx_string_dtor<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        self.free_cxx_string(memory, cpu.reg(0))?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn libstdcxx_string_rep_destroy(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        if self.cxx_string_recycling {
+            self.free_ptr(cpu.reg(0));
+        }
+        Ok(self.return32(cpu, 0))
     }
 
     fn libstdcxx_string_rep_create<M: Memory>(
@@ -2446,7 +2538,7 @@ impl HleRuntime {
         let string = cpu.reg(0);
         let mut bytes = load_cxx_string_bytes(memory, string)?;
         bytes.extend(load_bytes(memory, cpu.reg(1), cpu.reg(2))?);
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2458,7 +2550,7 @@ impl HleRuntime {
         let string = cpu.reg(0);
         let mut bytes = load_cxx_string_bytes(memory, string)?;
         bytes.extend(load_cxx_string_bytes(memory, cpu.reg(1))?);
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2471,7 +2563,7 @@ impl HleRuntime {
         let mut bytes = load_cxx_string_bytes(memory, string)?;
         let count = cpu.reg(1);
         bytes.extend(std::iter::repeat(cpu.reg(2) as u8).take(count as usize));
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2482,7 +2574,7 @@ impl HleRuntime {
     ) -> Result<(), HleError> {
         let string = cpu.reg(0);
         let bytes = load_bytes(memory, cpu.reg(1), cpu.reg(2))?;
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2493,7 +2585,7 @@ impl HleRuntime {
     ) -> Result<(), HleError> {
         let string = cpu.reg(0);
         let bytes = load_cxx_string_bytes(memory, cpu.reg(1))?;
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2505,7 +2597,7 @@ impl HleRuntime {
         let string = cpu.reg(0);
         let len = strlen(memory, cpu.reg(1))?;
         let bytes = load_bytes(memory, cpu.reg(1), len)?;
-        self.store_cxx_string_bytes(memory, string, &bytes, len)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, len)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2518,7 +2610,7 @@ impl HleRuntime {
         let new_len = cpu.reg(1) as usize;
         let mut bytes = load_cxx_string_bytes(memory, string)?;
         bytes.resize(new_len, cpu.reg(2) as u8);
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2531,7 +2623,7 @@ impl HleRuntime {
         let requested = cpu.reg(1);
         let bytes = load_cxx_string_bytes(memory, string)?;
         if cxx_string_capacity(memory, string)? < requested {
-            self.store_cxx_string_bytes(memory, string, &bytes, requested)?;
+            self.replace_cxx_string_bytes(memory, string, &bytes, requested)?;
         }
         Ok(self.return32(cpu, string))
     }
@@ -2549,7 +2641,7 @@ impl HleRuntime {
         let pos = pos.min(bytes.len());
         let end = pos.saturating_add(erase_len).min(bytes.len());
         bytes.splice(pos..end, std::iter::repeat(0).take(insert_len));
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)?;
         Ok(self.return32(cpu, string))
     }
 
@@ -2709,6 +2801,30 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn minecraft_pointer_ids_return<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        if !self.input_pointer.down {
+            return self.minecraft_empty_pointer_ids_return(cpu, memory);
+        }
+        let ids = match self.input_pointer_ids {
+            Some(ptr) => ptr,
+            None => {
+                let ptr = self.alloc(4, 4)?;
+                self.input_pointer_ids = Some(ptr);
+                ptr
+            }
+        };
+        store32(memory, ids, self.input_pointer.id as u32)?;
+        let out = cpu.reg(0);
+        if out != 0 {
+            store32(memory, out, ids)?;
+        }
+        Ok(self.return32(cpu, 1))
+    }
+
     fn minecraft_interpolate_transforms<M: Memory>(
         &mut self,
         cpu: &mut Cpu,
@@ -2811,7 +2927,7 @@ impl HleRuntime {
         let pos = pos.min(bytes.len());
         let end = pos.saturating_add(erase_len).min(bytes.len());
         bytes.splice(pos..end, replacement.iter().copied());
-        self.store_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)
+        self.replace_cxx_string_bytes(memory, string, &bytes, bytes.len() as u32)
     }
 
     fn store_cxx_string_bytes<M: Memory>(
@@ -2824,6 +2940,54 @@ impl HleRuntime {
         let data = self.alloc_cxx_string_data(memory, bytes, min_capacity)?;
         store32(memory, string, data)?;
         Ok(data)
+    }
+
+    fn replace_cxx_string_bytes<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        string: u32,
+        bytes: &[u8],
+        min_capacity: u32,
+    ) -> Result<u32, HleError> {
+        let old_data = if string == 0 {
+            0
+        } else {
+            load32(memory, string)?
+        };
+        let data = self.alloc_cxx_string_data(memory, bytes, min_capacity)?;
+        store32(memory, string, data)?;
+        self.dispose_cxx_string_data(memory, old_data)?;
+        Ok(data)
+    }
+
+    fn free_cxx_string<M: Memory>(&mut self, memory: &mut M, string: u32) -> Result<(), HleError> {
+        if string == 0 {
+            return Ok(());
+        }
+        let data = load32(memory, string)?;
+        self.dispose_cxx_string_data(memory, data)?;
+        store32(memory, string, 0)?;
+        Ok(())
+    }
+
+    fn dispose_cxx_string_data<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        data: u32,
+    ) -> Result<(), HleError> {
+        if !self.cxx_string_recycling {
+            return Ok(());
+        }
+        if data >= CXX_STRING_REP_HEADER_SIZE {
+            let rep = data - CXX_STRING_REP_HEADER_SIZE;
+            let refcount = load32(memory, rep.wrapping_add(8))? as i32;
+            if refcount > 0 {
+                store32(memory, rep.wrapping_add(8), (refcount - 1) as u32)?;
+            } else {
+                self.free_ptr(rep);
+            }
+        }
+        Ok(())
     }
 
     fn alloc_cxx_string_data<M: Memory>(
@@ -2845,14 +3009,16 @@ impl HleRuntime {
     ) -> Result<u32, HleError> {
         let len = bytes.len() as u32;
         let capacity = min_capacity.max(len);
-        let allocation = self.alloc(
-            capacity.checked_add(CXX_STRING_REP_HEADER_SIZE + 1).ok_or(
-                HleError::HeapExhausted {
-                    requested: capacity,
-                },
-            )?,
-            4,
+        let size = capacity.checked_add(CXX_STRING_REP_HEADER_SIZE + 1).ok_or(
+            HleError::HeapExhausted {
+                requested: capacity,
+            },
         )?;
+        let allocation = if self.cxx_string_recycling {
+            self.alloc_guest(size, 4)?
+        } else {
+            self.alloc(size, 4)?
+        };
         store32(memory, allocation, len)?;
         store32(memory, allocation.wrapping_add(4), capacity)?;
         store32(memory, allocation.wrapping_add(8), 0)?;
@@ -8339,6 +8505,42 @@ mod tests {
     }
 
     #[test]
+    fn libstdcxx_string_destructor_recycles_guest_reps() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x8000).unwrap();
+        memory.load_bytes(0x1100, b"stone\0").unwrap();
+        memory.load_bytes(0x1110, b"craft\0").unwrap();
+
+        let first = 0x1200;
+        let second = 0x1204;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x4000);
+        hle.enable_cxx_string_recycling();
+
+        cpu.set_reg(0, first);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 0);
+        hle.dispatch("_ZNSsC1EPKcRKSaIcE", &mut cpu, &mut memory)
+            .unwrap();
+        let first_data = memory.load32(first).unwrap();
+        assert_eq!(load_test_cxx_string(&mut memory, first), b"stone");
+
+        cpu.set_reg(0, first);
+        hle.dispatch("_ZNSsD1Ev", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load32(first).unwrap(), 0);
+
+        cpu.set_reg(0, second);
+        cpu.set_reg(1, 0x1110);
+        cpu.set_reg(2, 0);
+        hle.dispatch("_ZNSsC1EPKcRKSaIcE", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(second).unwrap(), first_data);
+        assert_eq!(load_test_cxx_string(&mut memory, second), b"craft");
+    }
+
+    #[test]
     fn dispatches_libstdcxx_hash_bytes() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x2000).unwrap();
@@ -8664,6 +8866,84 @@ mod tests {
             assert_eq!(cpu.pc(), 0x2700 + (idx as u32) * 4);
             assert_eq!(cpu.isa(), Isa::Thumb);
         }
+    }
+
+    #[test]
+    fn dispatches_injected_pointer_to_minecraft_input_facades() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x2800, 0x1000);
+        hle.push_pointer_event(0, HlePointerPhase::Down, 123.0, 45.0, 1.0);
+
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 0);
+        hle.dispatch("_ZN10Multitouch13isPointerDownEi", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 0);
+        hle.dispatch(
+            "_ZN10Multitouch19isPressedThisUpdateEi",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(14, 0x2008);
+        hle.dispatch(
+            "_ZN10Multitouch25getFirstActivePointerIdExEv",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        memory.store32(0x1100, 0).unwrap();
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch(
+            "_ZN10Multitouch19getActivePointerIdsEPPKi",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        let ids = memory.load32(0x1100).unwrap();
+        assert_ne!(ids, 0);
+        assert_eq!(memory.load32(ids).unwrap(), 0);
+
+        cpu.set_reg(14, 0x2010);
+        hle.dispatch("_ZN11MouseDevice4getXEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), 123.0);
+
+        cpu.set_reg(14, 0x2014);
+        hle.dispatch("_ZN10Multitouch6commitEv", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2018);
+        hle.dispatch(
+            "_ZN10Multitouch19isPressedThisUpdateEi",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        hle.push_pointer_event(0, HlePointerPhase::Up, 123.0, 45.0, 0.0);
+        cpu.set_reg(14, 0x201c);
+        hle.dispatch(
+            "_ZN10Multitouch20isReleasedThisUpdateEi",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(cpu.reg(0), 1);
     }
 
     #[test]
