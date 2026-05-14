@@ -214,10 +214,12 @@ tools/ws_cli.py --url ws://127.0.0.1:8766 tap 427 240
 Current live rendering reaches MCPE's first `eglSwapBuffers`, replays frames in
 SDL2, and the harness can capture framebuffer screenshots. A run on
 `DISPLAY=:0` has been verified past frame 2000 without the previous HLE
-`std::string` heap exhaustion. Input is still an approximate one-pointer
-Minecraft facade and audio remains stubbed; do not call this playable until the
-menu/game flow responds correctly and audio/input are wired through real enough
-Android paths.
+`std::string` heap exhaustion. WebSocket/SDL2 pointer events now enter the
+guest through a minimal `AInputQueue`/`AMotionEvent` facade and MCPE's
+`Multitouch::feed` target hook; a traced tap at `427,240` reached both down and
+up feed calls. Do not call this playable yet: the framebuffer still stays on
+the gradient/loading frame after input, the fake MCPE texture/geometry/UI
+resource HLE remains a likely menu blocker, and audio remains stubbed.
 Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,

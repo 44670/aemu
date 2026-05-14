@@ -46,10 +46,12 @@ const ANDROID_APP_INPUT_QUEUE_OFFSET: u32 = 0x20;
 const ANDROID_APP_WINDOW_OFFSET: u32 = 0x24;
 const ANDROID_APP_ACTIVITY_STATE_OFFSET: u32 = 0x38;
 const ANDROID_APP_DESTROY_REQUESTED_OFFSET: u32 = 0x3c;
+const ANDROID_APP_INPUT_POLL_SOURCE_OFFSET: u32 = 0x60;
 const ANDROID_APP_RUNNING_OFFSET: u32 = 0x6c;
 const ANDROID_APP_PENDING_INPUT_QUEUE_OFFSET: u32 = 0x7c;
 const ANDROID_APP_PENDING_WINDOW_OFFSET: u32 = 0x80;
 const ANDROID_POLL_SOURCE_MAIN: u32 = 1;
+const ANDROID_POLL_SOURCE_INPUT: u32 = 2;
 const APP_CMD_INIT_WINDOW: u32 = 1;
 const APP_CMD_GAINED_FOCUS: u32 = 6;
 const APP_CMD_START: u32 = 10;
@@ -659,7 +661,20 @@ impl NativeRuntime {
             harness.window,
         )?;
         self.store_runtime32(app.wrapping_add(ANDROID_APP_WINDOW_OFFSET), 0)?;
-        self.store_runtime32(app.wrapping_add(ANDROID_APP_INPUT_QUEUE_OFFSET), 0)?;
+        self.store_runtime32(
+            app.wrapping_add(ANDROID_APP_INPUT_QUEUE_OFFSET),
+            harness.input_queue,
+        )?;
+        self.store_runtime32(
+            app.wrapping_add(ANDROID_APP_INPUT_POLL_SOURCE_OFFSET),
+            ANDROID_POLL_SOURCE_INPUT,
+        )?;
+        self.store_runtime32(
+            app.wrapping_add(ANDROID_APP_INPUT_POLL_SOURCE_OFFSET + 0x04),
+            app,
+        )?;
+        self.hle
+            .set_input_poll_source(app.wrapping_add(ANDROID_APP_INPUT_POLL_SOURCE_OFFSET));
         self.store_runtime32(app.wrapping_add(ANDROID_APP_ACTIVITY_STATE_OFFSET), 0)?;
         self.store_runtime32(app.wrapping_add(ANDROID_APP_DESTROY_REQUESTED_OFFSET), 0)?;
         self.store_runtime32(app.wrapping_add(ANDROID_APP_RUNNING_OFFSET), 1)?;

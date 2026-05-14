@@ -41,6 +41,11 @@ const HWCAP_NEON: u32 = 1 << 12;
 const HWCAP_VFPV3: u32 = 1 << 13;
 const HWCAP_TLS: u32 = 1 << 15;
 const HWCAP_VFPD32: u32 = 1 << 19;
+const AINPUT_EVENT_TYPE_MOTION: u32 = 2;
+const AINPUT_SOURCE_TOUCHSCREEN: u32 = 0x0000_1002;
+const AMOTION_EVENT_ACTION_DOWN: u32 = 0;
+const AMOTION_EVENT_ACTION_UP: u32 = 1;
+const AMOTION_EVENT_ACTION_MOVE: u32 = 2;
 const ARMV7_NEON_HWCAP: u32 = HWCAP_SWP
     | HWCAP_HALF
     | HWCAP_THUMB
@@ -349,6 +354,9 @@ pub struct HleRuntime {
     cxx_string_recycling: bool,
     input_pointer: HlePointer,
     input_pointer_ids: Option<u32>,
+    input_poll_source: Option<u32>,
+    pending_input_events: VecDeque<HleInputEvent>,
+    active_input_events: Vec<HleInputEvent>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -362,6 +370,18 @@ struct HlePointer {
     dx: f32,
     dy: f32,
     pressure: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HleInputEvent {
+    handle: u32,
+    event_type: u32,
+    source: u32,
+    device_id: u32,
+    action: u32,
+    pointer_id: i32,
+    x: f32,
+    y: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -780,6 +800,9 @@ impl HleRuntime {
             cxx_string_recycling: false,
             input_pointer: HlePointer::default(),
             input_pointer_ids: None,
+            input_poll_source: None,
+            pending_input_events: VecDeque::new(),
+            active_input_events: Vec::new(),
         }
     }
 
@@ -797,6 +820,10 @@ impl HleRuntime {
 
     pub fn set_unwind_tables(&mut self, unwind_tables: Vec<HleUnwindTable>) {
         self.unwind_tables = unwind_tables;
+    }
+
+    pub fn set_input_poll_source(&mut self, source: u32) {
+        self.input_poll_source = (source != 0).then_some(source);
     }
 
     pub(crate) fn has_created_pthreads(&self) -> bool {
@@ -818,6 +845,18 @@ impl HleRuntime {
         x: f32,
         y: f32,
         pressure: f32,
+    ) {
+        self.update_pointer_event(id, phase, x, y, pressure, true);
+    }
+
+    fn update_pointer_event(
+        &mut self,
+        id: i64,
+        phase: HlePointerPhase,
+        x: f32,
+        y: f32,
+        pressure: f32,
+        queue_android_input: bool,
     ) {
         let old_x = self.input_pointer.x;
         let old_y = self.input_pointer.y;
@@ -842,6 +881,26 @@ impl HleRuntime {
                 self.input_pointer.down = false;
             }
             HlePointerPhase::Move => {}
+        }
+        if queue_android_input {
+            let action = match phase {
+                HlePointerPhase::Down => AMOTION_EVENT_ACTION_DOWN,
+                HlePointerPhase::Up => AMOTION_EVENT_ACTION_UP,
+                HlePointerPhase::Move => AMOTION_EVENT_ACTION_MOVE,
+            };
+            self.pending_input_events.push_back(HleInputEvent {
+                handle: 0,
+                event_type: AINPUT_EVENT_TYPE_MOTION,
+                source: AINPUT_SOURCE_TOUCHSCREEN,
+                device_id: 1,
+                action,
+                pointer_id: id as i32,
+                x,
+                y,
+            });
+            if let Some(source) = self.input_poll_source {
+                self.alooper_events.push_back(source);
+            }
         }
     }
 
@@ -1044,6 +1103,39 @@ impl HleRuntime {
             | "_ZN11MenuGamePad4getXEi"
             | "_ZN11MenuGamePad4getYEi"
             | "_ZN11MenuGamePad9isTouchedEi" => Ok(self.return32(cpu, 0)),
+            "_ZN11MenuPointer4getXEv" => {
+                Ok(self.return32(cpu, (self.input_pointer.x.round() as i16 as i32) as u32))
+            }
+            "_ZN11MenuPointer4getYEv" => {
+                Ok(self.return32(cpu, (self.input_pointer.y.round() as i16 as i32) as u32))
+            }
+            "_ZN11MenuPointer9isPressedEv" => {
+                Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
+            }
+            "_ZN11MenuPointer4setXEs" => {
+                self.input_pointer.x = (cpu.reg(0) as u16 as i16) as f32;
+                Ok(self.return32(cpu, 0))
+            }
+            "_ZN11MenuPointer4setYEs" => {
+                self.input_pointer.y = (cpu.reg(0) as u16 as i16) as f32;
+                Ok(self.return32(cpu, 0))
+            }
+            "_ZN11MenuPointer10setPressedEb" => {
+                let pressed = cpu.reg(0) != 0;
+                if pressed && !self.input_pointer.down {
+                    self.input_pointer.pressed_this_update = true;
+                    self.input_pointer.released_this_update = false;
+                } else if !pressed && self.input_pointer.down {
+                    self.input_pointer.released_this_update = true;
+                    self.input_pointer.pressed_this_update = false;
+                }
+                self.input_pointer.down = pressed;
+                Ok(self.return32(cpu, 0))
+            }
+            "_ZN10Multitouch4feedEccssi" => self.minecraft_multitouch_feed(cpu, memory),
+            "_ZN11MouseDevice4feedEccss" | "_ZN11MouseDevice4feedEccssss" => {
+                self.minecraft_mouse_device_feed(cpu, memory)
+            }
             "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
             | "_ZN14KeyboardMapper4tickER15InputEventQueue"
             | "_ZN11MouseMapper21clearInputDeviceQueueEv"
@@ -1128,6 +1220,12 @@ impl HleRuntime {
             | "_ZN9RealmsAPI6updateEv" => Ok(self.return32(cpu, 0)),
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
+            }
+            name if name.starts_with("AInput")
+                || name.starts_with("AKey")
+                || name.starts_with("AMotion") =>
+            {
+                self.android_input(name, cpu, memory)
             }
             name if name.starts_with("AAsset") => self.android_asset(name, cpu, memory),
             name if name.starts_with("gl") => self.gles(name, cpu, memory),
@@ -1979,6 +2077,108 @@ impl HleRuntime {
         }
     }
 
+    fn android_input<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        match name {
+            "AInputQueue_attachLooper" => {
+                let data = self.stack_arg(cpu, memory, 4)?;
+                if data != 0 {
+                    self.input_poll_source = Some(data);
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "AInputQueue_detachLooper" => {
+                self.input_poll_source = None;
+                Ok(self.return32(cpu, 0))
+            }
+            "AInputQueue_getEvent" => {
+                let out_event = cpu.reg(1);
+                let Some(mut event) = self.pending_input_events.pop_front() else {
+                    return Ok(self.return32(cpu, u32::MAX));
+                };
+                event.handle = self.alloc(0x20, 4)?;
+                if out_event != 0 {
+                    store32(memory, out_event, event.handle)?;
+                }
+                self.active_input_events.push(event);
+                Ok(self.return32(cpu, 0))
+            }
+            "AInputQueue_preDispatchEvent" | "AInputQueue_finishEvent" => {
+                if name == "AInputQueue_finishEvent" {
+                    let event = cpu.reg(1);
+                    self.active_input_events
+                        .retain(|active| active.handle != event);
+                }
+                Ok(self.return32(cpu, 0))
+            }
+            "AInputEvent_getDeviceId" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(0, |event| event.device_id);
+                Ok(self.return32(cpu, value))
+            }
+            "AInputEvent_getSource" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(0, |event| event.source);
+                Ok(self.return32(cpu, value))
+            }
+            "AInputEvent_getType" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(0, |event| event.event_type);
+                Ok(self.return32(cpu, value))
+            }
+            "AKeyEvent_getAction"
+            | "AKeyEvent_getKeyCode"
+            | "AKeyEvent_getMetaState"
+            | "AKeyEvent_getRepeatCount" => Ok(self.return32(cpu, 0)),
+            "AMotionEvent_getAction" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(AMOTION_EVENT_ACTION_UP, |event| event.action);
+                Ok(self.return32(cpu, value))
+            }
+            "AMotionEvent_getAxisValue" => Ok(self.return_f32(cpu, 0.0)),
+            "AMotionEvent_getPointerCount" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .filter(|event| event.event_type == AINPUT_EVENT_TYPE_MOTION)
+                    .map_or(0, |_| 1);
+                Ok(self.return32(cpu, value))
+            }
+            "AMotionEvent_getPointerId" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(0, |event| event.pointer_id as u32);
+                Ok(self.return32(cpu, value))
+            }
+            "AMotionEvent_getRawX" | "AMotionEvent_getX" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(0.0, |event| if cpu.reg(1) == 0 { event.x } else { 0.0 });
+                Ok(self.return_f32(cpu, value))
+            }
+            "AMotionEvent_getRawY" | "AMotionEvent_getY" => {
+                let value = self
+                    .active_input_event(cpu.reg(0))
+                    .map_or(0.0, |event| if cpu.reg(1) == 0 { event.y } else { 0.0 });
+                Ok(self.return_f32(cpu, value))
+            }
+            _ => Ok(self.return32(cpu, 0)),
+        }
+    }
+
+    fn active_input_event(&self, handle: u32) -> Option<&HleInputEvent> {
+        self.active_input_events
+            .iter()
+            .find(|event| event.handle == handle)
+    }
+
     fn read_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
         let buf = cpu.reg(1);
@@ -2787,6 +2987,61 @@ impl HleRuntime {
         store32(memory, out.wrapping_add(4), 0)?;
         store32(memory, out.wrapping_add(8), 0)?;
         Ok(self.return32(cpu, out))
+    }
+
+    fn minecraft_multitouch_feed<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let active = cpu.reg(0) != 0;
+        let pressed = cpu.reg(1) != 0;
+        let x = (cpu.reg(2) as u16 as i16) as f32;
+        let y = (cpu.reg(3) as u16 as i16) as f32;
+        let pointer_id = self.stack_arg(cpu, memory, 4)? as i32;
+        let phase = if active {
+            if pressed {
+                HlePointerPhase::Down
+            } else {
+                HlePointerPhase::Up
+            }
+        } else {
+            HlePointerPhase::Move
+        };
+        let pressure = if phase == HlePointerPhase::Up {
+            0.0
+        } else {
+            1.0
+        };
+        self.update_pointer_event(pointer_id as i64, phase, x, y, pressure, false);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn minecraft_mouse_device_feed<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        _memory: &mut M,
+    ) -> Result<(), HleError> {
+        let active = cpu.reg(0) != 0;
+        let pressed = cpu.reg(1) != 0;
+        let x = (cpu.reg(2) as u16 as i16) as f32;
+        let y = (cpu.reg(3) as u16 as i16) as f32;
+        let phase = if active {
+            if pressed {
+                HlePointerPhase::Down
+            } else {
+                HlePointerPhase::Up
+            }
+        } else {
+            HlePointerPhase::Move
+        };
+        let pressure = if phase == HlePointerPhase::Up {
+            0.0
+        } else {
+            1.0
+        };
+        self.update_pointer_event(0, phase, x, y, pressure, false);
+        Ok(self.return32(cpu, 0))
     }
 
     fn minecraft_empty_pointer_ids_return<M: Memory>(
@@ -4634,6 +4889,15 @@ fn is_target_symbol(name: &str) -> bool {
             | "_ZN11MenuGamePad4getXEi"
             | "_ZN11MenuGamePad4getYEi"
             | "_ZN11MenuGamePad9isTouchedEi"
+            | "_ZN11MenuPointer10setPressedEb"
+            | "_ZN11MenuPointer4getXEv"
+            | "_ZN11MenuPointer4getYEv"
+            | "_ZN11MenuPointer4setXEs"
+            | "_ZN11MenuPointer4setYEs"
+            | "_ZN11MenuPointer9isPressedEv"
+            | "_ZN10Multitouch4feedEccssi"
+            | "_ZN11MouseDevice4feedEccss"
+            | "_ZN11MouseDevice4feedEccssss"
             | "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
             | "_ZN14KeyboardMapper4tickER15InputEventQueue"
             | "_ZN11MouseMapper21clearInputDeviceQueueEv"
@@ -6875,6 +7139,15 @@ mod tests {
             "_ZN11MenuGamePad4getXEi",
             "_ZN11MenuGamePad4getYEi",
             "_ZN11MenuGamePad9isTouchedEi",
+            "_ZN11MenuPointer10setPressedEb",
+            "_ZN11MenuPointer4getXEv",
+            "_ZN11MenuPointer4getYEv",
+            "_ZN11MenuPointer4setXEs",
+            "_ZN11MenuPointer4setYEs",
+            "_ZN11MenuPointer9isPressedEv",
+            "_ZN10Multitouch4feedEccssi",
+            "_ZN11MouseDevice4feedEccss",
+            "_ZN11MouseDevice4feedEccssss",
             "_ZN14KeyboardMapper21clearInputDeviceQueueEv",
             "_ZN14KeyboardMapper4tickER15InputEventQueue",
             "_ZN11MouseMapper21clearInputDeviceQueueEv",
@@ -8922,6 +9195,21 @@ mod tests {
             .unwrap();
         assert_eq!(f32::from_bits(cpu.reg(0)), 123.0);
 
+        cpu.set_reg(14, 0x2012);
+        hle.dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 123);
+
+        cpu.set_reg(14, 0x2016);
+        hle.dispatch("_ZN11MenuPointer4getYEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 45);
+
+        cpu.set_reg(14, 0x201a);
+        hle.dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
         cpu.set_reg(14, 0x2014);
         hle.dispatch("_ZN10Multitouch6commitEv", &mut cpu, &mut memory)
             .unwrap();
@@ -8943,6 +9231,124 @@ mod tests {
             &mut memory,
         )
         .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(14, 0x2020);
+        cpu.set_reg(0, (-7i16) as u16 as u32);
+        hle.dispatch("_ZN11MenuPointer4setXEs", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x2024);
+        cpu.set_reg(0, 88);
+        hle.dispatch("_ZN11MenuPointer4setYEs", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x2028);
+        cpu.set_reg(0, 1);
+        hle.dispatch("_ZN11MenuPointer10setPressedEb", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x202c);
+        hle.dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), (-7i32) as u32);
+        cpu.set_reg(14, 0x2030);
+        hle.dispatch("_ZN11MenuPointer4getYEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 88);
+        cpu.set_reg(14, 0x2034);
+        hle.dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        let mut input_hle = HleRuntime::new(0, 0x3800, 0x800);
+        input_hle.set_input_poll_source(0x1400);
+        input_hle.push_pointer_event(7, HlePointerPhase::Down, 321.0, 222.0, 1.0);
+        memory.store32(0x1110, 0).unwrap();
+        cpu.set_reg(14, 0x2040);
+        cpu.set_reg(0, 0x4444);
+        cpu.set_reg(1, 0x1110);
+        input_hle
+            .dispatch("AInputQueue_getEvent", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        let event = memory.load32(0x1110).unwrap();
+        assert_ne!(event, 0);
+
+        cpu.set_reg(14, 0x2044);
+        cpu.set_reg(0, event);
+        input_hle
+            .dispatch("AInputEvent_getType", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), AINPUT_EVENT_TYPE_MOTION);
+        cpu.set_reg(14, 0x2048);
+        cpu.set_reg(0, event);
+        input_hle
+            .dispatch("AInputEvent_getSource", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), AINPUT_SOURCE_TOUCHSCREEN);
+        cpu.set_reg(14, 0x204c);
+        cpu.set_reg(0, event);
+        input_hle
+            .dispatch("AMotionEvent_getAction", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), AMOTION_EVENT_ACTION_DOWN);
+        cpu.set_reg(14, 0x2050);
+        cpu.set_reg(0, event);
+        input_hle
+            .dispatch("AMotionEvent_getPointerCount", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        cpu.set_reg(14, 0x2054);
+        cpu.set_reg(0, event);
+        cpu.set_reg(1, 0);
+        input_hle
+            .dispatch("AMotionEvent_getPointerId", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 7);
+        cpu.set_reg(14, 0x2058);
+        cpu.set_reg(0, event);
+        cpu.set_reg(1, 0);
+        input_hle
+            .dispatch("AMotionEvent_getX", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), 321.0);
+        cpu.set_reg(14, 0x205c);
+        cpu.set_reg(0, event);
+        cpu.set_reg(1, 0);
+        input_hle
+            .dispatch("AMotionEvent_getY", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), 222.0);
+        cpu.set_reg(14, 0x2060);
+        cpu.set_reg(0, 0x4444);
+        cpu.set_reg(1, event);
+        cpu.set_reg(2, 1);
+        input_hle
+            .dispatch("AInputQueue_finishEvent", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(13, 0x3000);
+        memory.store32(0x3000, 4).unwrap();
+        cpu.set_reg(14, 0x2064);
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 77);
+        cpu.set_reg(3, 66);
+        input_hle
+            .dispatch("_ZN10Multitouch4feedEccssi", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x2068);
+        input_hle
+            .dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 77);
+        cpu.set_reg(14, 0x206c);
+        input_hle
+            .dispatch("_ZN11MenuPointer4getYEv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 66);
+        cpu.set_reg(14, 0x2070);
+        input_hle
+            .dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
+            .unwrap();
         assert_eq!(cpu.reg(0), 1);
     }
 
