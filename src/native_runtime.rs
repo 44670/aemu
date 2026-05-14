@@ -219,6 +219,9 @@ struct GuestThread {
     cpu: Cpu,
     wait: GuestThreadWait,
     trace_tail: VecDeque<NativeRuntimeTraceEntry>,
+    trace_pc_count: usize,
+    trace_mem32_count: usize,
+    trace_cxx_string_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1161,6 +1164,9 @@ impl NativeRuntime {
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
+            trace_pc_count: 0,
+            trace_mem32_count: 0,
+            trace_cxx_string_count: 0,
         })
     }
 
@@ -1462,14 +1468,75 @@ impl NativeRuntime {
         thread: &mut GuestThread,
         max_steps: usize,
     ) -> Result<bool, NativeRuntimeError> {
+        let trace_ranges = parse_trace_pc_ranges();
+        let trace_mem32 = parse_trace_mem32_specs();
+        let trace_cxx_strings = parse_trace_cxx_string_specs();
+        let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
+        let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
+        let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
         let main_cpu = std::mem::replace(&mut self.cpu, thread.cpu.clone());
         let previous_thread = self.hle.current_pthread();
         self.hle.set_current_pthread(thread.id);
         let mut result = Ok(false);
-        for _ in 0..max_steps {
+        for step_idx in 0..max_steps {
             if self.cpu.pc() == THREAD_RETURN_SENTINEL {
                 result = Ok(true);
                 break;
+            }
+            if !trace_ranges.is_empty() {
+                let pc = self.cpu.pc();
+                if trace_ranges
+                    .iter()
+                    .any(|&(start, end)| pc >= start && pc < end)
+                    && trace_pc_limit.map_or(true, |limit| thread.trace_pc_count < limit)
+                {
+                    thread.trace_pc_count += 1;
+                    let instr16 = self.link.memory.load16(pc).unwrap_or(0xffff);
+                    eprintln!(
+                        "THREAD_TRACE id={} step={step_idx}/{max_steps} {:?} pc={pc:#010x} instr16={instr16:#06x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} r4={:#010x} r5={:#010x} r6={:#010x} r7={:#010x} r8={:#010x} r9={:#010x} r10={:#010x} r11={:#010x} r12={:#010x} sp={:#010x} lr={:#010x}",
+                        thread.id,
+                        self.cpu.isa(),
+                        self.cpu.reg(0),
+                        self.cpu.reg(1),
+                        self.cpu.reg(2),
+                        self.cpu.reg(3),
+                        self.cpu.reg(4),
+                        self.cpu.reg(5),
+                        self.cpu.reg(6),
+                        self.cpu.reg(7),
+                        self.cpu.reg(8),
+                        self.cpu.reg(9),
+                        self.cpu.reg(10),
+                        self.cpu.reg(11),
+                        self.cpu.reg(12),
+                        self.cpu.reg(13),
+                        self.cpu.reg(14),
+                    );
+                }
+            }
+            if !trace_mem32.is_empty() {
+                let pc = self.cpu.pc();
+                for spec in trace_mem32.iter().filter(|spec| spec.pc == pc) {
+                    if trace_mem32_limit.is_some_and(|limit| thread.trace_mem32_count >= limit) {
+                        break;
+                    }
+                    thread.trace_mem32_count += 1;
+                    eprint!("THREAD_TRACE id={} ", thread.id);
+                    self.trace_mem32(step_idx, spec);
+                }
+            }
+            if !trace_cxx_strings.is_empty() {
+                let pc = self.cpu.pc();
+                for spec in trace_cxx_strings.iter().filter(|spec| spec.pc == pc) {
+                    if trace_cxx_string_limit
+                        .is_some_and(|limit| thread.trace_cxx_string_count >= limit)
+                    {
+                        break;
+                    }
+                    thread.trace_cxx_string_count += 1;
+                    eprint!("THREAD_TRACE id={} ", thread.id);
+                    self.trace_cxx_string(step_idx, spec);
+                }
             }
             push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
             match self.step() {
@@ -2905,6 +2972,9 @@ mod tests {
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
+            trace_pc_count: 0,
+            trace_mem32_count: 0,
+            trace_cxx_string_count: 0,
         });
 
         runtime.service_guest_threads(4).unwrap();
@@ -2991,6 +3061,9 @@ mod tests {
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
+            trace_pc_count: 0,
+            trace_mem32_count: 0,
+            trace_cxx_string_count: 0,
         });
 
         runtime

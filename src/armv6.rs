@@ -2520,7 +2520,7 @@ impl Cpu {
                     "VFP multiple transfer empty register list",
                 ));
             }
-            let base = self.arm_read_reg(rn, pc);
+            let base = self.vfp_transfer_base(rn, pc);
             let start = match (u, p) {
                 (true, false) => base,
                 (true, true) => base.wrapping_add(4),
@@ -2578,7 +2578,7 @@ impl Cpu {
             let double = (instr & 0x0f00_0f00) == 0x0d00_0b00;
             let rn = ((instr >> 16) & 0xf) as usize;
             let imm = (instr & 0xff) * 4;
-            let base = self.arm_read_reg(rn, pc);
+            let base = self.vfp_transfer_base(rn, pc);
             let addr = if instr & (1 << 23) != 0 {
                 base.wrapping_add(imm)
             } else {
@@ -6767,6 +6767,14 @@ impl Cpu {
             pc.wrapping_add(4)
         } else {
             self.regs[idx]
+        }
+    }
+
+    fn vfp_transfer_base(&self, idx: usize, pc: u32) -> u32 {
+        if idx == 15 && self.isa() == Isa::Thumb {
+            self.thumb_read_reg(idx, pc) & !3
+        } else {
+            self.arm_read_reg(idx, pc)
         }
     }
 
@@ -11928,6 +11936,14 @@ mod tests {
         mem.store32(0x100, 6.5f32.to_bits()).unwrap();
         cpu.execute_arm(0xed90_0a00, 0, &mut mem).unwrap(); // vldr s0, [r0]
         assert_eq!(f32::from_bits(cpu.sreg(0)), 6.5);
+
+        cpu.set_isa(Isa::Thumb);
+        mem.store32(0x108, 0x3b80_0000).unwrap();
+        mem.store32(0x10c, 0xdead_beef).unwrap();
+        cpu.execute_thumb32(0xed9f, 0x8a01, 0x100, &mut mem)
+            .unwrap(); // vldr s16, [pc, #4]
+        assert_eq!(cpu.sreg(16), 0x3b80_0000);
+        cpu.set_isa(Isa::Arm);
 
         cpu.set_sreg(1, 7.25f32.to_bits());
         cpu.execute_arm(0xedc0_0a01, 0, &mut mem).unwrap(); // vstr s1, [r0, #4]

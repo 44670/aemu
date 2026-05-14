@@ -18,8 +18,37 @@ const GL_ARRAY_BUFFER: u32 = 0x8892;
 const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const GL_STATIC_DRAW: u32 = 0x88e4;
 const GL_TEXTURE0: u32 = 0x84c0;
+const GL_TEXTURE_2D: u32 = 0x0de1;
+const GL_BLEND: u32 = 0x0be2;
+const GL_CULL_FACE: u32 = 0x0b44;
+const GL_DEPTH_TEST: u32 = 0x0b71;
+const GL_SCISSOR_TEST: u32 = 0x0c11;
+const GL_STENCIL_TEST: u32 = 0x0b90;
+const GL_LESS: u32 = 0x0201;
+const GL_ALWAYS: u32 = 0x0207;
+const GL_KEEP: u32 = 0x1e00;
+const GL_FRONT: u32 = 0x0404;
+const GL_BACK: u32 = 0x0405;
+const GL_FRONT_AND_BACK: u32 = 0x0408;
+const GL_ONE: u32 = 1;
+const GL_ZERO: u32 = 0;
+const GL_ALPHA: u32 = 0x1906;
+const GL_RGB: u32 = 0x1907;
 const GL_RGBA: u32 = 0x1908;
+const GL_LUMINANCE: u32 = 0x1909;
+const GL_LUMINANCE_ALPHA: u32 = 0x190a;
+const GL_BGRA_EXT: u32 = 0x80e1;
+const GL_BYTE: u32 = 0x1400;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_SHORT: u32 = 0x1402;
+const GL_UNSIGNED_SHORT: u32 = 0x1403;
+const GL_INT: u32 = 0x1404;
+const GL_UNSIGNED_INT: u32 = 0x1405;
+const GL_FLOAT: u32 = 0x1406;
+const GL_FIXED: u32 = 0x140c;
+const GL_UNSIGNED_SHORT_4_4_4_4: u32 = 0x8033;
+const GL_UNSIGNED_SHORT_5_5_5_1: u32 = 0x8034;
+const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
 const GL_NO_ERROR: u32 = 0;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
 const GL_LINK_STATUS: u32 = 0x8b82;
@@ -203,7 +232,9 @@ struct SdlGl {
 #[derive(Debug, Default)]
 struct SdlGlesReplay {
     buffers: HashMap<u32, u32>,
+    buffer_data: HashMap<u32, Vec<u8>>,
     textures: HashMap<u32, u32>,
+    texture_info: HashMap<u32, ReplayTextureInfo>,
     framebuffers: HashMap<u32, u32>,
     renderbuffers: HashMap<u32, u32>,
     shaders: HashMap<u32, u32>,
@@ -213,9 +244,24 @@ struct SdlGlesReplay {
     client_attrib_buffers: HashMap<u32, u32>,
     vertex_attribs: HashMap<u32, ReplayVertexAttrib>,
     current_program: u32,
+    active_texture: u32,
+    bound_textures: HashMap<(u32, u32), u32>,
     bound_array_buffer: u32,
     bound_element_array_buffer: u32,
+    bound_framebuffer: u32,
     bound_renderbuffer: u32,
+    viewport: (i32, i32, i32, i32),
+    enabled_caps: HashMap<u32, bool>,
+    blend_func: (u32, u32, u32, u32),
+    depth_func: u32,
+    depth_mask: bool,
+    color_mask: (bool, bool, bool, bool),
+    scissor: (i32, i32, i32, i32),
+    stencil_front_func: (u32, i32, u32),
+    stencil_back_func: (u32, i32, u32),
+    stencil_front_op: (u32, u32, u32),
+    stencil_back_op: (u32, u32, u32),
+    stencil_mask: u32,
     stats: SdlGlesReplayStats,
 }
 
@@ -223,6 +269,8 @@ struct SdlGlesReplay {
 struct ReplayProgram {
     host: u32,
     uniforms: HashMap<u32, i32>,
+    uniform_names: HashMap<u32, String>,
+    attributes: Vec<GlesActive>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -231,6 +279,123 @@ struct ReplayVertexAttrib {
     ty: u32,
     normalized: bool,
     stride: i32,
+    pointer: u32,
+    buffer: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ReplayTextureInfo {
+    width: i32,
+    height: i32,
+    format: u32,
+    ty: u32,
+    last_upload_width: i32,
+    last_upload_height: i32,
+    last_payload_len: usize,
+    last_nonzero_rgb_pixels: Option<usize>,
+    last_nonzero_alpha_pixels: Option<usize>,
+}
+
+struct SdlDrawChangeTrace {
+    limit: usize,
+    skip: usize,
+    include_unchanged: bool,
+    logged: usize,
+    submitted_draws: usize,
+    previous_default_framebuffer: Option<Vec<u8>>,
+}
+
+impl SdlDrawChangeTrace {
+    fn from_env(host: &Sdl2Host) -> HostResult<Self> {
+        let limit = env_usize("AEMU_TRACE_SDL_DRAW_CHANGES").unwrap_or(0);
+        let previous_default_framebuffer = if limit == 0 {
+            None
+        } else {
+            Some(host.read_framebuffer_rgba()?.2)
+        };
+        Ok(Self {
+            limit,
+            skip: env_usize("AEMU_TRACE_SDL_DRAW_CHANGES_SKIP").unwrap_or(0),
+            include_unchanged: std::env::var_os("AEMU_TRACE_SDL_DRAW_CHANGES_ALL").is_some(),
+            logged: 0,
+            submitted_draws: host.replay.stats.draw_arrays + host.replay.stats.draw_elements,
+            previous_default_framebuffer,
+        })
+    }
+
+    fn after_event(
+        &mut self,
+        host: &Sdl2Host,
+        event_index: usize,
+        event: &GlesEvent,
+        before_draw_arrays: usize,
+        before_draw_elements: usize,
+    ) -> HostResult<()> {
+        if self.limit == 0 {
+            return Ok(());
+        }
+        let before_draws = before_draw_arrays + before_draw_elements;
+        let after_draws = host.replay.stats.draw_arrays + host.replay.stats.draw_elements;
+        if after_draws == before_draws {
+            return Ok(());
+        }
+        self.submitted_draws += after_draws - before_draws;
+        if self.submitted_draws <= self.skip {
+            return Ok(());
+        }
+        if self.logged >= self.limit {
+            return Ok(());
+        }
+
+        let draw_count = match event {
+            GlesEvent::DrawArrays { count, .. } | GlesEvent::DrawElements { count, .. } => *count,
+            _ => 0,
+        };
+        let bound_texture_2d = host
+            .replay
+            .bound_textures
+            .get(&(host.replay.active_texture, GL_TEXTURE_2D))
+            .copied()
+            .unwrap_or(0);
+        let (viewport_x, viewport_y, viewport_width, viewport_height) = host.replay.viewport;
+        let details = host.describe_draw_event(event);
+
+        if host.replay.bound_framebuffer != 0 {
+            if self.include_unchanged {
+                self.logged += 1;
+                eprintln!(
+                    "SDL draw-change event={event_index} draw={} kind={} count={draw_count} fb={} program={} active_texture=0x{:04x} tex2d={} viewport={viewport_x},{viewport_y},{viewport_width},{viewport_height} skipped_default_readback=bound-fbo {details}",
+                    self.submitted_draws,
+                    event.kind(),
+                    host.replay.bound_framebuffer,
+                    host.replay.current_program,
+                    host.replay.active_texture,
+                    bound_texture_2d,
+                );
+            }
+            return Ok(());
+        }
+
+        let (_, _, pixels) = host.read_framebuffer_rgba()?;
+        let (changed_pixels, changed_bytes) = self
+            .previous_default_framebuffer
+            .as_deref()
+            .map_or((0, 0), |previous| framebuffer_delta(previous, &pixels));
+        self.previous_default_framebuffer = Some(pixels);
+        if changed_pixels == 0 && !self.include_unchanged {
+            return Ok(());
+        }
+        self.logged += 1;
+        eprintln!(
+            "SDL draw-change event={event_index} draw={} kind={} count={draw_count} fb=0 program={} active_texture=0x{:04x} tex2d={} viewport={viewport_x},{viewport_y},{viewport_width},{viewport_height} changed_pixels={changed_pixels} changed_bytes={changed_bytes} {details}",
+            self.submitted_draws,
+            event.kind(),
+            host.replay.current_program,
+            host.replay.active_texture,
+            bound_texture_2d,
+        );
+        Ok(())
+    }
 }
 
 impl Sdl2Host {
@@ -259,6 +424,24 @@ impl Sdl2Host {
         video.gl_set_swap_interval(1).map_err(HostError::new)?;
         let gl = SdlGl::load(&video)?;
         let event_pump = sdl.event_pump().map_err(HostError::new)?;
+        let mut replay = SdlGlesReplay {
+            active_texture: GL_TEXTURE0,
+            viewport: (0, 0, config.width as i32, config.height as i32),
+            blend_func: (GL_ONE, GL_ZERO, GL_ONE, GL_ZERO),
+            depth_func: GL_LESS,
+            depth_mask: true,
+            color_mask: (true, true, true, true),
+            scissor: (0, 0, config.width as i32, config.height as i32),
+            stencil_front_func: (GL_ALWAYS, 0, u32::MAX),
+            stencil_back_func: (GL_ALWAYS, 0, u32::MAX),
+            stencil_front_op: (GL_KEEP, GL_KEEP, GL_KEEP),
+            stencil_back_op: (GL_KEEP, GL_KEEP, GL_KEEP),
+            stencil_mask: u32::MAX,
+            ..SdlGlesReplay::default()
+        };
+        replay
+            .bound_textures
+            .insert((GL_TEXTURE0, GL_TEXTURE_2D), 0);
 
         Ok(Self {
             _sdl: sdl,
@@ -267,7 +450,7 @@ impl Sdl2Host {
             _gl_context: gl_context,
             event_pump,
             gl,
-            replay: SdlGlesReplay::default(),
+            replay,
         })
     }
 
@@ -380,6 +563,12 @@ fn load_optional_gl<T: Copy>(video: &sdl2::VideoSubsystem, name: &str) -> Option
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TexturePayloadStats {
+    nonzero_rgb_pixels: usize,
+    nonzero_alpha_pixels: usize,
+}
+
 impl Sdl2Host {
     fn replay_gles_event(&mut self, event: &GlesEvent) -> HostResult<()> {
         match event {
@@ -402,6 +591,8 @@ impl Sdl2Host {
                     ReplayProgram {
                         host,
                         uniforms: HashMap::new(),
+                        uniform_names: HashMap::new(),
+                        attributes: Vec::new(),
                     },
                 );
             }
@@ -421,9 +612,12 @@ impl Sdl2Host {
                 uniforms,
                 attributes,
             } => self.link_replay_program(*program, uniforms, attributes)?,
-            GlesEvent::ActiveTexture { texture } => unsafe {
-                (self.gl.active_texture)(*texture);
-            },
+            GlesEvent::ActiveTexture { texture } => {
+                self.replay.active_texture = *texture;
+                unsafe {
+                    (self.gl.active_texture)(*texture);
+                }
+            }
             GlesEvent::BindBuffer { target, buffer } => {
                 let host = self.host_buffer(*buffer);
                 unsafe {
@@ -448,6 +642,14 @@ impl Sdl2Host {
                 unsafe {
                     (self.gl.buffer_data)(*target, size, data, *usage);
                 }
+                if let Some(guest) = self.bound_guest_buffer(*target) {
+                    let mut stored = vec![0_u8; size as usize];
+                    if let Some(payload) = payload.as_deref() {
+                        let copy_len = stored.len().min(payload.len());
+                        stored[..copy_len].copy_from_slice(&payload[..copy_len]);
+                    }
+                    self.replay.buffer_data.insert(guest, stored);
+                }
             }
             GlesEvent::BufferSubData {
                 target,
@@ -463,10 +665,22 @@ impl Sdl2Host {
                     unsafe {
                         (self.gl.buffer_sub_data)(*target, offset, size, payload.as_ptr().cast());
                     }
+                    if let Some(guest) = self.bound_guest_buffer(*target) {
+                        update_buffer_data(
+                            &mut self.replay.buffer_data,
+                            guest,
+                            offset as usize,
+                            size as usize,
+                            payload,
+                        );
+                    }
                 }
             }
             GlesEvent::BindTexture { target, texture } => {
                 let host = self.host_texture(*texture);
+                self.replay
+                    .bound_textures
+                    .insert((self.replay.active_texture, *target), *texture);
                 unsafe {
                     (self.gl.bind_texture)(*target, host);
                 }
@@ -476,6 +690,7 @@ impl Sdl2Host {
                 framebuffer,
             } => {
                 let host = self.host_framebuffer(*framebuffer);
+                self.replay.bound_framebuffer = *framebuffer;
                 unsafe {
                     (self.gl.bind_framebuffer)(*target, host);
                 }
@@ -554,6 +769,15 @@ impl Sdl2Host {
                 let data = payload
                     .as_ref()
                     .map_or(ptr::null(), |payload| payload.as_ptr().cast::<c_void>());
+                self.track_texture_image(
+                    *target,
+                    *level,
+                    *width,
+                    *height,
+                    *format,
+                    *ty,
+                    payload.as_deref(),
+                );
                 unsafe {
                     (self.gl.tex_image_2d)(
                         *target,
@@ -581,6 +805,15 @@ impl Sdl2Host {
                 ..
             } => {
                 if let Some(payload) = payload {
+                    self.track_texture_sub_image(
+                        *target,
+                        *level,
+                        *width,
+                        *height,
+                        *format,
+                        *ty,
+                        Some(payload),
+                    );
                     unsafe {
                         (self.gl.tex_sub_image_2d)(
                             *target,
@@ -643,6 +876,8 @@ impl Sdl2Host {
                         ty: *ty,
                         normalized: *normalized,
                         stride: *stride,
+                        pointer: *pointer,
+                        buffer: self.replay.bound_array_buffer,
                     },
                 );
                 self.replay
@@ -668,54 +903,86 @@ impl Sdl2Host {
                     (self.gl.enable_vertex_attrib_array)(*index);
                 }
             }
-            GlesEvent::Enable { cap } => unsafe {
-                (self.gl.enable)(*cap);
-            },
-            GlesEvent::Disable { cap } => unsafe {
-                (self.gl.disable)(*cap);
-            },
-            GlesEvent::BlendFunc { sfactor, dfactor } => unsafe {
-                (self.gl.blend_func)(*sfactor, *dfactor);
-            },
+            GlesEvent::Enable { cap } => {
+                let enabled = !(*cap == GL_STENCIL_TEST && env_flag("AEMU_SDL_DISABLE_STENCIL"));
+                self.replay.enabled_caps.insert(*cap, enabled);
+                unsafe {
+                    if enabled {
+                        (self.gl.enable)(*cap);
+                    } else {
+                        (self.gl.disable)(*cap);
+                    }
+                }
+            }
+            GlesEvent::Disable { cap } => {
+                self.replay.enabled_caps.insert(*cap, false);
+                unsafe {
+                    (self.gl.disable)(*cap);
+                }
+            }
+            GlesEvent::BlendFunc { sfactor, dfactor } => {
+                self.replay.blend_func = (*sfactor, *dfactor, *sfactor, *dfactor);
+                unsafe {
+                    (self.gl.blend_func)(*sfactor, *dfactor);
+                }
+            }
             GlesEvent::BlendFuncSeparate {
                 src_rgb,
                 dst_rgb,
                 src_alpha,
                 dst_alpha,
-            } => unsafe {
-                (self.gl.blend_func_separate)(*src_rgb, *dst_rgb, *src_alpha, *dst_alpha);
-            },
+            } => {
+                self.replay.blend_func = (*src_rgb, *dst_rgb, *src_alpha, *dst_alpha);
+                unsafe {
+                    (self.gl.blend_func_separate)(*src_rgb, *dst_rgb, *src_alpha, *dst_alpha);
+                }
+            }
             GlesEvent::StencilFuncSeparate {
                 face,
                 func,
                 reference,
                 mask,
-            } => unsafe {
-                (self.gl.stencil_func_separate)(*face, *func, *reference, *mask);
-            },
+            } => {
+                self.set_stencil_func(*face, *func, *reference, *mask);
+                unsafe {
+                    (self.gl.stencil_func_separate)(*face, *func, *reference, *mask);
+                }
+            }
             GlesEvent::StencilOpSeparate {
                 face,
                 sfail,
                 dpfail,
                 dppass,
-            } => unsafe {
-                (self.gl.stencil_op_separate)(*face, *sfail, *dpfail, *dppass);
-            },
-            GlesEvent::StencilMask { mask } => unsafe {
-                (self.gl.stencil_mask)(*mask);
-            },
+            } => {
+                self.set_stencil_op(*face, *sfail, *dpfail, *dppass);
+                unsafe {
+                    (self.gl.stencil_op_separate)(*face, *sfail, *dpfail, *dppass);
+                }
+            }
+            GlesEvent::StencilMask { mask } => {
+                self.replay.stencil_mask = *mask;
+                unsafe {
+                    (self.gl.stencil_mask)(*mask);
+                }
+            }
             GlesEvent::CullFace { mode } => unsafe {
                 (self.gl.cull_face)(*mode);
             },
             GlesEvent::PolygonOffset { factor, units } => unsafe {
                 (self.gl.polygon_offset)(f32::from_bits(*factor), f32::from_bits(*units));
             },
-            GlesEvent::DepthFunc { func } => unsafe {
-                (self.gl.depth_func)(*func);
-            },
-            GlesEvent::DepthMask { enabled } => unsafe {
-                (self.gl.depth_mask)(gl_bool(*enabled));
-            },
+            GlesEvent::DepthFunc { func } => {
+                self.replay.depth_func = *func;
+                unsafe {
+                    (self.gl.depth_func)(*func);
+                }
+            }
+            GlesEvent::DepthMask { enabled } => {
+                self.replay.depth_mask = *enabled;
+                unsafe {
+                    (self.gl.depth_mask)(gl_bool(*enabled));
+                }
+            }
             GlesEvent::DepthRangef { near, far } => unsafe {
                 (self.gl.depth_rangef)(f32::from_bits(*near), f32::from_bits(*far));
             },
@@ -724,22 +991,28 @@ impl Sdl2Host {
                 green,
                 blue,
                 alpha,
-            } => unsafe {
-                (self.gl.color_mask)(
-                    gl_bool(*red),
-                    gl_bool(*green),
-                    gl_bool(*blue),
-                    gl_bool(*alpha),
-                );
-            },
+            } => {
+                self.replay.color_mask = (*red, *green, *blue, *alpha);
+                unsafe {
+                    (self.gl.color_mask)(
+                        gl_bool(*red),
+                        gl_bool(*green),
+                        gl_bool(*blue),
+                        gl_bool(*alpha),
+                    );
+                }
+            }
             GlesEvent::Scissor {
                 x,
                 y,
                 width,
                 height,
-            } => unsafe {
-                (self.gl.scissor)(*x, *y, *width, *height);
-            },
+            } => {
+                self.replay.scissor = (*x, *y, *width, *height);
+                unsafe {
+                    (self.gl.scissor)(*x, *y, *width, *height);
+                }
+            }
             GlesEvent::ClearColor {
                 red,
                 green,
@@ -771,9 +1044,12 @@ impl Sdl2Host {
                 y,
                 width,
                 height,
-            } => unsafe {
-                (self.gl.viewport)(*x, *y, *width, *height);
-            },
+            } => {
+                self.replay.viewport = (*x, *y, *width, *height);
+                unsafe {
+                    (self.gl.viewport)(*x, *y, *width, *height);
+                }
+            }
             GlesEvent::DrawArrays {
                 mode,
                 first,
@@ -881,13 +1157,17 @@ impl Sdl2Host {
         }
 
         let mut host_uniforms = HashMap::new();
+        let mut uniform_names = HashMap::new();
         for uniform in uniforms {
             if let Some(location) = self.lookup_host_uniform(host_program, &uniform.name) {
                 host_uniforms.insert(uniform.location, location);
+                uniform_names.insert(uniform.location, uniform.name.clone());
             }
         }
         if let Some(program) = self.replay.programs.get_mut(&guest_program) {
             program.uniforms = host_uniforms;
+            program.uniform_names = uniform_names;
+            program.attributes = attributes.to_vec();
         }
         Ok(())
     }
@@ -1001,6 +1281,15 @@ impl Sdl2Host {
         }
     }
 
+    fn bound_guest_buffer(&self, target: u32) -> Option<u32> {
+        let guest = match target {
+            GL_ARRAY_BUFFER => self.replay.bound_array_buffer,
+            GL_ELEMENT_ARRAY_BUFFER => self.replay.bound_element_array_buffer,
+            _ => return None,
+        };
+        (guest != 0).then_some(guest)
+    }
+
     fn prepare_client_attribs(
         &mut self,
         client_attribs: &[GlesClientAttribPayload],
@@ -1083,6 +1372,78 @@ impl Sdl2Host {
         host
     }
 
+    fn bound_guest_texture(&self, target: u32) -> Option<u32> {
+        self.replay
+            .bound_textures
+            .get(&(self.replay.active_texture, target))
+            .copied()
+            .filter(|texture| *texture != 0)
+    }
+
+    fn track_texture_image(
+        &mut self,
+        target: u32,
+        level: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        ty: u32,
+        payload: Option<&[u8]>,
+    ) {
+        if level != 0 {
+            return;
+        }
+        let Some(texture) = self.bound_guest_texture(target) else {
+            return;
+        };
+        let stats = texture_payload_stats(width, height, format, ty, payload);
+        self.replay.texture_info.insert(
+            texture,
+            ReplayTextureInfo {
+                width,
+                height,
+                format,
+                ty,
+                last_upload_width: width,
+                last_upload_height: height,
+                last_payload_len: payload.map_or(0, <[u8]>::len),
+                last_nonzero_rgb_pixels: stats.map(|stats| stats.nonzero_rgb_pixels),
+                last_nonzero_alpha_pixels: stats.map(|stats| stats.nonzero_alpha_pixels),
+            },
+        );
+    }
+
+    fn track_texture_sub_image(
+        &mut self,
+        target: u32,
+        level: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        ty: u32,
+        payload: Option<&[u8]>,
+    ) {
+        if level != 0 {
+            return;
+        }
+        let Some(texture) = self.bound_guest_texture(target) else {
+            return;
+        };
+        let stats = texture_payload_stats(width, height, format, ty, payload);
+        let entry = self.replay.texture_info.entry(texture).or_default();
+        if entry.width == 0 || entry.height == 0 {
+            entry.width = width;
+            entry.height = height;
+            entry.format = format;
+            entry.ty = ty;
+        }
+        entry.last_upload_width = width;
+        entry.last_upload_height = height;
+        entry.last_payload_len = payload.map_or(0, <[u8]>::len);
+        entry.last_nonzero_rgb_pixels = stats.map(|stats| stats.nonzero_rgb_pixels);
+        entry.last_nonzero_alpha_pixels = stats.map(|stats| stats.nonzero_alpha_pixels);
+    }
+
     fn host_framebuffer(&mut self, guest: u32) -> u32 {
         if guest == 0 {
             return 0;
@@ -1130,6 +1491,306 @@ impl Sdl2Host {
             return -1;
         };
         program.uniforms.get(&guest_location).copied().unwrap_or(-1)
+    }
+
+    fn set_stencil_func(&mut self, face: u32, func: u32, reference: i32, mask: u32) {
+        match face {
+            GL_FRONT => self.replay.stencil_front_func = (func, reference, mask),
+            GL_BACK => self.replay.stencil_back_func = (func, reference, mask),
+            GL_FRONT_AND_BACK => {
+                self.replay.stencil_front_func = (func, reference, mask);
+                self.replay.stencil_back_func = (func, reference, mask);
+            }
+            _ => {}
+        }
+    }
+
+    fn set_stencil_op(&mut self, face: u32, sfail: u32, dpfail: u32, dppass: u32) {
+        match face {
+            GL_FRONT => self.replay.stencil_front_op = (sfail, dpfail, dppass),
+            GL_BACK => self.replay.stencil_back_op = (sfail, dpfail, dppass),
+            GL_FRONT_AND_BACK => {
+                self.replay.stencil_front_op = (sfail, dpfail, dppass);
+                self.replay.stencil_back_op = (sfail, dpfail, dppass);
+            }
+            _ => {}
+        }
+    }
+
+    fn describe_draw_event(&self, event: &GlesEvent) -> String {
+        format!(
+            "program=\"{}\" state=\"{}\" texture=\"{}\" geometry=\"{}\"",
+            self.describe_current_program(),
+            self.describe_draw_state(),
+            self.describe_bound_texture(),
+            self.describe_draw_geometry(event)
+        )
+    }
+
+    fn describe_current_program(&self) -> String {
+        let Some(program) = self.replay.programs.get(&self.replay.current_program) else {
+            return "none".to_string();
+        };
+        let mut attrs = program
+            .attributes
+            .iter()
+            .map(|attr| format!("{}:{}:0x{:04x}", attr.location, attr.name, attr.ty))
+            .collect::<Vec<_>>();
+        attrs.sort();
+        let mut uniforms = program
+            .uniform_names
+            .iter()
+            .map(|(location, name)| format!("{location}:{name}"))
+            .collect::<Vec<_>>();
+        uniforms.sort();
+        format!(
+            "attrs=[{}] uniforms=[{}]",
+            attrs.join(","),
+            uniforms.join(",")
+        )
+    }
+
+    fn describe_draw_state(&self) -> String {
+        let caps = [
+            GL_BLEND,
+            GL_SCISSOR_TEST,
+            GL_DEPTH_TEST,
+            GL_STENCIL_TEST,
+            GL_CULL_FACE,
+        ]
+        .into_iter()
+        .filter(|cap| self.cap_enabled(*cap))
+        .map(gl_cap_name)
+        .collect::<Vec<_>>();
+        let caps = if caps.is_empty() {
+            "none".to_string()
+        } else {
+            caps.join("|")
+        };
+        let (src_rgb, dst_rgb, src_alpha, dst_alpha) = self.replay.blend_func;
+        let (red, green, blue, alpha) = self.replay.color_mask;
+        let (sx, sy, sw, sh) = self.replay.scissor;
+        let (front_func, front_ref, front_mask) = self.replay.stencil_front_func;
+        let (back_func, back_ref, back_mask) = self.replay.stencil_back_func;
+        let (front_sfail, front_dpfail, front_dppass) = self.replay.stencil_front_op;
+        let (back_sfail, back_dpfail, back_dppass) = self.replay.stencil_back_op;
+        format!(
+            "caps={caps} blend=0x{src_rgb:04x}/0x{dst_rgb:04x}/0x{src_alpha:04x}/0x{dst_alpha:04x} depth_func=0x{:04x} depth_mask={} color_mask={}{}{}{} scissor={sx},{sy},{sw},{sh} stencil_front=0x{front_func:04x}/{front_ref}/0x{front_mask:08x}/0x{front_sfail:04x},0x{front_dpfail:04x},0x{front_dppass:04x} stencil_back=0x{back_func:04x}/{back_ref}/0x{back_mask:08x}/0x{back_sfail:04x},0x{back_dpfail:04x},0x{back_dppass:04x} stencil_mask=0x{:08x}",
+            self.replay.depth_func,
+            bool_digit(self.replay.depth_mask),
+            bool_digit(red),
+            bool_digit(green),
+            bool_digit(blue),
+            bool_digit(alpha),
+            self.replay.stencil_mask
+        )
+    }
+
+    fn describe_bound_texture(&self) -> String {
+        let texture = self
+            .replay
+            .bound_textures
+            .get(&(self.replay.active_texture, GL_TEXTURE_2D))
+            .copied()
+            .unwrap_or(0);
+        let Some(info) = self.replay.texture_info.get(&texture) else {
+            return format!("tex2d={texture} info=none");
+        };
+        let rgb = info
+            .last_nonzero_rgb_pixels
+            .map_or_else(|| "?".to_string(), |value| value.to_string());
+        let alpha = info
+            .last_nonzero_alpha_pixels
+            .map_or_else(|| "?".to_string(), |value| value.to_string());
+        format!(
+            "tex2d={texture} size={}x{} fmt=0x{:04x} type=0x{:04x} last_upload={}x{} len={} nz_rgb={} nz_alpha={}",
+            info.width,
+            info.height,
+            info.format,
+            info.ty,
+            info.last_upload_width,
+            info.last_upload_height,
+            info.last_payload_len,
+            rgb,
+            alpha
+        )
+    }
+
+    fn describe_draw_geometry(&self, event: &GlesEvent) -> String {
+        let vertex_indices = self.draw_vertex_indices(event);
+        let index_text = if vertex_indices.is_empty() {
+            "indices=none".to_string()
+        } else {
+            let min = vertex_indices.iter().copied().min().unwrap_or(0);
+            let max = vertex_indices.iter().copied().max().unwrap_or(0);
+            format!("indices={} min={} max={}", vertex_indices.len(), min, max)
+        };
+        let mut attribs = self
+            .replay
+            .enabled_vertex_attribs
+            .iter()
+            .filter_map(|(index, enabled)| enabled.then_some(*index))
+            .collect::<Vec<_>>();
+        attribs.sort_unstable();
+        let attrib_text = attribs
+            .into_iter()
+            .take(8)
+            .map(|index| self.describe_vertex_attrib(index, event, &vertex_indices))
+            .collect::<Vec<_>>()
+            .join(";");
+        if attrib_text.is_empty() {
+            format!("{index_text} attrs=none")
+        } else {
+            format!("{index_text} attrs={attrib_text}")
+        }
+    }
+
+    fn draw_vertex_indices(&self, event: &GlesEvent) -> Vec<u32> {
+        match event {
+            GlesEvent::DrawArrays { first, count, .. } => {
+                let Some(count) = usize::try_from((*count).max(0)).ok() else {
+                    return Vec::new();
+                };
+                let first = (*first).max(0) as u32;
+                (0..count.min(2048))
+                    .map(|idx| first.wrapping_add(idx as u32))
+                    .collect()
+            }
+            GlesEvent::DrawElements {
+                count,
+                ty,
+                indices,
+                index_payload,
+                ..
+            } => {
+                let Some(index_size) = gl_index_size(*ty) else {
+                    return Vec::new();
+                };
+                let Some(count) = usize::try_from((*count).max(0)).ok() else {
+                    return Vec::new();
+                };
+                let from_bound_buffer = self.replay.bound_element_array_buffer != 0;
+                let source = if from_bound_buffer {
+                    self.replay
+                        .buffer_data
+                        .get(&self.replay.bound_element_array_buffer)
+                        .and_then(|buffer| buffer.get((*indices as usize)..))
+                } else {
+                    index_payload.as_deref()
+                };
+                let Some(source) = source else {
+                    return Vec::new();
+                };
+                let count = count.min(2048).min(source.len() / index_size);
+                (0..count)
+                    .filter_map(|idx| read_index(source, idx * index_size, *ty))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn describe_vertex_attrib(
+        &self,
+        index: u32,
+        event: &GlesEvent,
+        vertex_indices: &[u32],
+    ) -> String {
+        let Some(attrib) = self.replay.vertex_attribs.get(&index).copied() else {
+            return format!("{index}:missing");
+        };
+        let component_size = gl_component_size(attrib.ty).unwrap_or(0);
+        if attrib.size <= 0 || component_size == 0 {
+            return format!(
+                "{index}:ptr={} type=0x{:04x} size={} norm={} unsupported",
+                attrib.pointer,
+                attrib.ty,
+                attrib.size,
+                bool_digit(attrib.normalized)
+            );
+        }
+        let stride = if attrib.stride > 0 {
+            attrib.stride as usize
+        } else {
+            attrib.size as usize * component_size
+        };
+        let (source_name, base, source) = if attrib.buffer == 0 {
+            let payload = event_client_attrib_payload(event, index);
+            ("client".to_string(), 0usize, payload)
+        } else {
+            (
+                format!("buf{}", attrib.buffer),
+                attrib.pointer as usize,
+                self.replay
+                    .buffer_data
+                    .get(&attrib.buffer)
+                    .map(Vec::as_slice),
+            )
+        };
+        let Some(source) = source else {
+            return format!(
+                "{index}:{} ptr={} type=0x{:04x} size={} norm={} stride={} missing",
+                source_name,
+                attrib.pointer,
+                attrib.ty,
+                attrib.size,
+                bool_digit(attrib.normalized),
+                stride
+            );
+        };
+        let mut mins = vec![f32::INFINITY; attrib.size as usize];
+        let mut maxs = vec![f32::NEG_INFINITY; attrib.size as usize];
+        let mut seen = 0usize;
+        let mut oob = false;
+        let fallback_indices = [0_u32];
+        let indices = if vertex_indices.is_empty() {
+            &fallback_indices[..]
+        } else {
+            vertex_indices
+        };
+        for vertex in indices.iter().copied().take(2048) {
+            let vertex_base = base.saturating_add(vertex as usize * stride);
+            for component in 0..attrib.size as usize {
+                let offset = vertex_base.saturating_add(component * component_size);
+                let Some(value) =
+                    read_attrib_component(source, offset, attrib.ty, attrib.normalized)
+                else {
+                    oob = true;
+                    continue;
+                };
+                mins[component] = mins[component].min(value);
+                maxs[component] = maxs[component].max(value);
+            }
+            seen += 1;
+        }
+        if seen == 0 || mins.iter().any(|value| !value.is_finite()) {
+            return format!(
+                "{index}:{} ptr={} type=0x{:04x} size={} norm={} stride={} empty{}",
+                source_name,
+                attrib.pointer,
+                attrib.ty,
+                attrib.size,
+                bool_digit(attrib.normalized),
+                stride,
+                if oob { " oob" } else { "" }
+            );
+        }
+        format!(
+            "{index}:{} ptr={} type=0x{:04x} size={} norm={} stride={} min={} max={}{}",
+            source_name,
+            attrib.pointer,
+            attrib.ty,
+            attrib.size,
+            bool_digit(attrib.normalized),
+            stride,
+            format_f32_list(&mins),
+            format_f32_list(&maxs),
+            if oob { " oob" } else { "" }
+        )
+    }
+
+    fn cap_enabled(&self, cap: u32) -> bool {
+        self.replay.enabled_caps.get(&cap).copied().unwrap_or(false)
     }
 
     fn lookup_host_uniform(&self, host_program: u32, guest_name: &str) -> Option<i32> {
@@ -1412,8 +2073,12 @@ impl HostBackend for Sdl2Host {
             (self.gl.pixel_storei)(GL_UNPACK_ALIGNMENT, 1);
         }
         self.record_gl_errors(usize::MAX, "replay-init");
+        let mut draw_trace = SdlDrawChangeTrace::from_env(self)?;
         for (index, event) in events.iter().enumerate() {
+            let before_draw_arrays = self.replay.stats.draw_arrays;
+            let before_draw_elements = self.replay.stats.draw_elements;
             self.replay_gles_event(event)?;
+            draw_trace.after_event(self, index, event, before_draw_arrays, before_draw_elements)?;
             self.record_gl_errors(index, event.kind());
         }
         Ok(())
@@ -1454,6 +2119,280 @@ pub fn run_debug_shell(config: HostConfig, max_frames: Option<u64>) -> HostResul
             thread::sleep(remaining);
         }
     }
+}
+
+fn update_buffer_data(
+    buffers: &mut HashMap<u32, Vec<u8>>,
+    guest: u32,
+    offset: usize,
+    size: usize,
+    payload: &[u8],
+) {
+    let Some(end) = offset.checked_add(size) else {
+        return;
+    };
+    let entry = buffers.entry(guest).or_default();
+    if entry.len() < end {
+        entry.resize(end, 0);
+    }
+    let copy_len = size.min(payload.len());
+    entry[offset..offset + copy_len].copy_from_slice(&payload[..copy_len]);
+}
+
+fn texture_payload_stats(
+    width: i32,
+    height: i32,
+    format: u32,
+    ty: u32,
+    payload: Option<&[u8]>,
+) -> Option<TexturePayloadStats> {
+    let payload = payload?;
+    let pixel_count = usize::try_from(width)
+        .ok()
+        .zip(usize::try_from(height).ok())
+        .and_then(|(width, height)| width.checked_mul(height))?;
+    let mut nonzero_rgb_pixels = 0usize;
+    let mut nonzero_alpha_pixels = 0usize;
+    match (format, ty) {
+        (GL_RGBA, GL_UNSIGNED_BYTE) | (GL_BGRA_EXT, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(4).take(pixel_count) {
+                if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                if pixel[3] != 0 {
+                    nonzero_alpha_pixels += 1;
+                }
+            }
+        }
+        (GL_RGB, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(3).take(pixel_count) {
+                if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                nonzero_alpha_pixels += 1;
+            }
+        }
+        (GL_ALPHA, GL_UNSIGNED_BYTE) => {
+            for alpha in payload.iter().copied().take(pixel_count) {
+                if alpha != 0 {
+                    nonzero_alpha_pixels += 1;
+                }
+            }
+        }
+        (GL_LUMINANCE, GL_UNSIGNED_BYTE) => {
+            for luminance in payload.iter().copied().take(pixel_count) {
+                if luminance != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                nonzero_alpha_pixels += 1;
+            }
+        }
+        (GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                if pixel[0] != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                if pixel[1] != 0 {
+                    nonzero_alpha_pixels += 1;
+                }
+            }
+        }
+        (GL_RGB, GL_UNSIGNED_SHORT_5_6_5) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
+                if value != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                nonzero_alpha_pixels += 1;
+            }
+        }
+        (GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
+                if value & 0x0fff != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                if value & 0xf000 != 0 {
+                    nonzero_alpha_pixels += 1;
+                }
+            }
+        }
+        (GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
+                if value & 0xfffe != 0 {
+                    nonzero_rgb_pixels += 1;
+                }
+                if value & 0x0001 != 0 {
+                    nonzero_alpha_pixels += 1;
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(TexturePayloadStats {
+        nonzero_rgb_pixels,
+        nonzero_alpha_pixels,
+    })
+}
+
+fn gl_index_size(ty: u32) -> Option<usize> {
+    match ty {
+        GL_UNSIGNED_BYTE => Some(1),
+        GL_UNSIGNED_SHORT => Some(2),
+        GL_UNSIGNED_INT => Some(4),
+        _ => None,
+    }
+}
+
+fn read_index(bytes: &[u8], offset: usize, ty: u32) -> Option<u32> {
+    match ty {
+        GL_UNSIGNED_BYTE => bytes.get(offset).copied().map(u32::from),
+        GL_UNSIGNED_SHORT => bytes
+            .get(offset..offset + 2)
+            .map(|bytes| u32::from(u16::from_le_bytes([bytes[0], bytes[1]]))),
+        GL_UNSIGNED_INT => bytes
+            .get(offset..offset + 4)
+            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+        _ => None,
+    }
+}
+
+fn gl_component_size(ty: u32) -> Option<usize> {
+    match ty {
+        GL_BYTE | GL_UNSIGNED_BYTE => Some(1),
+        GL_SHORT | GL_UNSIGNED_SHORT => Some(2),
+        GL_INT | GL_UNSIGNED_INT | GL_FLOAT | GL_FIXED => Some(4),
+        _ => None,
+    }
+}
+
+fn read_attrib_component(bytes: &[u8], offset: usize, ty: u32, normalized: bool) -> Option<f32> {
+    match ty {
+        GL_BYTE => {
+            let value = *bytes.get(offset)? as i8;
+            Some(if normalized {
+                (f32::from(value) / 127.0).max(-1.0)
+            } else {
+                f32::from(value)
+            })
+        }
+        GL_UNSIGNED_BYTE => {
+            let value = *bytes.get(offset)?;
+            Some(if normalized {
+                f32::from(value) / 255.0
+            } else {
+                f32::from(value)
+            })
+        }
+        GL_SHORT => {
+            let bytes = bytes.get(offset..offset + 2)?;
+            let value = i16::from_le_bytes([bytes[0], bytes[1]]);
+            Some(if normalized {
+                (f32::from(value) / 32767.0).max(-1.0)
+            } else {
+                f32::from(value)
+            })
+        }
+        GL_UNSIGNED_SHORT => {
+            let bytes = bytes.get(offset..offset + 2)?;
+            let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+            Some(if normalized {
+                f32::from(value) / 65535.0
+            } else {
+                f32::from(value)
+            })
+        }
+        GL_INT => {
+            let bytes = bytes.get(offset..offset + 4)?;
+            let value = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Some(value as f32)
+        }
+        GL_UNSIGNED_INT => {
+            let bytes = bytes.get(offset..offset + 4)?;
+            let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Some(value as f32)
+        }
+        GL_FLOAT => {
+            let bytes = bytes.get(offset..offset + 4)?;
+            Some(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+        GL_FIXED => {
+            let bytes = bytes.get(offset..offset + 4)?;
+            let value = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Some(value as f32 / 65536.0)
+        }
+        _ => None,
+    }
+}
+
+fn event_client_attrib_payload(event: &GlesEvent, index: u32) -> Option<&[u8]> {
+    let client_attribs = match event {
+        GlesEvent::DrawArrays { client_attribs, .. }
+        | GlesEvent::DrawElements { client_attribs, .. } => client_attribs,
+        _ => return None,
+    };
+    client_attribs
+        .iter()
+        .find(|payload| payload.index == index)
+        .and_then(|payload| payload.payload.as_deref())
+}
+
+fn format_f32_list(values: &[f32]) -> String {
+    let items = values
+        .iter()
+        .map(|value| {
+            if value.abs() >= 1000.0 || value.fract().abs() < 0.0005 {
+                format!("{value:.0}")
+            } else {
+                format!("{value:.3}")
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", items.join(","))
+}
+
+fn bool_digit(value: bool) -> char {
+    if value { '1' } else { '0' }
+}
+
+fn gl_cap_name(cap: u32) -> &'static str {
+    match cap {
+        GL_BLEND => "blend",
+        GL_SCISSOR_TEST => "scissor",
+        GL_DEPTH_TEST => "depth",
+        GL_STENCIL_TEST => "stencil",
+        GL_CULL_FACE => "cull",
+        _ => "unknown",
+    }
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+fn framebuffer_delta(previous: &[u8], current: &[u8]) -> (usize, usize) {
+    let mut changed_bytes = 0usize;
+    let mut changed_pixels = 0usize;
+    for (previous, current) in previous.chunks_exact(4).zip(current.chunks_exact(4)) {
+        let mut pixel_changed = false;
+        for (old, new) in previous.iter().zip(current) {
+            if old != new {
+                changed_bytes += 1;
+                pixel_changed = true;
+            }
+        }
+        if pixel_changed {
+            changed_pixels += 1;
+        }
+    }
+    (changed_pixels, changed_bytes)
 }
 
 fn map_key(key: Keycode) -> HostKey {

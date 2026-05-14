@@ -119,6 +119,7 @@ const GL_RENDERER: u32 = 0x1f01;
 const GL_VERSION: u32 = 0x1f02;
 const GL_EXTENSIONS: u32 = 0x1f03;
 const GL_MAX_TEXTURE_SIZE: u32 = 0x0d33;
+const GL_TEXTURE_2D: u32 = 0x0de1;
 const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
 const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
 const GL_TEXTURE_WRAP_S: u32 = 0x2802;
@@ -3052,8 +3053,7 @@ impl HleRuntime {
         for offset in 0..FAKE_TEXTURE_PAIR_SIZE {
             store8(memory, pair.wrapping_add(offset), 0)?;
         }
-        store32(memory, pair.wrapping_add(0x38), width)?;
-        store32(memory, pair.wrapping_add(0x3c), height)?;
+        Self::store_fake_texture_pair(memory, pair, width, height)?;
         self.store_cxx_string_bytes(
             memory,
             pair.wrapping_add(0x40),
@@ -3069,6 +3069,34 @@ impl HleRuntime {
             pixels.len()
         ));
         Ok(self.return32(cpu, pair))
+    }
+
+    fn store_fake_texture_pair<M: Memory>(
+        memory: &mut M,
+        pair: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), HleError> {
+        store32(memory, pair, width)?;
+        store32(memory, pair.wrapping_add(0x04), height)?;
+        store32(memory, pair.wrapping_add(0x08), 0x1c)?;
+        store32(memory, pair.wrapping_add(0x0c), 1)?;
+        store32(memory, pair.wrapping_add(0x10), 0)?;
+        store32(memory, pair.wrapping_add(0x14), 1)?;
+        store32(memory, pair.wrapping_add(0x18), 8)?;
+        store32(memory, pair.wrapping_add(0x1c), 0)?;
+        store8(memory, pair.wrapping_add(0x20), 0)?;
+        store8(memory, pair.wrapping_add(0x21), 1)?;
+        store32(memory, pair.wrapping_add(0x24), 0)?;
+        store32(memory, pair.wrapping_add(0x28), GL_TEXTURE_2D)?;
+        store32(memory, pair.wrapping_add(0x2c), GL_RGBA)?;
+        store32(memory, pair.wrapping_add(0x30), GL_RGBA)?;
+        store32(memory, pair.wrapping_add(0x34), GL_UNSIGNED_BYTE)?;
+
+        store32(memory, pair.wrapping_add(0x38), width)?;
+        store32(memory, pair.wrapping_add(0x3c), height)?;
+
+        Ok(())
     }
 
     fn minecraft_geometry_group_get_geometry<M: Memory>(
@@ -3824,6 +3852,14 @@ impl HleRuntime {
                 let usage = cpu.reg(3);
                 let payload = gles_u32_len(cpu.reg(1))
                     .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
+                trace_gles_buffer_upload(
+                    "glBufferData",
+                    cpu.reg(0),
+                    0,
+                    cpu.reg(1),
+                    cpu.reg(2),
+                    payload.as_deref(),
+                );
                 self.set_guest_buffer_data(cpu.reg(0), cpu.reg(1), payload.as_deref());
                 self.push_gles_event(GlesEvent::BufferData {
                     target: cpu.reg(0),
@@ -3837,6 +3873,14 @@ impl HleRuntime {
             "glBufferSubData" => {
                 let payload = gles_u32_len(cpu.reg(2))
                     .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
+                trace_gles_buffer_upload(
+                    "glBufferSubData",
+                    cpu.reg(0),
+                    cpu.reg(1),
+                    cpu.reg(2),
+                    cpu.reg(3),
+                    payload.as_deref(),
+                );
                 self.set_guest_buffer_sub_data(
                     cpu.reg(0),
                     cpu.reg(1),
@@ -5868,10 +5912,22 @@ fn texture_asset_entry_candidates(location: &ResourceLocationDebug) -> Vec<Strin
             .contains('.');
         if has_extension {
             push_unique_string(&mut candidates, format!("assets/images/{stem}"));
+            push_unique_string(
+                &mut candidates,
+                format!("assets/resourcepacks/vanilla/images/{stem}"),
+            );
             push_unique_string(&mut candidates, format!("assets/{stem}"));
         } else {
             push_unique_string(&mut candidates, format!("assets/images/{stem}.png"));
             push_unique_string(&mut candidates, format!("assets/images/{stem}"));
+            push_unique_string(
+                &mut candidates,
+                format!("assets/resourcepacks/vanilla/images/{stem}.png"),
+            );
+            push_unique_string(
+                &mut candidates,
+                format!("assets/resourcepacks/vanilla/images/{stem}"),
+            );
             push_unique_string(&mut candidates, format!("assets/{stem}.png"));
             push_unique_string(&mut candidates, format!("assets/{stem}"));
         }
@@ -7539,6 +7595,129 @@ fn gles_copy_payload<M: Memory>(memory: &mut M, ptr: u32, bytes: usize) -> Optio
         payload.push(byte);
     }
     Some(payload)
+}
+
+fn trace_gles_buffer_upload(
+    name: &str,
+    target: u32,
+    offset: u32,
+    size: u32,
+    data: u32,
+    payload: Option<&[u8]>,
+) {
+    if std::env::var_os("AEMU_TRACE_GLES_BUFFER_UPLOADS").is_none() {
+        return;
+    }
+    let min_size = std::env::var("AEMU_TRACE_GLES_BUFFER_UPLOADS_MIN")
+        .ok()
+        .and_then(|raw| parse_env_usize(&raw))
+        .unwrap_or(0);
+    let size_usize = usize::try_from(size).unwrap_or(usize::MAX);
+    if size_usize < min_size {
+        return;
+    }
+    let target_filter = std::env::var("AEMU_TRACE_GLES_BUFFER_UPLOADS_TARGET").ok();
+    if target_filter
+        .as_deref()
+        .is_some_and(|filter| !gles_target_matches_filter(target, filter))
+    {
+        return;
+    }
+
+    let payload_len = payload.map_or(0, <[u8]>::len);
+    let nonzero = payload
+        .map(|payload| payload.iter().filter(|byte| **byte != 0).count())
+        .unwrap_or(0);
+    let summary = std::env::var("AEMU_TRACE_GLES_BUFFER_UPLOADS_STRIDE")
+        .ok()
+        .and_then(|raw| parse_env_usize(&raw))
+        .and_then(|stride| payload.and_then(|payload| summarize_interleaved_vertices(payload, stride)));
+    eprintln!(
+        "GLES_UPLOAD {name} target=0x{target:04x} offset=0x{offset:x} size=0x{size:x} data=0x{data:08x} payload_len={} nonzero={}{}",
+        payload_len,
+        nonzero,
+        summary
+            .as_deref()
+            .map_or_else(String::new, |summary| format!(" {summary}"))
+    );
+}
+
+fn gles_target_matches_filter(target: u32, filter: &str) -> bool {
+    filter.split(',').map(str::trim).any(|part| match part {
+        "array" | "GL_ARRAY_BUFFER" => target == GL_ARRAY_BUFFER,
+        "element" | "GL_ELEMENT_ARRAY_BUFFER" => target == GL_ELEMENT_ARRAY_BUFFER,
+        _ => parse_env_usize(part).is_some_and(|value| value == target as usize),
+    })
+}
+
+fn summarize_interleaved_vertices(payload: &[u8], stride: usize) -> Option<String> {
+    if stride == 0 {
+        return None;
+    }
+    let vertices = payload.len() / stride;
+    if vertices == 0 {
+        return Some(format!("stride={} vertices=0", stride));
+    }
+    let mut uv_nonzero = 0usize;
+    let mut uv_min = [u16::MAX; 2];
+    let mut uv_max = [0_u16; 2];
+    let mut samples = Vec::new();
+    for vertex in 0..vertices {
+        let base = vertex * stride;
+        let u = read_u16_le(payload, base + 16).unwrap_or(0);
+        let v = read_u16_le(payload, base + 18).unwrap_or(0);
+        if u != 0 || v != 0 {
+            uv_nonzero += 1;
+        }
+        uv_min[0] = uv_min[0].min(u);
+        uv_min[1] = uv_min[1].min(v);
+        uv_max[0] = uv_max[0].max(u);
+        uv_max[1] = uv_max[1].max(v);
+        if samples.len() < 4 {
+            let x = read_f32_le(payload, base).unwrap_or(0.0);
+            let y = read_f32_le(payload, base + 4).unwrap_or(0.0);
+            let z = read_f32_le(payload, base + 8).unwrap_or(0.0);
+            let color = read_u32_le(payload, base + 12).unwrap_or(0);
+            samples.push(format!(
+                "{vertex}:pos={x:.2},{y:.2},{z:.2} color=0x{color:08x} uv={u},{v}"
+            ));
+        }
+    }
+    Some(format!(
+        "stride={} vertices={} uv_nonzero={} uv_min={},{} uv_max={},{} samples=[{}]",
+        stride,
+        vertices,
+        uv_nonzero,
+        uv_min[0],
+        uv_min[1],
+        uv_max[0],
+        uv_max[1],
+        samples.join(";")
+    ))
+}
+
+fn parse_env_usize(raw: &str) -> Option<usize> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    raw.strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .map_or_else(|| raw.parse().ok(), |hex| usize::from_str_radix(hex, 16).ok())
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let bytes = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let bytes = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_f32_le(bytes: &[u8], offset: usize) -> Option<f32> {
+    read_u32_le(bytes, offset).map(f32::from_bits)
 }
 
 fn gles_u32_len(bytes: u32) -> Option<usize> {
@@ -9483,6 +9662,15 @@ mod tests {
 
         let pair = cpu.reg(0);
         assert_ne!(pair, 0);
+        assert_eq!(memory.load32(pair).unwrap(), FAKE_TEXTURE_SIDE);
+        assert_eq!(memory.load32(pair + 0x04).unwrap(), FAKE_TEXTURE_SIDE);
+        assert_eq!(memory.load32(pair + 0x08).unwrap(), 0x1c);
+        assert_eq!(memory.load8(pair + 0x20).unwrap(), 0);
+        assert_eq!(memory.load8(pair + 0x21).unwrap(), 1);
+        assert_eq!(memory.load32(pair + 0x24).unwrap(), 0);
+        assert_eq!(memory.load32(pair + 0x28).unwrap(), GL_TEXTURE_2D);
+        assert_eq!(memory.load32(pair + 0x30).unwrap(), GL_RGBA);
+        assert_eq!(memory.load32(pair + 0x34).unwrap(), GL_UNSIGNED_BYTE);
         assert_eq!(memory.load32(pair + 0x38).unwrap(), FAKE_TEXTURE_SIDE);
         assert_eq!(memory.load32(pair + 0x3c).unwrap(), FAKE_TEXTURE_SIDE);
         let pixels = memory.load32(pair + 0x40).unwrap();
@@ -9494,6 +9682,7 @@ mod tests {
         assert_eq!(memory.load32(pixels - 8).unwrap(), FAKE_TEXTURE_BYTES);
         assert_eq!(memory.load8(pixels + 3).unwrap(), 0xff);
         assert_eq!(cpu.pc(), 0x2000);
+        assert!(hle.take_gles_events().is_empty());
 
         cpu.set_reg(14, 0x2004);
         hle.dispatch(
@@ -9504,6 +9693,20 @@ mod tests {
         .unwrap();
         assert_eq!(cpu.reg(0), pair);
         assert_eq!(cpu.pc(), 0x2004);
+        assert!(hle.take_gles_events().is_empty());
+    }
+
+    #[test]
+    fn minecraft_texture_candidates_include_vanilla_resource_pack() {
+        let candidates = texture_asset_entry_candidates(&ResourceLocationDebug {
+            path: "textures/blocks/dirt".to_string(),
+            package: "InUserPackage".to_string(),
+        });
+
+        assert!(
+            candidates.contains(&"assets/resourcepacks/vanilla/images/blocks/dirt.png".to_string())
+        );
+        assert!(candidates.contains(&"assets/images/textures/blocks/dirt.png".to_string()));
     }
 
     #[test]
