@@ -13,6 +13,7 @@ use sdl2::video::GLProfile;
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -296,28 +297,42 @@ struct ReplayTextureInfo {
 
 struct SdlDrawChangeTrace {
     limit: usize,
+    dump_limit: usize,
     skip: usize,
     include_unchanged: bool,
     logged: usize,
+    dumped: usize,
     submitted_draws: usize,
     previous_default_framebuffer: Option<Vec<u8>>,
+    dump_dir: Option<PathBuf>,
+    dump_matcher: Option<String>,
 }
 
 impl SdlDrawChangeTrace {
     fn from_env(host: &Sdl2Host) -> HostResult<Self> {
         let limit = env_usize("AEMU_TRACE_SDL_DRAW_CHANGES").unwrap_or(0);
-        let previous_default_framebuffer = if limit == 0 {
+        let dump_dir = std::env::var_os("AEMU_DUMP_SDL_DRAW_CHANGES_DIR").map(PathBuf::from);
+        let dump_limit = env_usize("AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT")
+            .unwrap_or_else(|| if dump_dir.is_some() { limit.max(32) } else { 0 });
+        if let Some(dir) = &dump_dir {
+            fs::create_dir_all(dir).map_err(|err| HostError::new(err.to_string()))?;
+        }
+        let previous_default_framebuffer = if limit == 0 && dump_limit == 0 {
             None
         } else {
             Some(host.read_framebuffer_rgba()?.2)
         };
         Ok(Self {
             limit,
+            dump_limit,
             skip: env_usize("AEMU_TRACE_SDL_DRAW_CHANGES_SKIP").unwrap_or(0),
             include_unchanged: std::env::var_os("AEMU_TRACE_SDL_DRAW_CHANGES_ALL").is_some(),
             logged: 0,
+            dumped: 0,
             submitted_draws: host.replay.stats.draw_arrays + host.replay.stats.draw_elements,
             previous_default_framebuffer,
+            dump_dir,
+            dump_matcher: std::env::var("AEMU_DUMP_SDL_DRAW_CHANGES_MATCH").ok(),
         })
     }
 
@@ -329,7 +344,7 @@ impl SdlDrawChangeTrace {
         before_draw_arrays: usize,
         before_draw_elements: usize,
     ) -> HostResult<()> {
-        if self.limit == 0 {
+        if self.limit == 0 && self.dump_limit == 0 {
             return Ok(());
         }
         let before_draws = before_draw_arrays + before_draw_elements;
@@ -339,9 +354,6 @@ impl SdlDrawChangeTrace {
         }
         self.submitted_draws += after_draws - before_draws;
         if self.submitted_draws <= self.skip {
-            return Ok(());
-        }
-        if self.logged >= self.limit {
             return Ok(());
         }
 
@@ -359,7 +371,7 @@ impl SdlDrawChangeTrace {
         let details = host.describe_draw_event(event);
 
         if host.replay.bound_framebuffer != 0 {
-            if self.include_unchanged {
+            if self.include_unchanged && self.logged < self.limit {
                 self.logged += 1;
                 eprintln!(
                     "SDL draw-change event={event_index} draw={} kind={} count={draw_count} fb={} program={} active_texture=0x{:04x} tex2d={} viewport={viewport_x},{viewport_y},{viewport_width},{viewport_height} skipped_default_readback=bound-fbo {details}",
@@ -374,13 +386,48 @@ impl SdlDrawChangeTrace {
             return Ok(());
         }
 
-        let (_, _, pixels) = host.read_framebuffer_rgba()?;
+        let (width, height, pixels) = host.read_framebuffer_rgba()?;
         let (changed_pixels, changed_bytes) = self
             .previous_default_framebuffer
             .as_deref()
             .map_or((0, 0), |previous| framebuffer_delta(previous, &pixels));
+        let should_record = changed_pixels != 0 || self.include_unchanged;
+        let should_dump = should_record
+            && self.dumped < self.dump_limit
+            && self.dump_dir.is_some()
+            && self.dump_matcher.as_deref().map_or(true, |matcher| {
+                sdl_draw_change_matches(
+                    matcher,
+                    DrawChangeMatch {
+                        event_index,
+                        draw: self.submitted_draws,
+                        kind: event.kind(),
+                        program: host.replay.current_program,
+                        texture: bound_texture_2d,
+                    },
+                )
+            });
+        if should_dump {
+            self.dump_draw_png(
+                event_index,
+                event,
+                draw_count,
+                host.replay.current_program,
+                host.replay.active_texture,
+                bound_texture_2d,
+                host.replay.viewport,
+                changed_pixels,
+                changed_bytes,
+                width,
+                height,
+                &pixels,
+            )?;
+        }
         self.previous_default_framebuffer = Some(pixels);
         if changed_pixels == 0 && !self.include_unchanged {
+            return Ok(());
+        }
+        if self.logged >= self.limit {
             return Ok(());
         }
         self.logged += 1;
@@ -394,6 +441,132 @@ impl SdlDrawChangeTrace {
         );
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dump_draw_png(
+        &mut self,
+        event_index: usize,
+        event: &GlesEvent,
+        draw_count: i32,
+        program: u32,
+        active_texture: u32,
+        texture: u32,
+        viewport: (i32, i32, i32, i32),
+        changed_pixels: usize,
+        changed_bytes: usize,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> HostResult<()> {
+        let Some(dir) = self.dump_dir.as_deref() else {
+            return Ok(());
+        };
+        let rgb = framebuffer_rgba_to_top_down_rgb(width, height, rgba)?;
+        let png = encode_rgb_png(width, height, &rgb).map_err(HostError::new)?;
+        let stem = format!(
+            "{:04}-event{:05}-draw{:05}-{}-program{}-tex{}-{}x{}",
+            self.dumped,
+            event_index,
+            self.submitted_draws,
+            event.kind(),
+            program,
+            texture,
+            width,
+            height
+        );
+        let png_path = dir.join(format!("{stem}.png"));
+        fs::write(&png_path, png).map_err(|err| HostError::new(err.to_string()))?;
+        append_draw_dump_manifest(
+            dir,
+            &png_path,
+            self.dumped,
+            event_index,
+            self.submitted_draws,
+            event.kind(),
+            draw_count,
+            program,
+            active_texture,
+            texture,
+            viewport,
+            changed_pixels,
+            changed_bytes,
+            width,
+            height,
+        )?;
+        self.dumped += 1;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DrawChangeMatch<'a> {
+    event_index: usize,
+    draw: usize,
+    kind: &'a str,
+    program: u32,
+    texture: u32,
+}
+
+fn sdl_draw_change_matches(matcher: &str, draw: DrawChangeMatch<'_>) -> bool {
+    matcher
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            token.eq_ignore_ascii_case("all")
+                || token.eq_ignore_ascii_case(draw.kind)
+                || token.eq_ignore_ascii_case(&draw.event_index.to_string())
+                || token.eq_ignore_ascii_case(&format!("event{}", draw.event_index))
+                || token.eq_ignore_ascii_case(&format!("draw{}", draw.draw))
+                || token.eq_ignore_ascii_case(&format!("program{}", draw.program))
+                || token.eq_ignore_ascii_case(&format!("prog{}", draw.program))
+                || token.eq_ignore_ascii_case(&format!("tex{}", draw.texture))
+                || token.eq_ignore_ascii_case(&format!("0x{:x}", draw.texture))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_draw_dump_manifest(
+    dir: &Path,
+    png_path: &Path,
+    index: usize,
+    event_index: usize,
+    draw: usize,
+    kind: &str,
+    count: i32,
+    program: u32,
+    active_texture: u32,
+    texture: u32,
+    viewport: (i32, i32, i32, i32),
+    changed_pixels: usize,
+    changed_bytes: usize,
+    width: u32,
+    height: u32,
+) -> HostResult<()> {
+    use std::io::Write;
+
+    let row = serde_json::json!({
+        "index": index,
+        "event_index": event_index,
+        "draw": draw,
+        "kind": kind,
+        "count": count,
+        "program": program,
+        "active_texture": active_texture,
+        "texture": texture,
+        "viewport": [viewport.0, viewport.1, viewport.2, viewport.3],
+        "changed_pixels": changed_pixels,
+        "changed_bytes": changed_bytes,
+        "width": width,
+        "height": height,
+        "png": png_path.file_name().and_then(|name| name.to_str()).unwrap_or(""),
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("draw_manifest.jsonl"))
+        .map_err(|err| HostError::new(err.to_string()))?;
+    writeln!(file, "{row}").map_err(|err| HostError::new(err.to_string()))
 }
 
 impl Sdl2Host {
@@ -458,18 +631,37 @@ impl Sdl2Host {
 
     pub fn capture_framebuffer_rgb(&self) -> HostResult<SdlFramebufferCapture> {
         let (width, height, rgba) = self.read_framebuffer_rgba()?;
-        let width_usize = width as usize;
-        let height_usize = height as usize;
-        let mut rgb = Vec::with_capacity(width_usize * height_usize * 3);
-        for y in (0..height_usize).rev() {
-            let row = y * width_usize * 4;
-            for x in 0..width_usize {
-                let pixel = row + x * 4;
-                rgb.extend_from_slice(&rgba[pixel..pixel + 3]);
-            }
-        }
+        let rgb = framebuffer_rgba_to_top_down_rgb(width, height, &rgba)?;
         Ok(SdlFramebufferCapture { width, height, rgb })
     }
+}
+
+fn framebuffer_rgba_to_top_down_rgb(width: u32, height: u32, rgba: &[u8]) -> HostResult<Vec<u8>> {
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let expected = width_usize
+        .checked_mul(height_usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            HostError::new(format!(
+                "framebuffer dimensions too large: {width}x{height}"
+            ))
+        })?;
+    if rgba.len() < expected {
+        return Err(HostError::new(format!(
+            "framebuffer payload too short: {} bytes for {width}x{height}",
+            rgba.len()
+        )));
+    }
+    let mut rgb = Vec::with_capacity(width_usize * height_usize * 3);
+    for y in (0..height_usize).rev() {
+        let row = y * width_usize * 4;
+        for x in 0..width_usize {
+            let pixel = row + x * 4;
+            rgb.extend_from_slice(&rgba[pixel..pixel + 3]);
+        }
+    }
+    Ok(rgb)
 }
 
 impl SdlGl {
@@ -2438,5 +2630,41 @@ fn touch_pointer_event(
         x: x * width as f32,
         y: y * height as f32,
         pressure,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draw_change_matcher_accepts_event_draw_program_and_texture_tokens() {
+        let draw = DrawChangeMatch {
+            event_index: 1671,
+            draw: 42,
+            kind: "DrawElements",
+            program: 86,
+            texture: 325,
+        };
+
+        assert!(sdl_draw_change_matches("DrawElements", draw));
+        assert!(sdl_draw_change_matches("event1671", draw));
+        assert!(sdl_draw_change_matches("draw42", draw));
+        assert!(sdl_draw_change_matches("program86", draw));
+        assert!(sdl_draw_change_matches("prog86", draw));
+        assert!(sdl_draw_change_matches("tex325", draw));
+        assert!(sdl_draw_change_matches("0x145", draw));
+        assert!(!sdl_draw_change_matches("event1670,program79,tex324", draw));
+    }
+
+    #[test]
+    fn framebuffer_rgb_conversion_flips_gl_bottom_origin() {
+        let rgba = [
+            0x10, 0, 0, 0xff, 0x20, 0, 0, 0xff, 0, 0x30, 0, 0xff, 0, 0x40, 0, 0xff,
+        ];
+
+        let rgb = framebuffer_rgba_to_top_down_rgb(2, 2, &rgba).unwrap();
+
+        assert_eq!(rgb, vec![0, 0x30, 0, 0, 0x40, 0, 0x10, 0, 0, 0x20, 0, 0]);
     }
 }

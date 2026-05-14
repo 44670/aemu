@@ -34,6 +34,16 @@ UPLOAD_RE = re.compile(
     r"ty(?P<type>[0-9a-fA-F]+)$"
 )
 
+DRAW_RE = re.compile(
+    r"^(?P<index>\d+)-"
+    r"event(?P<event>\d+)-"
+    r"draw(?P<draw>\d+)-"
+    r"(?P<kind>[A-Za-z]+)-"
+    r"program(?P<program>\d+)-"
+    r"tex(?P<texture>\d+)-"
+    r"(?P<width>\d+)x(?P<height>\d+)$"
+)
+
 
 class TraceError(RuntimeError):
     pass
@@ -89,6 +99,20 @@ class UploadArtifact:
     @property
     def pair_key(self) -> tuple[str, int, int, int, int, int]:
         return (self.kind, self.texture, self.width, self.height, self.format, self.ty)
+
+
+@dataclasses.dataclass
+class DrawArtifact:
+    index: int
+    event_index: int
+    draw: int
+    kind: str
+    program: int
+    texture: int
+    width: int
+    height: int
+    png: pathlib.Path
+    png_info: PngInfo
 
 
 def parse_png(path: pathlib.Path) -> PngInfo:
@@ -264,6 +288,35 @@ def parse_upload_png(side: str, path: pathlib.Path, min_nonzero_rgb: int) -> Upl
     )
 
 
+def parse_draw_png(path: pathlib.Path, min_nonzero_rgb: int) -> DrawArtifact:
+    match = DRAW_RE.match(path.stem)
+    if not match:
+        raise TraceError(f"{path}: draw filename does not match trace pattern")
+    info = parse_png(path)
+    width = int(match.group("width"))
+    height = int(match.group("height"))
+    if info.width != width or info.height != height:
+        raise TraceError(
+            f"{path}: PNG dimensions {info.width}x{info.height} do not match filename {width}x{height}"
+        )
+    if info.nonzero_rgb_pixels < min_nonzero_rgb:
+        raise TraceError(
+            f"{path}: only {info.nonzero_rgb_pixels} nonzero RGB pixels, expected at least {min_nonzero_rgb}"
+        )
+    return DrawArtifact(
+        index=int(match.group("index")),
+        event_index=int(match.group("event")),
+        draw=int(match.group("draw")),
+        kind=match.group("kind"),
+        program=int(match.group("program")),
+        texture=int(match.group("texture")),
+        width=width,
+        height=height,
+        png=path,
+        png_info=info,
+    )
+
+
 def upload_payload_len(width: int, height: int, fmt: int, ty: int) -> int | None:
     pixels = width * height
     if ty in (
@@ -384,6 +437,32 @@ def validate_manifest(hle: list[UploadArtifact], manifest: list[dict], manifest_
                 )
 
 
+def validate_draw_manifest(
+    draws: list[DrawArtifact], manifest: list[dict], manifest_path: pathlib.Path
+) -> None:
+    by_index = {item.index: item for item in draws}
+    for row in manifest:
+        index = row.get("index")
+        item = by_index.get(index)
+        if item is None:
+            raise TraceError(f"{manifest_path}: row index {index!r} has no matching draw PNG")
+        checks = {
+            "event_index": item.event_index,
+            "draw": item.draw,
+            "kind": item.kind,
+            "program": item.program,
+            "texture": item.texture,
+            "width": item.width,
+            "height": item.height,
+            "png": item.png.name,
+        }
+        for key, expected in checks.items():
+            if row.get(key) != expected:
+                raise TraceError(
+                    f"{manifest_path}: row {index} {key}={row.get(key)!r}, expected {expected!r}"
+                )
+
+
 def load_uploads(side: str, directory: pathlib.Path, min_nonzero_rgb: int) -> list[UploadArtifact]:
     if not directory.exists():
         return []
@@ -398,6 +477,15 @@ def load_uploads(side: str, directory: pathlib.Path, min_nonzero_rgb: int) -> li
         names = ", ".join(path.name for path in raw_without_png[:5])
         raise TraceError(f"{directory}: raw payloads without PNG: {names}")
     return uploads
+
+
+def load_draws(directory: pathlib.Path, min_nonzero_rgb: int) -> list[DrawArtifact]:
+    if not directory.exists():
+        return []
+    return [
+        parse_draw_png(path, min_nonzero_rgb)
+        for path in sorted(directory.glob("*.png"))
+    ]
 
 
 def pair_uploads(hle: list[UploadArtifact], sdl: list[UploadArtifact]) -> list[tuple[UploadArtifact, UploadArtifact]]:
@@ -462,6 +550,22 @@ def summarize_uploads(upload: UploadArtifact) -> dict:
     }
 
 
+def summarize_draw(draw: DrawArtifact) -> dict:
+    return {
+        "index": draw.index,
+        "event_index": draw.event_index,
+        "draw": draw.draw,
+        "kind": draw.kind,
+        "program": draw.program,
+        "texture": draw.texture,
+        "width": draw.width,
+        "height": draw.height,
+        "png": str(draw.png),
+        "png_nonzero_rgb_pixels": draw.png_info.nonzero_rgb_pixels,
+        "png_rgb_sha1": draw.png_info.rgb_sha1,
+    }
+
+
 def run_check(args) -> dict:
     root = pathlib.Path(args.trace_dir)
     hle_dir = pathlib.Path(args.hle_dir) if args.hle_dir else root / "hle"
@@ -485,6 +589,18 @@ def run_check(args) -> dict:
     screenshot = None
     if args.screenshot:
         screenshot = validate_screenshot(pathlib.Path(args.screenshot), args.min_screenshot_nonzero_rgb)
+    draw_dir = pathlib.Path(args.draw_dir) if args.draw_dir else root / "sdl-draw"
+    draws = load_draws(draw_dir, args.min_draw_nonzero_rgb)
+    if len(draws) < args.expect_draws:
+        raise TraceError(
+            f"{draw_dir}: found {len(draws)} draw PNGs, expected at least {args.expect_draws}"
+        )
+    draw_manifest_path = draw_dir / "draw_manifest.jsonl"
+    draw_manifest = read_manifest(draw_manifest_path)
+    if draws:
+        if not draw_manifest:
+            raise TraceError(f"{draw_manifest_path}: missing draw manifest")
+        validate_draw_manifest(draws, draw_manifest, draw_manifest_path)
     return {
         "ok": True,
         "trace_dir": str(root),
@@ -492,8 +608,11 @@ def run_check(args) -> dict:
         "sdl_uploads": len(sdl),
         "manifest_rows": len(manifest),
         "paired_uploads": len(pairs),
+        "draws": len(draws),
+        "draw_manifest_rows": len(draw_manifest),
         "hle": [summarize_uploads(item) for item in hle[: args.detail_limit]],
         "sdl": [summarize_uploads(item) for item in sdl[: args.detail_limit]],
+        "sdl_draw": [summarize_draw(item) for item in draws[: args.detail_limit]],
         "screenshot": None
         if screenshot is None
         else {
@@ -540,6 +659,7 @@ def run_self_test() -> None:
         stem_sdl = "0000-texsubimage2d-tex3-2x1-fmt1908-ty1401"
         raw = bytes([0x10, 0, 0, 0xFF, 0, 0x20, 0, 0xFF])
         rgb = bytes([0x10, 0, 0, 0, 0x20, 0])
+        draw_stem = "0000-event00011-draw00004-DrawElements-program86-tex325-2x1"
         (hle_dir / f"{stem_hle}.png").write_bytes(make_test_png(2, 1, rgb))
         (hle_dir / f"{stem_hle}.raw").write_bytes(raw)
         (sdl_dir / f"{stem_sdl}.png").write_bytes(make_test_png(2, 1, rgb))
@@ -569,21 +689,50 @@ def run_self_test() -> None:
             )
             + "\n"
         )
+        draw_dir = root / "sdl-draw"
+        draw_dir.mkdir()
+        (draw_dir / f"{draw_stem}.png").write_bytes(make_test_png(2, 1, rgb))
+        (draw_dir / "draw_manifest.jsonl").write_text(
+            json.dumps(
+                {
+                    "index": 0,
+                    "event_index": 11,
+                    "draw": 4,
+                    "kind": "DrawElements",
+                    "count": 6,
+                    "program": 86,
+                    "active_texture": 0x84C0,
+                    "texture": 325,
+                    "viewport": [0, 0, 2, 1],
+                    "changed_pixels": 2,
+                    "changed_bytes": 8,
+                    "width": 2,
+                    "height": 1,
+                    "png": f"{draw_stem}.png",
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
         args = argparse.Namespace(
             trace_dir=str(root),
             hle_dir=None,
             sdl_dir=None,
+            draw_dir=None,
             expect_hle=1,
             expect_sdl=1,
+            expect_draws=1,
             require_pairs=True,
             compare_raw=True,
             min_nonzero_rgb=1,
+            min_draw_nonzero_rgb=1,
             screenshot=None,
             min_screenshot_nonzero_rgb=1,
             detail_limit=3,
         )
         summary = run_check(args)
         assert summary["paired_uploads"] == 1
+        assert summary["draws"] == 1
         assert summary["hle"][0]["raw_nonzero_rgb_pixels"] == 2
         assert summary["hle"][0]["raw_nonzero_alpha_pixels"] == 2
 
@@ -595,10 +744,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("trace_dir", nargs="?", help="trace root containing hle/ and sdl/")
     parser.add_argument("--hle-dir", help="override HLE trace directory")
     parser.add_argument("--sdl-dir", help="override SDL trace directory")
+    parser.add_argument("--draw-dir", help="override SDL draw PNG directory")
     parser.add_argument("--screenshot", help="also validate a WebSocket screenshot PNG")
     parser.add_argument("--expect-hle", type=int, default=1)
     parser.add_argument("--expect-sdl", type=int, default=1)
+    parser.add_argument("--expect-draws", type=int, default=0)
     parser.add_argument("--min-nonzero-rgb", type=int, default=1)
+    parser.add_argument("--min-draw-nonzero-rgb", type=int, default=1)
     parser.add_argument("--min-screenshot-nonzero-rgb", type=int, default=1)
     parser.add_argument("--detail-limit", type=int, default=5)
     parser.add_argument("--no-require-pairs", action="store_true")
@@ -629,7 +781,8 @@ def main(argv=None) -> int:
         print(
             "trace_check ok: "
             f"hle={summary['hle_uploads']} sdl={summary['sdl_uploads']} "
-            f"manifest={summary['manifest_rows']} pairs={summary['paired_uploads']}"
+            f"manifest={summary['manifest_rows']} pairs={summary['paired_uploads']} "
+            f"draws={summary['draws']}"
         )
         if summary["screenshot"]:
             shot = summary["screenshot"]
@@ -645,6 +798,13 @@ def main(argv=None) -> int:
                     f"raw_nonzero_rgb={item['raw_nonzero_rgb_pixels']} "
                     f"raw_nonzero_alpha={item['raw_nonzero_alpha_pixels']}"
                 )
+        for item in summary["sdl_draw"]:
+            print(
+                f"sdl-draw: #{item['index']} event={item['event_index']} "
+                f"draw={item['draw']} program={item['program']} tex{item['texture']} "
+                f"{item['width']}x{item['height']} "
+                f"nonzero_rgb={item['png_nonzero_rgb_pixels']}"
+            )
     return 0
 
 

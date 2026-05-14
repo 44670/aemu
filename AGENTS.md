@@ -262,6 +262,26 @@ SDL replay side also writes `.png`/`.raw` for
 `tools/trace_check.py` validates PNG structure, nonblank RGB payloads, raw
 payload lengths, HLE manifest consistency, and HLE-vs-SDL upload matches.
 
+Per-draw framebuffer tracing:
+
+```sh
+trace_dir=target/mcpe-draw-trace
+AEMU_TRACE_SDL_DRAW_CHANGES=200 \
+AEMU_DUMP_SDL_DRAW_CHANGES_DIR=$trace_dir/sdl-draw \
+AEMU_DUMP_SDL_DRAW_CHANGES_MATCH=program86,tex325 \
+AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT=20 \
+DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
+tools/trace_check.py "$trace_dir" --expect-hle 0 --expect-sdl 0 --expect-draws 1 --no-require-pairs
+```
+
+`AEMU_DUMP_SDL_DRAW_CHANGES_DIR` writes changed default-framebuffer draws
+directly as `.png` files plus `draw_manifest.jsonl`. Use
+`AEMU_DUMP_SDL_DRAW_CHANGES_MATCH` tokens such as `all`, `DrawElements`,
+`event1671`, `draw42`, `program86`, `prog86`, or `tex325`.
+For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
+`Font::init()` run, and set `AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND=1` to keep
+`font/default8.png`/`font/ascii_sga.png` at their original APK dimensions.
+
 ## Guest Addressing
 
 Use a 1:1 guest virtual address map in the runtime path.

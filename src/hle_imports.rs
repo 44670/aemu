@@ -6051,11 +6051,13 @@ fn is_target_symbol(name: &str) -> bool {
     ) {
         return std::env::var_os("AEMU_MCPE_NATIVE_UI_CONTROL").is_none();
     }
+    if name == "_ZN4Font4initEv" {
+        return std::env::var_os("AEMU_MCPE_NATIVE_FONT_INIT").is_none();
+    }
     matches!(
         name,
         "_ZN8WebTokenC1ERKS_"
             | "_ZN8WebTokenC2ERKS_"
-            | "_ZN4Font4initEv"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
             | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
             | "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
@@ -6993,7 +6995,11 @@ fn fallback_texture_rgba(key: &str) -> Vec<u8> {
 }
 
 fn maybe_expand_minecraft_font_texture(key: &str, texture: DecodedTexture) -> DecodedTexture {
-    if !is_minecraft_bitmap_font_key(key) || texture.width != 128 || texture.height != 128 {
+    if std::env::var_os("AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND").is_some()
+        || !is_minecraft_bitmap_font_key(key)
+        || texture.width != 128
+        || texture.height != 128
+    {
         return texture;
     }
 
