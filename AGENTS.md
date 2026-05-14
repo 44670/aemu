@@ -242,10 +242,15 @@ cargo build --lib --target wasm32-unknown-unknown --no-default-features --featur
 Texture upload tracing:
 
 ```sh
-AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR=target/mcpe-gles-uploads \
+trace_dir=target/mcpe-trace-check
+AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR=$trace_dir/hle \
 AEMU_DUMP_GLES_TEXTURE_UPLOADS_MATCH=64x32 \
-AEMU_DUMP_GLES_TEXTURE_UPLOADS_LIMIT=20 \
+AEMU_DUMP_GLES_TEXTURE_UPLOADS_LIMIT=2 \
+AEMU_DUMP_SDL_TEXTURE_UPLOADS_DIR=$trace_dir/sdl \
+AEMU_DUMP_SDL_TEXTURE_UPLOADS_MATCH=64x32 \
+AEMU_DUMP_SDL_TEXTURE_UPLOADS_LIMIT=2 \
 DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
+tools/trace_check.py "$trace_dir" --expect-hle 2 --expect-sdl 2
 ```
 
 `AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR` dumps guest-captured texture uploads as
@@ -254,6 +259,8 @@ index, dimensions, format/type, source pointer, and nonzero-pixel counts. The
 SDL replay side also writes `.png`/`.raw` for
 `AEMU_DUMP_SDL_TEXTURE_UPLOADS_DIR`; use matching filters such as `all`,
 `teximage2d`, `texsubimage2d`, `64x32`, `tex325`, `fmt1908`, or `ty1401`.
+`tools/trace_check.py` validates PNG structure, nonblank RGB payloads, raw
+payload lengths, HLE manifest consistency, and HLE-vs-SDL upload matches.
 
 ## Guest Addressing
 
