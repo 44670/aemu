@@ -6742,7 +6742,7 @@ fn decode_image_rgba(
     format: ImageFormat,
 ) -> Result<DecodedTexture, String> {
     let lower = source.to_ascii_lowercase();
-    let decoded = match format {
+    let mut decoded = match format {
         ImageFormat::Png => decode_png_rgba(bytes),
         ImageFormat::Tga => decode_tga_rgba(bytes),
         ImageFormat::Jpeg => Err("JPEG decoding is not implemented".to_string()),
@@ -6758,12 +6758,23 @@ fn decode_image_rgba(
             }
         }
     }?;
+    zero_transparent_rgb(&mut decoded.2);
     Ok(DecodedTexture {
         width: decoded.0,
         height: decoded.1,
         rgba: decoded.2,
         source: source.to_string(),
     })
+}
+
+fn zero_transparent_rgb(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel[0] = 0;
+            pixel[1] = 0;
+            pixel[2] = 0;
+        }
+    }
 }
 
 fn decode_png_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
@@ -11021,6 +11032,15 @@ mod tests {
             load_test_cxx_string(&mut memory, texture_data + 8),
             [0x11, 0x22, 0x33, 0x44]
         );
+    }
+
+    #[test]
+    fn image_decode_zeros_hidden_rgb_for_transparent_pixels() {
+        let mut rgba = vec![0x80, 0x40, 0x20, 0x00, 0x11, 0x22, 0x33, 0x44];
+
+        zero_transparent_rgb(&mut rgba);
+
+        assert_eq!(rgba, [0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44]);
     }
 
     #[test]

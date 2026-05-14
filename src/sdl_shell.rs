@@ -8,6 +8,7 @@ use sdl2::mouse::MouseButton;
 use sdl2::video::GLProfile;
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
+use std::fs;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -251,6 +252,7 @@ struct SdlGlesReplay {
     bound_framebuffer: u32,
     bound_renderbuffer: u32,
     viewport: (i32, i32, i32, i32),
+    texture_upload_dump_index: usize,
     enabled_caps: HashMap<u32, bool>,
     blend_func: (u32, u32, u32, u32),
     depth_func: u32,
@@ -766,6 +768,16 @@ impl Sdl2Host {
                 payload,
                 ..
             } => {
+                let texture = self.bound_guest_texture(*target).unwrap_or(0);
+                self.maybe_dump_texture_upload(
+                    "teximage2d",
+                    texture,
+                    *width,
+                    *height,
+                    *format,
+                    *ty,
+                    payload.as_deref(),
+                );
                 let data = payload
                     .as_ref()
                     .map_or(ptr::null(), |payload| payload.as_ptr().cast::<c_void>());
@@ -804,6 +816,16 @@ impl Sdl2Host {
                 payload,
                 ..
             } => {
+                let texture = self.bound_guest_texture(*target).unwrap_or(0);
+                self.maybe_dump_texture_upload(
+                    "texsubimage2d",
+                    texture,
+                    *width,
+                    *height,
+                    *format,
+                    *ty,
+                    payload.as_deref(),
+                );
                 if let Some(payload) = payload {
                     self.track_texture_sub_image(
                         *target,
@@ -1442,6 +1464,66 @@ impl Sdl2Host {
         entry.last_payload_len = payload.map_or(0, <[u8]>::len);
         entry.last_nonzero_rgb_pixels = stats.map(|stats| stats.nonzero_rgb_pixels);
         entry.last_nonzero_alpha_pixels = stats.map(|stats| stats.nonzero_alpha_pixels);
+    }
+
+    fn maybe_dump_texture_upload(
+        &mut self,
+        kind: &str,
+        texture: u32,
+        width: i32,
+        height: i32,
+        format: u32,
+        ty: u32,
+        payload: Option<&[u8]>,
+    ) {
+        let Some(payload) = payload else {
+            return;
+        };
+        let Some(dir) = std::env::var_os("AEMU_DUMP_SDL_TEXTURE_UPLOADS_DIR") else {
+            return;
+        };
+        let Some(matcher) = std::env::var_os("AEMU_DUMP_SDL_TEXTURE_UPLOADS_MATCH") else {
+            return;
+        };
+        let matcher = matcher.to_string_lossy();
+        if !texture_upload_matches(&matcher, texture, width, height, format, ty) {
+            return;
+        }
+        let limit = env_usize("AEMU_DUMP_SDL_TEXTURE_UPLOADS_LIMIT").unwrap_or(usize::MAX);
+        if self.replay.texture_upload_dump_index >= limit {
+            return;
+        }
+        let Some(rgb) = texture_payload_to_rgb(width, height, format, ty, payload) else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        if let Err(err) = fs::create_dir_all(&dir) {
+            eprintln!("SDL texture-upload dump create dir failed: {err}");
+            return;
+        }
+        let index = self.replay.texture_upload_dump_index;
+        self.replay.texture_upload_dump_index += 1;
+        let stem =
+            format!("{index:04}-{kind}-tex{texture}-{width}x{height}-fmt{format:04x}-ty{ty:04x}");
+        let raw_path = dir.join(format!("{stem}.raw"));
+        if let Err(err) = fs::write(&raw_path, payload) {
+            eprintln!("SDL texture-upload raw dump failed {:?}: {err}", raw_path);
+        }
+        let ppm_path = dir.join(format!("{stem}.ppm"));
+        let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+        ppm.extend_from_slice(&rgb);
+        if let Err(err) = fs::write(&ppm_path, ppm) {
+            eprintln!("SDL texture-upload ppm dump failed {:?}: {err}", ppm_path);
+        } else {
+            eprintln!(
+                "SDL texture-upload dumped {:?} tex={} {}x{} fmt=0x{format:04x} type=0x{ty:04x} bytes={}",
+                ppm_path,
+                texture,
+                width,
+                height,
+                payload.len()
+            );
+        }
     }
 
     fn host_framebuffer(&mut self, guest: u32) -> u32 {
@@ -2234,6 +2316,107 @@ fn texture_payload_stats(
         nonzero_rgb_pixels,
         nonzero_alpha_pixels,
     })
+}
+
+fn texture_upload_matches(
+    matcher: &str,
+    texture: u32,
+    width: i32,
+    height: i32,
+    format: u32,
+    ty: u32,
+) -> bool {
+    matcher
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            token.eq_ignore_ascii_case("all")
+                || token == texture.to_string()
+                || token == format!("tex{texture}")
+                || token.eq_ignore_ascii_case(&format!("0x{texture:x}"))
+                || token.eq_ignore_ascii_case(&format!("{width}x{height}"))
+                || token.eq_ignore_ascii_case(&format!("fmt{format:04x}"))
+                || token.eq_ignore_ascii_case(&format!("ty{ty:04x}"))
+        })
+}
+
+fn texture_payload_to_rgb(
+    width: i32,
+    height: i32,
+    format: u32,
+    ty: u32,
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let pixel_count = usize::try_from(width)
+        .ok()
+        .zip(usize::try_from(height).ok())
+        .and_then(|(width, height)| width.checked_mul(height))?;
+    let mut out = Vec::with_capacity(pixel_count.checked_mul(3)?);
+    match (format, ty) {
+        (GL_RGBA, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(4).take(pixel_count) {
+                out.extend_from_slice(&pixel[..3]);
+            }
+        }
+        (GL_BGRA_EXT, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(4).take(pixel_count) {
+                out.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+        }
+        (GL_RGB, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(3).take(pixel_count) {
+                out.extend_from_slice(pixel);
+            }
+        }
+        (GL_ALPHA, GL_UNSIGNED_BYTE) | (GL_LUMINANCE, GL_UNSIGNED_BYTE) => {
+            for value in payload.iter().copied().take(pixel_count) {
+                out.extend_from_slice(&[value, value, value]);
+            }
+        }
+        (GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                out.extend_from_slice(&[pixel[0], pixel[0], pixel[0]]);
+            }
+        }
+        (GL_RGB, GL_UNSIGNED_SHORT_5_6_5) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
+                let r = ((value >> 11) & 0x1f) as u8;
+                let g = ((value >> 5) & 0x3f) as u8;
+                let b = (value & 0x1f) as u8;
+                out.extend_from_slice(&[
+                    (r << 3) | (r >> 2),
+                    (g << 2) | (g >> 4),
+                    (b << 3) | (b >> 2),
+                ]);
+            }
+        }
+        (GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
+                let r = ((value >> 0) & 0x0f) as u8 * 17;
+                let g = ((value >> 4) & 0x0f) as u8 * 17;
+                let b = ((value >> 8) & 0x0f) as u8 * 17;
+                out.extend_from_slice(&[r, g, b]);
+            }
+        }
+        (GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1) => {
+            for pixel in payload.chunks_exact(2).take(pixel_count) {
+                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
+                let r = ((value >> 0) & 0x1f) as u8;
+                let g = ((value >> 5) & 0x1f) as u8;
+                let b = ((value >> 10) & 0x1f) as u8;
+                out.extend_from_slice(&[
+                    (r << 3) | (r >> 2),
+                    (g << 3) | (g >> 2),
+                    (b << 3) | (b >> 2),
+                ]);
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
 }
 
 fn gl_index_size(ty: u32) -> Option<usize> {

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -110,40 +111,114 @@ def print_json(value):
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
+class JournalStep:
+    def __init__(self, action, **kwargs):
+        self.action = action
+        self.kwargs = kwargs
+
+    def as_json(self):
+        value = {"action": self.action}
+        value.update(self.kwargs)
+        return value
+
+
+def parse_xy(text):
+    parts = [part for part in re.split(r"[,\s]+", text.strip()) if part]
+    if len(parts) != 2:
+        raise ValueError(f"expected x,y coordinate, got {text!r}")
+    return float(parts[0]), float(parts[1])
+
+
+def parse_journal_step(text):
+    words = text.split(maxsplit=1)
+    if not words:
+        return None
+    op = words[0].lower()
+    rest = words[1].strip() if len(words) > 1 else ""
+    if op in ("tap", "touch"):
+        x, y = parse_xy(rest)
+        return JournalStep("tap", x=x, y=y)
+    if op == "pointer":
+        parts = rest.split(maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError(f"pointer expects: pointer PHASE x,y, got {text!r}")
+        phase = parts[0].lower()
+        if phase not in ("down", "move", "up"):
+            raise ValueError(f"pointer phase must be down, move, or up, got {phase!r}")
+        x, y = parse_xy(parts[1])
+        return JournalStep("pointer", phase=phase, x=x, y=y)
+    if op == "wait":
+        if not rest:
+            raise ValueError("wait expects seconds")
+        return JournalStep("wait", seconds=float(rest))
+    if op == "screenshot":
+        if not rest:
+            raise ValueError("screenshot expects output path")
+        return JournalStep("screenshot", out=rest)
+    if op == "debug":
+        if rest:
+            raise ValueError(f"debug takes no arguments, got {rest!r}")
+        return JournalStep("debug")
+    raise ValueError(f"unknown journal action {op!r}")
+
+
+def parse_journal_text(text):
+    steps = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0]
+        for part in line.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            steps.append(parse_journal_step(part))
+    return steps
+
+
 def cmd_debug(client, _args):
     print_json(client.request({"cmd": "debug"}))
 
 
-def cmd_screenshot(client, args):
+def save_screenshot(client, out):
     response = client.request({"cmd": "screenshot"})
     if not response.get("ok"):
-        print_json(response)
-        return 1
+        return response, 0
     data = base64.b64decode(response["data_base64"])
-    with open(args.out, "wb") as file:
+    with open(out, "wb") as file:
         file.write(data)
-    print_json(
+    return (
         {
             "ok": True,
-            "path": args.out,
+            "path": out,
             "format": response.get("format", "ppm"),
             "width": response.get("width"),
             "height": response.get("height"),
             "bytes": len(data),
-        }
+        },
+        len(data),
     )
+
+
+def cmd_screenshot(client, args):
+    response, _size = save_screenshot(client, args.out)
+    print_json(response)
+    if not response.get("ok"):
+        return 1
     return 0
 
 
-def pointer_payload(args, phase):
+def make_pointer_payload(phase, x, y, pointer_id=0, pressure=1.0):
     return {
         "cmd": "pointer",
         "phase": phase,
-        "id": args.id,
-        "x": args.x,
-        "y": args.y,
-        "pressure": args.pressure,
+        "id": pointer_id,
+        "x": x,
+        "y": y,
+        "pressure": pressure,
     }
+
+
+def pointer_payload(args, phase):
+    return make_pointer_payload(phase, args.x, args.y, args.id, args.pressure)
 
 
 def cmd_pointer(client, args):
@@ -151,12 +226,96 @@ def cmd_pointer(client, args):
     return 0
 
 
-def cmd_tap(client, args):
-    print_json(client.request(pointer_payload(args, "down")))
-    time.sleep(args.duration_ms / 1000.0)
-    up = pointer_payload(args, "up")
+def send_tap(client, x, y, pointer_id=0, pressure=1.0, duration_ms=50.0):
+    down = make_pointer_payload("down", x, y, pointer_id, pressure)
+    down_response = client.request(down)
+    time.sleep(duration_ms / 1000.0)
+    up = make_pointer_payload("up", x, y, pointer_id, pressure)
     up["pressure"] = 0.0
-    print_json(client.request(up))
+    up_response = client.request(up)
+    return down_response, up_response
+
+
+def cmd_tap(client, args):
+    down_response, up_response = send_tap(
+        client, args.x, args.y, args.id, args.pressure, args.duration_ms
+    )
+    print_json(down_response)
+    print_json(up_response)
+    return 0
+
+
+def load_journal(args):
+    chunks = []
+    if args.file:
+        with open(args.file, "r", encoding="utf-8") as file:
+            chunks.append(file.read())
+    if args.script:
+        chunks.append(args.script)
+    if not chunks:
+        raise ValueError("journal expects a script argument or --file")
+    return parse_journal_text("\n".join(chunks))
+
+
+def cmd_journal(client, args):
+    try:
+        steps = load_journal(args)
+    except ValueError as err:
+        print_json({"ok": False, "error": str(err)})
+        return 2
+    print_json({"ok": True, "steps": [step.as_json() for step in steps]})
+    for index, step in enumerate(steps, start=1):
+        try:
+            if step.action == "tap":
+                down, up = send_tap(
+                    client,
+                    step.kwargs["x"],
+                    step.kwargs["y"],
+                    args.id,
+                    args.pressure,
+                    args.duration_ms,
+                )
+                result = {"ok": bool(down.get("ok") and up.get("ok")), "down": down, "up": up}
+            elif step.action == "pointer":
+                pressure = 0.0 if step.kwargs["phase"] == "up" else args.pressure
+                result = client.request(
+                    make_pointer_payload(
+                        step.kwargs["phase"],
+                        step.kwargs["x"],
+                        step.kwargs["y"],
+                        args.id,
+                        pressure,
+                    )
+                )
+            elif step.action == "wait":
+                time.sleep(step.kwargs["seconds"])
+                result = {"ok": True}
+            elif step.action == "screenshot":
+                result, _size = save_screenshot(client, step.kwargs["out"])
+            elif step.action == "debug":
+                result = client.request({"cmd": "debug"})
+            else:
+                result = {"ok": False, "error": f"unhandled action {step.action!r}"}
+        except Exception as err:
+            print_json(
+                {
+                    "ok": False,
+                    "step": index,
+                    "action": step.as_json(),
+                    "error": str(err),
+                }
+            )
+            return 1
+        print_json(
+            {
+                "ok": bool(result.get("ok")),
+                "step": index,
+                "action": step.as_json(),
+                "result": result,
+            }
+        )
+        if not result.get("ok"):
+            return 1
     return 0
 
 
@@ -187,6 +346,18 @@ def build_parser():
     tap.add_argument("--pressure", type=float, default=1.0)
     tap.add_argument("--duration-ms", type=float, default=50.0)
     tap.set_defaults(func=cmd_tap)
+
+    journal = sub.add_parser("journal", help="run semicolon/newline separated actions")
+    journal.add_argument(
+        "script",
+        nargs="?",
+        help="actions, for example: touch 280,386; wait 1; screenshot target/out.ppm",
+    )
+    journal.add_argument("--file", help="read actions from a script file")
+    journal.add_argument("--id", type=int, default=0)
+    journal.add_argument("--pressure", type=float, default=1.0)
+    journal.add_argument("--duration-ms", type=float, default=50.0)
+    journal.set_defaults(func=cmd_journal)
 
     return parser
 
