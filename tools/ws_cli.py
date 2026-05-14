@@ -189,7 +189,7 @@ def save_screenshot(client, out):
         {
             "ok": True,
             "path": out,
-            "format": response.get("format", "ppm"),
+            "format": response.get("format", "png"),
             "width": response.get("width"),
             "height": response.get("height"),
             "bytes": len(data),
@@ -327,8 +327,8 @@ def build_parser():
     debug = sub.add_parser("debug", help="print emulator/debug state")
     debug.set_defaults(func=cmd_debug)
 
-    screenshot = sub.add_parser("screenshot", help="save framebuffer screenshot as PPM")
-    screenshot.add_argument("--out", default="target/aemu-ws-screenshot.ppm")
+    screenshot = sub.add_parser("screenshot", help="save framebuffer screenshot as PNG")
+    screenshot.add_argument("--out", default="target/aemu-ws-screenshot.png")
     screenshot.set_defaults(func=cmd_screenshot)
 
     pointer = sub.add_parser("pointer", help="send one pointer event")
@@ -351,7 +351,7 @@ def build_parser():
     journal.add_argument(
         "script",
         nargs="?",
-        help="actions, for example: touch 280,386; wait 1; screenshot target/out.ppm",
+        help="actions, for example: touch 280,386; wait 1; screenshot target/out.png",
     )
     journal.add_argument("--file", help="read actions from a script file")
     journal.add_argument("--id", type=int, default=0)

@@ -1,7 +1,11 @@
+use crate::gles_trace::{
+    TextureUploadMatch, texture_payload_stats, texture_payload_to_rgb, texture_upload_matches,
+};
 use crate::hle_imports::{GlesActive, GlesClientAttribPayload, GlesEvent};
 use crate::host::{
     HostBackend, HostConfig, HostError, HostEvent, HostKey, HostResult, PointerPhase,
 };
+use crate::png_util::encode_rgb_png;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
@@ -33,12 +37,7 @@ const GL_BACK: u32 = 0x0405;
 const GL_FRONT_AND_BACK: u32 = 0x0408;
 const GL_ONE: u32 = 1;
 const GL_ZERO: u32 = 0;
-const GL_ALPHA: u32 = 0x1906;
-const GL_RGB: u32 = 0x1907;
 const GL_RGBA: u32 = 0x1908;
-const GL_LUMINANCE: u32 = 0x1909;
-const GL_LUMINANCE_ALPHA: u32 = 0x190a;
-const GL_BGRA_EXT: u32 = 0x80e1;
 const GL_BYTE: u32 = 0x1400;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
 const GL_SHORT: u32 = 0x1402;
@@ -47,9 +46,6 @@ const GL_INT: u32 = 0x1404;
 const GL_UNSIGNED_INT: u32 = 0x1405;
 const GL_FLOAT: u32 = 0x1406;
 const GL_FIXED: u32 = 0x140c;
-const GL_UNSIGNED_SHORT_4_4_4_4: u32 = 0x8033;
-const GL_UNSIGNED_SHORT_5_5_5_1: u32 = 0x8034;
-const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
 const GL_NO_ERROR: u32 = 0;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
 const GL_LINK_STATUS: u32 = 0x8b82;
@@ -563,12 +559,6 @@ fn load_optional_gl<T: Copy>(video: &sdl2::VideoSubsystem, name: &str) -> Option
     } else {
         Some(unsafe { std::mem::transmute_copy(&ptr) })
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TexturePayloadStats {
-    nonzero_rgb_pixels: usize,
-    nonzero_alpha_pixels: usize,
 }
 
 impl Sdl2Host {
@@ -1418,7 +1408,8 @@ impl Sdl2Host {
         let Some(texture) = self.bound_guest_texture(target) else {
             return;
         };
-        let stats = texture_payload_stats(width, height, format, ty, payload);
+        let stats =
+            payload.and_then(|payload| texture_payload_stats(width, height, format, ty, payload));
         self.replay.texture_info.insert(
             texture,
             ReplayTextureInfo {
@@ -1451,7 +1442,8 @@ impl Sdl2Host {
         let Some(texture) = self.bound_guest_texture(target) else {
             return;
         };
-        let stats = texture_payload_stats(width, height, format, ty, payload);
+        let stats =
+            payload.and_then(|payload| texture_payload_stats(width, height, format, ty, payload));
         let entry = self.replay.texture_info.entry(texture).or_default();
         if entry.width == 0 || entry.height == 0 {
             entry.width = width;
@@ -1486,7 +1478,17 @@ impl Sdl2Host {
             return;
         };
         let matcher = matcher.to_string_lossy();
-        if !texture_upload_matches(&matcher, texture, width, height, format, ty) {
+        if !texture_upload_matches(
+            &matcher,
+            TextureUploadMatch {
+                kind: Some(kind),
+                texture,
+                width,
+                height,
+                format,
+                ty,
+            },
+        ) {
             return;
         }
         let limit = env_usize("AEMU_DUMP_SDL_TEXTURE_UPLOADS_LIMIT").unwrap_or(usize::MAX);
@@ -1509,15 +1511,20 @@ impl Sdl2Host {
         if let Err(err) = fs::write(&raw_path, payload) {
             eprintln!("SDL texture-upload raw dump failed {:?}: {err}", raw_path);
         }
-        let ppm_path = dir.join(format!("{stem}.ppm"));
-        let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-        ppm.extend_from_slice(&rgb);
-        if let Err(err) = fs::write(&ppm_path, ppm) {
-            eprintln!("SDL texture-upload ppm dump failed {:?}: {err}", ppm_path);
+        let png = match encode_rgb_png(width as u32, height as u32, &rgb) {
+            Ok(png) => png,
+            Err(err) => {
+                eprintln!("SDL texture-upload png encode failed {stem}: {err}");
+                return;
+            }
+        };
+        let png_path = dir.join(format!("{stem}.png"));
+        if let Err(err) = fs::write(&png_path, png) {
+            eprintln!("SDL texture-upload png dump failed {:?}: {err}", png_path);
         } else {
             eprintln!(
                 "SDL texture-upload dumped {:?} tex={} {}x{} fmt=0x{format:04x} type=0x{ty:04x} bytes={}",
-                ppm_path,
+                png_path,
                 texture,
                 width,
                 height,
@@ -2219,204 +2226,6 @@ fn update_buffer_data(
     }
     let copy_len = size.min(payload.len());
     entry[offset..offset + copy_len].copy_from_slice(&payload[..copy_len]);
-}
-
-fn texture_payload_stats(
-    width: i32,
-    height: i32,
-    format: u32,
-    ty: u32,
-    payload: Option<&[u8]>,
-) -> Option<TexturePayloadStats> {
-    let payload = payload?;
-    let pixel_count = usize::try_from(width)
-        .ok()
-        .zip(usize::try_from(height).ok())
-        .and_then(|(width, height)| width.checked_mul(height))?;
-    let mut nonzero_rgb_pixels = 0usize;
-    let mut nonzero_alpha_pixels = 0usize;
-    match (format, ty) {
-        (GL_RGBA, GL_UNSIGNED_BYTE) | (GL_BGRA_EXT, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(4).take(pixel_count) {
-                if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                if pixel[3] != 0 {
-                    nonzero_alpha_pixels += 1;
-                }
-            }
-        }
-        (GL_RGB, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(3).take(pixel_count) {
-                if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                nonzero_alpha_pixels += 1;
-            }
-        }
-        (GL_ALPHA, GL_UNSIGNED_BYTE) => {
-            for alpha in payload.iter().copied().take(pixel_count) {
-                if alpha != 0 {
-                    nonzero_alpha_pixels += 1;
-                }
-            }
-        }
-        (GL_LUMINANCE, GL_UNSIGNED_BYTE) => {
-            for luminance in payload.iter().copied().take(pixel_count) {
-                if luminance != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                nonzero_alpha_pixels += 1;
-            }
-        }
-        (GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                if pixel[0] != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                if pixel[1] != 0 {
-                    nonzero_alpha_pixels += 1;
-                }
-            }
-        }
-        (GL_RGB, GL_UNSIGNED_SHORT_5_6_5) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                if value != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                nonzero_alpha_pixels += 1;
-            }
-        }
-        (GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                if value & 0x0fff != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                if value & 0xf000 != 0 {
-                    nonzero_alpha_pixels += 1;
-                }
-            }
-        }
-        (GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                if value & 0xfffe != 0 {
-                    nonzero_rgb_pixels += 1;
-                }
-                if value & 0x0001 != 0 {
-                    nonzero_alpha_pixels += 1;
-                }
-            }
-        }
-        _ => return None,
-    }
-    Some(TexturePayloadStats {
-        nonzero_rgb_pixels,
-        nonzero_alpha_pixels,
-    })
-}
-
-fn texture_upload_matches(
-    matcher: &str,
-    texture: u32,
-    width: i32,
-    height: i32,
-    format: u32,
-    ty: u32,
-) -> bool {
-    matcher
-        .split(',')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .any(|token| {
-            token.eq_ignore_ascii_case("all")
-                || token == texture.to_string()
-                || token == format!("tex{texture}")
-                || token.eq_ignore_ascii_case(&format!("0x{texture:x}"))
-                || token.eq_ignore_ascii_case(&format!("{width}x{height}"))
-                || token.eq_ignore_ascii_case(&format!("fmt{format:04x}"))
-                || token.eq_ignore_ascii_case(&format!("ty{ty:04x}"))
-        })
-}
-
-fn texture_payload_to_rgb(
-    width: i32,
-    height: i32,
-    format: u32,
-    ty: u32,
-    payload: &[u8],
-) -> Option<Vec<u8>> {
-    let pixel_count = usize::try_from(width)
-        .ok()
-        .zip(usize::try_from(height).ok())
-        .and_then(|(width, height)| width.checked_mul(height))?;
-    let mut out = Vec::with_capacity(pixel_count.checked_mul(3)?);
-    match (format, ty) {
-        (GL_RGBA, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(4).take(pixel_count) {
-                out.extend_from_slice(&pixel[..3]);
-            }
-        }
-        (GL_BGRA_EXT, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(4).take(pixel_count) {
-                out.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
-            }
-        }
-        (GL_RGB, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(3).take(pixel_count) {
-                out.extend_from_slice(pixel);
-            }
-        }
-        (GL_ALPHA, GL_UNSIGNED_BYTE) | (GL_LUMINANCE, GL_UNSIGNED_BYTE) => {
-            for value in payload.iter().copied().take(pixel_count) {
-                out.extend_from_slice(&[value, value, value]);
-            }
-        }
-        (GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                out.extend_from_slice(&[pixel[0], pixel[0], pixel[0]]);
-            }
-        }
-        (GL_RGB, GL_UNSIGNED_SHORT_5_6_5) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                let r = ((value >> 11) & 0x1f) as u8;
-                let g = ((value >> 5) & 0x3f) as u8;
-                let b = (value & 0x1f) as u8;
-                out.extend_from_slice(&[
-                    (r << 3) | (r >> 2),
-                    (g << 2) | (g >> 4),
-                    (b << 3) | (b >> 2),
-                ]);
-            }
-        }
-        (GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                let r = ((value >> 0) & 0x0f) as u8 * 17;
-                let g = ((value >> 4) & 0x0f) as u8 * 17;
-                let b = ((value >> 8) & 0x0f) as u8 * 17;
-                out.extend_from_slice(&[r, g, b]);
-            }
-        }
-        (GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1) => {
-            for pixel in payload.chunks_exact(2).take(pixel_count) {
-                let value = u16::from_le_bytes([pixel[0], pixel[1]]);
-                let r = ((value >> 0) & 0x1f) as u8;
-                let g = ((value >> 5) & 0x1f) as u8;
-                let b = ((value >> 10) & 0x1f) as u8;
-                out.extend_from_slice(&[
-                    (r << 3) | (r >> 2),
-                    (g << 3) | (g >> 2),
-                    (b << 3) | (b >> 2),
-                ]);
-            }
-        }
-        _ => return None,
-    }
-    Some(out)
 }
 
 fn gl_index_size(ty: u32) -> Option<usize> {

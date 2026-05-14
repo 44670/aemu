@@ -1,12 +1,16 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use flate2::read::ZlibDecoder;
 
 use crate::armv6::{Cpu, Memory};
+use crate::gles_trace::{
+    TextureUploadMatch, texture_payload_stats, texture_payload_to_rgb, texture_upload_matches,
+};
+use crate::png_util::encode_rgb_png;
 use crate::zip_probe::{extract_zip_entry, read_zip_entry};
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
@@ -120,6 +124,7 @@ const GL_RENDERER: u32 = 0x1f01;
 const GL_VERSION: u32 = 0x1f02;
 const GL_EXTENSIONS: u32 = 0x1f03;
 const GL_MAX_TEXTURE_SIZE: u32 = 0x0d33;
+const GL_TEXTURE0: u32 = 0x84c0;
 const GL_TEXTURE_2D: u32 = 0x0de1;
 const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
 const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
@@ -342,9 +347,12 @@ pub struct HleRuntime {
     gl_programs: Vec<GlProgram>,
     gl_bound_array_buffer: u32,
     gl_bound_element_array_buffer: u32,
+    gl_active_texture: u32,
+    gl_bound_textures: Vec<GuestGlTextureBinding>,
     gl_buffers: Vec<GuestGlBuffer>,
     gl_vertex_attribs: Vec<GuestVertexAttrib>,
     gles_events: VecDeque<GlesEvent>,
+    gles_texture_upload_dump_index: usize,
     next_fd: u32,
     files: Vec<FakeFile>,
     virtual_files: Vec<VirtualFile>,
@@ -832,6 +840,28 @@ struct GuestGlBuffer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestGlTextureBinding {
+    active_texture: u32,
+    target: u32,
+    texture: u32,
+}
+
+struct GlesTextureUploadDump<'a> {
+    kind: &'static str,
+    texture: u32,
+    target: u32,
+    level: i32,
+    xoffset: i32,
+    yoffset: i32,
+    width: i32,
+    height: i32,
+    format: u32,
+    ty: u32,
+    pixels: u32,
+    payload: Option<&'a [u8]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GuestVertexAttrib {
     index: u32,
     size: i32,
@@ -892,9 +922,12 @@ impl HleRuntime {
             gl_programs: Vec::new(),
             gl_bound_array_buffer: 0,
             gl_bound_element_array_buffer: 0,
+            gl_active_texture: GL_TEXTURE0,
+            gl_bound_textures: Vec::new(),
             gl_buffers: Vec::new(),
             gl_vertex_attribs: Vec::new(),
             gles_events: VecDeque::new(),
+            gles_texture_upload_dump_index: 0,
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
             virtual_files: Vec::new(),
@@ -1230,6 +1263,7 @@ impl HleRuntime {
             "_ZN8WebTokenC1ERKS_" | "_ZN8WebTokenC2ERKS_" => {
                 self.minecraft_webtoken_copy_ctor(cpu, memory)
             }
+            "_ZN4Font4initEv" => self.minecraft_font_init(cpu, memory),
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
                 self.minecraft_texture_group_get_texture_pair(cpu, memory)
             }
@@ -3289,7 +3323,10 @@ impl HleRuntime {
             .ok()
             .and_then(|location| self.load_texture_for_resource(location));
         let (width, height, pixels, source) = match decoded {
-            Some(texture) => (texture.width, texture.height, texture.rgba, texture.source),
+            Some(texture) => {
+                let texture = maybe_expand_minecraft_font_texture(&key, texture);
+                (texture.width, texture.height, texture.rgba, texture.source)
+            }
             None => {
                 let pixels = fallback_texture_rgba(&key);
                 (
@@ -3320,6 +3357,47 @@ impl HleRuntime {
             pixels.len()
         ));
         Ok(self.return32(cpu, pair))
+    }
+
+    fn minecraft_font_init<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let font = cpu.reg(0);
+        let widths = self
+            .load_minecraft_font_widths()
+            .unwrap_or_else(default_minecraft_font_widths);
+        for (idx, width) in widths.iter().copied().enumerate() {
+            let offset = idx as u32 * 4;
+            store32(memory, font.wrapping_add(0x234).wrapping_add(offset), width)?;
+            store32(
+                memory,
+                font.wrapping_add(0x634).wrapping_add(offset),
+                (width as f32).to_bits(),
+            )?;
+        }
+
+        let unicode_flags = vec![0u8; 0x1_0000];
+        self.replace_cxx_string_bytes(memory, font.wrapping_add(0xa64), &unicode_flags, 0x1_0000)?;
+        store_minecraft_font_color_codes(memory, font)?;
+        trace_mcpe_resource(format_args!(
+            "Font::init {font:#010x} -> HLE widths from default8.png"
+        ));
+        Ok(self.return32(cpu, font))
+    }
+
+    fn load_minecraft_font_widths(&self) -> Option<[u32; 256]> {
+        let bytes = self
+            .read_apk_asset_entry("assets/images/font/default8.png")
+            .ok()?;
+        let texture =
+            decode_image_rgba("assets/images/font/default8.png", &bytes, ImageFormat::Png).ok()?;
+        Some(minecraft_font_widths_from_rgba(
+            texture.width,
+            texture.height,
+            &texture.rgba,
+        ))
     }
 
     fn store_fake_texture_pair<M: Memory>(
@@ -4428,6 +4506,7 @@ impl HleRuntime {
                 self.gl_gen_names(cpu, memory)
             }
             "glActiveTexture" => {
+                self.gl_active_texture = cpu.reg(0);
                 self.push_gles_event(GlesEvent::ActiveTexture {
                     texture: cpu.reg(0),
                 });
@@ -4505,6 +4584,7 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBindTexture" => {
+                self.bind_guest_texture(cpu.reg(0), cpu.reg(1));
                 self.push_gles_event(GlesEvent::BindTexture {
                     target: cpu.reg(0),
                     texture: cpu.reg(1),
@@ -4570,6 +4650,20 @@ impl HleRuntime {
                 let height = self.stack_arg(cpu, memory, 4)? as i32;
                 let payload = gles_image_payload_len(cpu.reg(3) as i32, height, format, ty)
                     .and_then(|len| gles_copy_payload(memory, pixels, len));
+                self.maybe_dump_gles_texture_upload(GlesTextureUploadDump {
+                    kind: "teximage2d",
+                    texture: self.bound_guest_texture(cpu.reg(0)),
+                    target: cpu.reg(0),
+                    level: cpu.reg(1) as i32,
+                    xoffset: 0,
+                    yoffset: 0,
+                    width: cpu.reg(3) as i32,
+                    height,
+                    format,
+                    ty,
+                    pixels,
+                    payload: payload.as_deref(),
+                });
                 self.push_gles_event(GlesEvent::TexImage2D {
                     target: cpu.reg(0),
                     level: cpu.reg(1) as i32,
@@ -4592,6 +4686,20 @@ impl HleRuntime {
                 let pixels = self.stack_arg(cpu, memory, 8)?;
                 let payload = gles_image_payload_len(width as i32, height as i32, format, ty)
                     .and_then(|len| gles_copy_payload(memory, pixels, len));
+                self.maybe_dump_gles_texture_upload(GlesTextureUploadDump {
+                    kind: "texsubimage2d",
+                    texture: self.bound_guest_texture(cpu.reg(0)),
+                    target: cpu.reg(0),
+                    level: cpu.reg(1) as i32,
+                    xoffset: cpu.reg(2) as i32,
+                    yoffset: cpu.reg(3) as i32,
+                    width: width as i32,
+                    height: height as i32,
+                    format,
+                    ty,
+                    pixels,
+                    payload: payload.as_deref(),
+                });
                 self.push_gles_event(GlesEvent::TexSubImage2D {
                     target: cpu.reg(0),
                     level: cpu.reg(1) as i32,
@@ -4924,6 +5032,153 @@ impl HleRuntime {
             self.gles_events.pop_front();
         }
         self.gles_events.push_back(event);
+    }
+
+    fn bind_guest_texture(&mut self, target: u32, texture: u32) {
+        let active_texture = self.gl_active_texture;
+        if let Some(binding) = self
+            .gl_bound_textures
+            .iter_mut()
+            .find(|binding| binding.active_texture == active_texture && binding.target == target)
+        {
+            binding.texture = texture;
+        } else {
+            self.gl_bound_textures.push(GuestGlTextureBinding {
+                active_texture,
+                target,
+                texture,
+            });
+        }
+    }
+
+    fn bound_guest_texture(&self, target: u32) -> u32 {
+        let active_texture = self.gl_active_texture;
+        self.gl_bound_textures
+            .iter()
+            .find(|binding| binding.active_texture == active_texture && binding.target == target)
+            .map_or(0, |binding| binding.texture)
+    }
+
+    fn maybe_dump_gles_texture_upload(&mut self, upload: GlesTextureUploadDump<'_>) {
+        let Some(payload) = upload.payload else {
+            return;
+        };
+        let Some(dir) = std::env::var_os("AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR") else {
+            return;
+        };
+        let Some(matcher) = std::env::var_os("AEMU_DUMP_GLES_TEXTURE_UPLOADS_MATCH") else {
+            return;
+        };
+        let matcher = matcher.to_string_lossy();
+        if !texture_upload_matches(
+            &matcher,
+            TextureUploadMatch {
+                kind: Some(upload.kind),
+                texture: upload.texture,
+                width: upload.width,
+                height: upload.height,
+                format: upload.format,
+                ty: upload.ty,
+            },
+        ) {
+            return;
+        }
+        let limit = std::env::var("AEMU_DUMP_GLES_TEXTURE_UPLOADS_LIMIT")
+            .ok()
+            .and_then(|raw| parse_env_usize(&raw))
+            .unwrap_or(usize::MAX);
+        if self.gles_texture_upload_dump_index >= limit {
+            return;
+        }
+        let Some(rgb) = texture_payload_to_rgb(
+            upload.width,
+            upload.height,
+            upload.format,
+            upload.ty,
+            payload,
+        ) else {
+            return;
+        };
+
+        let dir = PathBuf::from(dir);
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            eprintln!("HLE GLES texture-upload dump create dir failed: {err}");
+            return;
+        }
+
+        let index = self.gles_texture_upload_dump_index;
+        self.gles_texture_upload_dump_index += 1;
+        let event_index = self.gles_events.len();
+        let stem = format!(
+            "{index:04}-event{event_index:05}-{}-tex{}-{}x{}-fmt{:04x}-ty{:04x}",
+            upload.kind, upload.texture, upload.width, upload.height, upload.format, upload.ty
+        );
+        let raw_path = dir.join(format!("{stem}.raw"));
+        if let Err(err) = std::fs::write(&raw_path, payload) {
+            eprintln!(
+                "HLE GLES texture-upload raw dump failed {:?}: {err}",
+                raw_path
+            );
+        }
+        match encode_rgb_png(upload.width as u32, upload.height as u32, &rgb) {
+            Ok(png) => {
+                let png_path = dir.join(format!("{stem}.png"));
+                if let Err(err) = std::fs::write(&png_path, png) {
+                    eprintln!(
+                        "HLE GLES texture-upload png dump failed {:?}: {err}",
+                        png_path
+                    );
+                } else {
+                    eprintln!(
+                        "HLE GLES texture-upload dumped {:?} tex={} {}x{} fmt=0x{:04x} type=0x{:04x} bytes={}",
+                        png_path,
+                        upload.texture,
+                        upload.width,
+                        upload.height,
+                        upload.format,
+                        upload.ty,
+                        payload.len()
+                    );
+                }
+            }
+            Err(err) => eprintln!("HLE GLES texture-upload png encode failed {stem}: {err}"),
+        }
+
+        let stats = texture_payload_stats(
+            upload.width,
+            upload.height,
+            upload.format,
+            upload.ty,
+            payload,
+        );
+        let (nonzero_rgb, nonzero_alpha) = stats
+            .map(|stats| (stats.nonzero_rgb_pixels, stats.nonzero_alpha_pixels))
+            .unwrap_or((0, 0));
+        let manifest = format!(
+            "{{\"index\":{index},\"event_index\":{event_index},\"kind\":\"{}\",\"texture\":{},\"active_texture\":{},\"target\":{},\"level\":{},\"xoffset\":{},\"yoffset\":{},\"width\":{},\"height\":{},\"format\":{},\"type\":{},\"pixels\":{},\"payload_len\":{},\"nonzero_rgb_pixels\":{},\"nonzero_alpha_pixels\":{}}}\n",
+            upload.kind,
+            upload.texture,
+            self.gl_active_texture,
+            upload.target,
+            upload.level,
+            upload.xoffset,
+            upload.yoffset,
+            upload.width,
+            upload.height,
+            upload.format,
+            upload.ty,
+            upload.pixels,
+            payload.len(),
+            nonzero_rgb,
+            nonzero_alpha
+        );
+        let manifest_path = dir.join("manifest.jsonl");
+        if let Err(err) = append_text_file(&manifest_path, &manifest) {
+            eprintln!(
+                "HLE GLES texture-upload manifest append failed {:?}: {err}",
+                manifest_path
+            );
+        }
     }
 
     fn set_guest_vertex_attrib(&mut self, attrib: GuestVertexAttrib) {
@@ -5800,6 +6055,7 @@ fn is_target_symbol(name: &str) -> bool {
         name,
         "_ZN8WebTokenC1ERKS_"
             | "_ZN8WebTokenC2ERKS_"
+            | "_ZN4Font4initEv"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
             | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
             | "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
@@ -6734,6 +6990,135 @@ fn fallback_texture_rgba(key: &str) -> Vec<u8> {
         }
     }
     pixels
+}
+
+fn maybe_expand_minecraft_font_texture(key: &str, texture: DecodedTexture) -> DecodedTexture {
+    if !is_minecraft_bitmap_font_key(key) || texture.width != 128 || texture.height != 128 {
+        return texture;
+    }
+
+    let Some(rgba) = upscale_rgba_nearest_2x(texture.width, texture.height, &texture.rgba) else {
+        return texture;
+    };
+    DecodedTexture {
+        width: texture.width * 2,
+        height: texture.height * 2,
+        rgba,
+        source: format!("{}#2x-font-atlas", texture.source),
+    }
+}
+
+fn is_minecraft_bitmap_font_key(key: &str) -> bool {
+    key.ends_with("font/default8.png") || key.ends_with("font/ascii_sga.png")
+}
+
+fn upscale_rgba_nearest_2x(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let width_usize = usize::try_from(width).ok()?;
+    let height_usize = usize::try_from(height).ok()?;
+    let src_row_bytes = width_usize.checked_mul(4)?;
+    if rgba.len() < src_row_bytes.checked_mul(height_usize)? {
+        return None;
+    }
+
+    let out_width = width_usize.checked_mul(2)?;
+    let out_height = height_usize.checked_mul(2)?;
+    let out_row_bytes = out_width.checked_mul(4)?;
+    let mut out = vec![0u8; out_row_bytes.checked_mul(out_height)?];
+
+    for y in 0..height_usize {
+        for x in 0..width_usize {
+            let src = y * src_row_bytes + x * 4;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let dst = (y * 2 + dy) * out_row_bytes + (x * 2 + dx) * 4;
+                    out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+fn minecraft_font_widths_from_rgba(width: u32, height: u32, rgba: &[u8]) -> [u32; 256] {
+    let mut widths = [0u32; 256];
+    let width = width as usize;
+    let height = height as usize;
+    for code in 0..256usize {
+        if code == 0x20 {
+            widths[code] = 4;
+            continue;
+        }
+
+        let cell_x = (code & 0x0f) * 8;
+        let cell_y = (code >> 4) * 8;
+        let mut rightmost = None;
+        for x in (0..8usize).rev() {
+            let px = cell_x + x;
+            if px >= width {
+                continue;
+            }
+            for y in 0..8usize {
+                let py = cell_y + y;
+                if py >= height {
+                    continue;
+                }
+                let offset = py
+                    .checked_mul(width)
+                    .and_then(|offset| offset.checked_add(px))
+                    .and_then(|offset| offset.checked_mul(4));
+                let Some(offset) = offset else {
+                    continue;
+                };
+                if offset + 3 < rgba.len() && rgba[offset + 3] != 0 && rgba[offset] != 0 {
+                    rightmost = Some(x);
+                    break;
+                }
+            }
+            if rightmost.is_some() {
+                break;
+            }
+        }
+        widths[code] = rightmost.map_or(1, |x| x as u32 + 2);
+    }
+    widths
+}
+
+fn default_minecraft_font_widths() -> [u32; 256] {
+    let mut widths = [6u32; 256];
+    widths[0x20] = 4;
+    widths
+}
+
+fn store_minecraft_font_color_codes<M: Memory>(memory: &mut M, font: u32) -> Result<(), HleError> {
+    for idx in 0..32u32 {
+        let dim = if idx & 0x08 != 0 { 85 } else { 0 };
+        let mut red = if idx & 0x04 != 0 { 170 } else { 0 } + dim;
+        let mut green = if idx & 0x02 != 0 { 170 } else { 0 } + dim;
+        let mut blue = if idx & 0x01 != 0 { 170 } else { 0 } + dim;
+        if idx == 6 {
+            red += 85;
+        }
+        if idx >= 16 {
+            red /= 4;
+            green /= 4;
+            blue /= 4;
+        }
+
+        let base = font.wrapping_add(0x34).wrapping_add(idx * 16);
+        store32(memory, base, (blue as f32 / 255.0).to_bits())?;
+        store32(
+            memory,
+            base.wrapping_add(0x04),
+            (red as f32 / 255.0).to_bits(),
+        )?;
+        store32(
+            memory,
+            base.wrapping_add(0x08),
+            (green as f32 / 255.0).to_bits(),
+        )?;
+        store32(memory, base.wrapping_add(0x0c), 0)?;
+    }
+    Ok(())
 }
 
 fn decode_image_rgba(
@@ -8738,6 +9123,14 @@ fn parse_env_usize(raw: &str) -> Option<usize> {
         )
 }
 
+fn append_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+
 fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
     let bytes = bytes.get(offset..offset + 2)?;
     Some(u16::from_le_bytes([bytes[0], bytes[1]]))
@@ -8941,6 +9334,7 @@ mod tests {
             "_ZNSs14_M_replace_auxEjjjc",
             "_ZSt11_Hash_bytesPKvjj",
             "_ZN8WebTokenC2ERKS_",
+            "_ZN4Font4initEv",
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
             "_ZN11AppPlatform9loadImageER11TextureDataRKSs",
             "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
@@ -10954,6 +11348,84 @@ mod tests {
         );
         assert_eq!(memory.load32(pixels - 8).unwrap(), 4);
         assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
+    fn minecraft_font_texture_expands_to_render_atlas() {
+        let mut rgba = vec![0u8; 128 * 128 * 4];
+        rgba[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let texture = DecodedTexture {
+            width: 128,
+            height: 128,
+            rgba,
+            source: "assets/images/font/default8.png".to_string(),
+        };
+
+        let expanded =
+            maybe_expand_minecraft_font_texture("InAppPackageImages:font/default8.png", texture);
+
+        assert_eq!(expanded.width, 256);
+        assert_eq!(expanded.height, 256);
+        assert_eq!(&expanded.rgba[0..4], &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(&expanded.rgba[4..8], &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(
+            &expanded.rgba[(256 * 4)..(256 * 4 + 4)],
+            &[0x11, 0x22, 0x33, 0x44]
+        );
+    }
+
+    #[test]
+    fn minecraft_font_widths_scan_original_8x8_cells() {
+        let mut rgba = vec![0u8; 128 * 128 * 4];
+        let code = b'A' as usize;
+        let cell_x = (code & 0x0f) * 8;
+        let cell_y = (code >> 4) * 8;
+        for y in 0..8usize {
+            for x in 0..4usize {
+                let offset = ((cell_y + y) * 128 + cell_x + x) * 4;
+                rgba[offset] = 0xff;
+                rgba[offset + 3] = 0xff;
+            }
+        }
+
+        let widths = minecraft_font_widths_from_rgba(128, 128, &rgba);
+
+        assert_eq!(widths[0x20], 4);
+        assert_eq!(widths[code], 5);
+    }
+
+    #[test]
+    fn dispatches_minecraft_font_init_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x50000).unwrap();
+
+        let font = 0x2000;
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x3001);
+        cpu.set_reg(0, font);
+        let mut hle = HleRuntime::new(0x1000, 0x10000, 0x30000);
+
+        hle.dispatch("_ZN4Font4initEv", &mut cpu, &mut memory)
+            .unwrap();
+
+        assert_eq!(memory.load32(font + 0x234 + 0x20 * 4).unwrap(), 4);
+        assert_eq!(
+            memory.load32(font + 0x634 + 0x20 * 4).unwrap(),
+            4.0f32.to_bits()
+        );
+        let unicode = memory.load32(font + 0xa64).unwrap();
+        assert_ne!(unicode, 0);
+        assert_eq!(
+            memory.load32(unicode - CXX_STRING_REP_HEADER_SIZE).unwrap(),
+            0x1_0000
+        );
+        assert_eq!(
+            memory.load32(font + 0x34 + 6 * 16 + 4).unwrap(),
+            1.0f32.to_bits()
+        );
+        assert_eq!(cpu.pc(), 0x3000);
         assert_eq!(cpu.isa(), Isa::Thumb);
     }
 

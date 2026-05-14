@@ -979,20 +979,25 @@ fn replay_sdl2_live_gles_frames(
                         }));
                     }
                     WsCommand::Screenshot => match host.capture_framebuffer_rgb() {
-                        Ok(capture) => {
-                            let mut ppm =
-                                format!("P6\n{} {}\n255\n", capture.width, capture.height)
-                                    .into_bytes();
-                            ppm.extend_from_slice(&capture.rgb);
-                            let data_base64 = base64::engine::general_purpose::STANDARD.encode(ppm);
-                            request.respond_ok(json!({
-                                "ok": true,
-                                "format": "ppm",
-                                "width": capture.width,
-                                "height": capture.height,
-                                "data_base64": data_base64,
-                            }));
-                        }
+                        Ok(capture) => match aemu::png_util::encode_rgb_png(
+                            capture.width,
+                            capture.height,
+                            &capture.rgb,
+                        ) {
+                            Ok(png) => {
+                                let data_base64 =
+                                    base64::engine::general_purpose::STANDARD.encode(png);
+                                request.respond_ok(json!({
+                                    "ok": true,
+                                    "format": "png",
+                                    "width": capture.width,
+                                    "height": capture.height,
+                                    "data_base64": data_base64,
+                                }));
+                            }
+                            Err(err) => request
+                                .respond_error(format!("screenshot PNG encode failed: {err}")),
+                        },
                         Err(err) => request.respond_error(format!("screenshot failed: {err}")),
                     },
                     WsCommand::Pointer {

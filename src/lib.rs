@@ -4,11 +4,13 @@ pub mod elf_dynamic;
 pub mod elf_linker;
 pub mod elf_loader;
 pub mod elf_probe;
+pub(crate) mod gles_trace;
 pub mod guest_memory;
 pub mod hle_imports;
 pub mod host;
 pub mod native_loader;
 pub mod native_runtime;
+pub mod png_util;
 #[cfg(feature = "sdl2")]
 pub mod sdl_shell;
 #[cfg(all(feature = "webgl", target_arch = "wasm32"))]

@@ -207,12 +207,13 @@ WebSocket control harness:
 ```sh
 DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --ws 127.0.0.1:8766
 tools/ws_cli.py --url ws://127.0.0.1:8766 debug
-tools/ws_cli.py --url ws://127.0.0.1:8766 screenshot --out target/aemu-ws-screenshot.ppm
+tools/ws_cli.py --url ws://127.0.0.1:8766 screenshot --out target/aemu-ws-screenshot.png
 tools/ws_cli.py --url ws://127.0.0.1:8766 tap 427 240
 ```
 
 Current live rendering reaches MCPE's first `eglSwapBuffers`, replays frames in
-SDL2, and the harness can capture framebuffer screenshots. A run on
+SDL2, and the harness captures framebuffer screenshots directly as PNG; no PPM
+or conversion step is expected. A run on
 `DISPLAY=:0` has been verified past frame 2000 without the previous HLE
 `std::string` heap exhaustion. WebSocket/SDL2 pointer events now enter the
 guest through a minimal `AInputQueue`/`AMotionEvent` facade and MCPE's
@@ -237,6 +238,22 @@ with:
 ```sh
 cargo build --lib --target wasm32-unknown-unknown --no-default-features --features webgl
 ```
+
+Texture upload tracing:
+
+```sh
+AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR=target/mcpe-gles-uploads \
+AEMU_DUMP_GLES_TEXTURE_UPLOADS_MATCH=64x32 \
+AEMU_DUMP_GLES_TEXTURE_UPLOADS_LIMIT=20 \
+DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
+```
+
+`AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR` dumps guest-captured texture uploads as
+`.png` plus `.raw` and appends a `manifest.jsonl` with guest texture ID, event
+index, dimensions, format/type, source pointer, and nonzero-pixel counts. The
+SDL replay side also writes `.png`/`.raw` for
+`AEMU_DUMP_SDL_TEXTURE_UPLOADS_DIR`; use matching filters such as `all`,
+`teximage2d`, `texsubimage2d`, `64x32`, `tex325`, `fmt1908`, or `ty1401`.
 
 ## Guest Addressing
 
