@@ -281,6 +281,9 @@ directly as `.png` files plus `draw_manifest.jsonl`. Use
 For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
 `Font::init()` run, and set `AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND=1` to keep
 `font/default8.png`/`font/ascii_sga.png` at their original APK dimensions.
+Set `AEMU_MCPE_NATIVE_TEXTURE_DATA=1` to bypass the HLE
+`TextureGroup::getTexture(TextureData const&)` facade and compare native
+TextureData texture pointer behavior.
 
 ## Guest Addressing
 

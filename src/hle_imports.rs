@@ -117,6 +117,7 @@ const FAKE_GEOMETRY_SIZE: u32 = 0x20;
 const FAKE_TEXTURE_PAIR_SIZE: u32 = 0x4c;
 const FAKE_TEXTURE_SIDE: u32 = 16;
 const FAKE_TEXTURE_BYTES: u32 = FAKE_TEXTURE_SIDE * FAKE_TEXTURE_SIDE * 4;
+const FAKE_TEXTURE_OGL_SIZE: u32 = 0x40;
 const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
 const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
 const GL_VENDOR: u32 = 0x1f00;
@@ -1266,6 +1267,9 @@ impl HleRuntime {
             "_ZN4Font4initEv" => self.minecraft_font_init(cpu, memory),
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
                 self.minecraft_texture_group_get_texture_pair(cpu, memory)
+            }
+            "_ZN3mce12TextureGroup10getTextureERK11TextureData" => {
+                self.minecraft_texture_group_get_texture_data(cpu, memory)
             }
             "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation" => Ok(self.return32(cpu, 1)),
             "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
@@ -3357,6 +3361,94 @@ impl HleRuntime {
             pixels.len()
         ));
         Ok(self.return32(cpu, pair))
+    }
+
+    fn minecraft_texture_group_get_texture_data<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let out = cpu.reg(0);
+        let texture_data = cpu.reg(2);
+        let width = load32(memory, texture_data)?;
+        let height = load32(memory, texture_data.wrapping_add(0x04))?;
+        let pixels = load32(memory, texture_data.wrapping_add(0x08))?;
+        let payload_len = cxx_string_len_from_data(memory, pixels)?;
+        let expected_len = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| HleError::Memory("TextureData size overflow".to_string()))?;
+        let copy_len = payload_len.min(expected_len);
+        let mut payload = if pixels == 0 || copy_len == 0 {
+            Vec::new()
+        } else {
+            load_bytes(memory, pixels, copy_len)?
+        };
+        payload.resize(expected_len as usize, 0);
+
+        let texture = self.alloc(FAKE_TEXTURE_OGL_SIZE, 4)?;
+        for offset in 0..FAKE_TEXTURE_OGL_SIZE {
+            store8(memory, texture.wrapping_add(offset), 0)?;
+        }
+        let gl_name = self.alloc_gl_name();
+        store8(memory, texture.wrapping_add(0x20), 1)?;
+        store8(memory, texture.wrapping_add(0x21), 1)?;
+        store32(memory, texture.wrapping_add(0x24), gl_name)?;
+        store32(memory, texture.wrapping_add(0x28), GL_TEXTURE_2D)?;
+
+        store32(memory, out, 0)?;
+        store32(memory, out.wrapping_add(0x04), texture)?;
+        self.store_cxx_string_bytes(memory, out.wrapping_add(0x08), &[], 0)?;
+        self.store_cxx_string_bytes(memory, out.wrapping_add(0x0c), b"InMemory", 8)?;
+
+        self.bind_guest_texture(GL_TEXTURE_2D, gl_name);
+        self.push_gles_event(GlesEvent::BindTexture {
+            target: GL_TEXTURE_2D,
+            texture: gl_name,
+        });
+        for (name, value) in [
+            (GL_TEXTURE_MIN_FILTER, GL_LINEAR),
+            (GL_TEXTURE_MAG_FILTER, GL_LINEAR),
+            (GL_TEXTURE_WRAP_S, GL_REPEAT),
+            (GL_TEXTURE_WRAP_T, GL_REPEAT),
+        ] {
+            self.push_gles_event(GlesEvent::TexParameteri {
+                target: GL_TEXTURE_2D,
+                name,
+                value,
+            });
+        }
+        self.maybe_dump_gles_texture_upload(GlesTextureUploadDump {
+            kind: "teximage2d",
+            texture: gl_name,
+            target: GL_TEXTURE_2D,
+            level: 0,
+            xoffset: 0,
+            yoffset: 0,
+            width: width as i32,
+            height: height as i32,
+            format: GL_RGBA,
+            ty: GL_UNSIGNED_BYTE,
+            pixels,
+            payload: (!payload.is_empty()).then_some(payload.as_slice()),
+        });
+        self.push_gles_event(GlesEvent::TexImage2D {
+            target: GL_TEXTURE_2D,
+            level: 0,
+            internal_format: GL_RGBA as i32,
+            width: width as i32,
+            height: height as i32,
+            border: 0,
+            format: GL_RGBA,
+            ty: GL_UNSIGNED_BYTE,
+            pixels,
+            payload: Some(payload),
+        });
+
+        trace_mcpe_resource(format_args!(
+            "TextureGroup::getTexture(TextureData) data={texture_data:#010x} -> ptr={out:#010x} texture={texture:#010x} gl={gl_name} {width}x{height} bytes={payload_len}"
+        ));
+        Ok(self.return32(cpu, out))
     }
 
     fn minecraft_font_init<M: Memory>(
@@ -6054,11 +6146,15 @@ fn is_target_symbol(name: &str) -> bool {
     if name == "_ZN4Font4initEv" {
         return std::env::var_os("AEMU_MCPE_NATIVE_FONT_INIT").is_none();
     }
+    if name == "_ZN3mce12TextureGroup10getTextureERK11TextureData" {
+        return std::env::var_os("AEMU_MCPE_NATIVE_TEXTURE_DATA").is_none();
+    }
     matches!(
         name,
         "_ZN8WebTokenC1ERKS_"
             | "_ZN8WebTokenC2ERKS_"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
+            | "_ZN3mce12TextureGroup10getTextureERK11TextureData"
             | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
             | "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
             | "_ZN11AppPlatform7loadPNGER11TextureDataRKSs"
@@ -9342,6 +9438,7 @@ mod tests {
             "_ZN8WebTokenC2ERKS_",
             "_ZN4Font4initEv",
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            "_ZN3mce12TextureGroup10getTextureERK11TextureData",
             "_ZN11AppPlatform9loadImageER11TextureDataRKSs",
             "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
             "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs",
@@ -11255,6 +11352,83 @@ mod tests {
         assert_eq!(cpu.reg(0), pair);
         assert_eq!(cpu.pc(), 0x2004);
         assert!(hle.take_gles_events().is_empty());
+    }
+
+    #[test]
+    fn dispatches_minecraft_texture_group_texture_data_facade() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x50000).unwrap();
+
+        let out = 0x1200;
+        let texture_data = 0x1400;
+        let pixels = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x48000);
+        hle.store_cxx_string_bytes(&mut memory, texture_data + 8, &pixels, pixels.len() as u32)
+            .unwrap();
+        memory.store32(texture_data, 2).unwrap();
+        memory.store32(texture_data + 4, 1).unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2001);
+        cpu.set_reg(0, out);
+        cpu.set_reg(1, 0x5555);
+        cpu.set_reg(2, texture_data);
+
+        hle.dispatch(
+            "_ZN3mce12TextureGroup10getTextureERK11TextureData",
+            &mut cpu,
+            &mut memory,
+        )
+        .unwrap();
+
+        assert_eq!(cpu.reg(0), out);
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.isa(), Isa::Thumb);
+        assert_eq!(memory.load32(out).unwrap(), 0);
+        let texture = memory.load32(out + 4).unwrap();
+        assert_ne!(texture, 0);
+        assert_eq!(memory.load8(texture + 0x20).unwrap(), 1);
+        assert_eq!(memory.load8(texture + 0x21).unwrap(), 1);
+        assert_eq!(memory.load32(texture + 0x24).unwrap(), 1);
+        assert_eq!(memory.load32(texture + 0x28).unwrap(), GL_TEXTURE_2D);
+        assert_eq!(
+            load_test_cxx_string(&mut memory, out + 0x0c),
+            b"InMemory"
+        );
+
+        let events = hle.take_gles_events();
+        assert_eq!(
+            events.first(),
+            Some(&GlesEvent::BindTexture {
+                target: GL_TEXTURE_2D,
+                texture: 1,
+            })
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GlesEvent::TexParameteri {
+                    target: GL_TEXTURE_2D,
+                    name: GL_TEXTURE_MIN_FILTER,
+                    value: GL_LINEAR,
+                }
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GlesEvent::TexImage2D {
+                    target: GL_TEXTURE_2D,
+                    width: 2,
+                    height: 1,
+                    format: GL_RGBA,
+                    ty: GL_UNSIGNED_BYTE,
+                    payload: Some(payload),
+                    ..
+                } if payload.as_slice() == pixels
+            )
+        }));
     }
 
     #[test]
