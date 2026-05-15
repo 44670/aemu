@@ -400,7 +400,11 @@ impl NativeRuntime {
         hle.set_unwind_tables(collect_unwind_tables(&link));
 
         let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
-        let minecraft_resource_bridge = build_minecraft_resource_bridge(&link);
+        let minecraft_resource_bridge = if minecraft_resource_bridge_enabled() {
+            build_minecraft_resource_bridge(&link)
+        } else {
+            None
+        };
 
         Ok(Self {
             link,
@@ -487,10 +491,6 @@ impl NativeRuntime {
         if self.minecraft_resource_bridge_active || pc != bridge.render_resource_gate_pc {
             return Ok(());
         }
-        if std::env::var_os("AEMU_DISABLE_MCPE_RESOURCE_BRIDGE").is_some() {
-            return Ok(());
-        }
-
         let client = self.cpu.reg(7);
         if client == 0 {
             return Ok(());
@@ -2627,6 +2627,14 @@ fn build_minecraft_resource_bridge(link: &NativeLinkReport) -> Option<MinecraftR
     })
 }
 
+fn minecraft_resource_bridge_enabled() -> bool {
+    if std::env::var_os("AEMU_DISABLE_MCPE_RESOURCE_BRIDGE").is_some() {
+        return false;
+    }
+    std::env::var_os("AEMU_ENABLE_MCPE_RESOURCE_BRIDGE").is_some()
+        || std::env::var_os("AEMU_MCPE_HLE_GAME_LOGIC").is_some()
+}
+
 fn minecraft_on_resources_loaded_steps() -> usize {
     std::env::var(MCPE_ON_RESOURCES_LOADED_STEPS_ENV)
         .ok()
@@ -2819,7 +2827,35 @@ mod tests {
 
     #[test]
     fn builds_minecraft_resource_bridge_from_target_symbols() {
-        let report = NativeLinkReport {
+        let report = minecraft_resource_bridge_test_report();
+
+        assert_eq!(
+            build_minecraft_resource_bridge(&report),
+            Some(MinecraftResourceBridge {
+                render_resource_gate_pc: 0x70ec_c8f2,
+                on_resources_loaded: 0x70bb_eb1d,
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_install_minecraft_resource_bridge_by_default() {
+        let report = minecraft_resource_bridge_test_report();
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let runtime = NativeRuntime::new(report, config).unwrap();
+
+        assert_eq!(runtime.minecraft_resource_bridge, None);
+    }
+
+    fn minecraft_resource_bridge_test_report() -> NativeLinkReport {
+        NativeLinkReport {
             apk_path: PathBuf::from("mcpe.apk"),
             abi: "armeabi-v7a".to_string(),
             memory: MappedMemory::new(),
@@ -2855,15 +2891,7 @@ mod tests {
             resolved_imports: Vec::new(),
             unresolved_imports: Vec::new(),
             relocation_errors: Vec::new(),
-        };
-
-        assert_eq!(
-            build_minecraft_resource_bridge(&report),
-            Some(MinecraftResourceBridge {
-                render_resource_gate_pc: 0x70ec_c8f2,
-                on_resources_loaded: 0x70bb_eb1d,
-            })
-        );
+        }
     }
 
     #[test]

@@ -216,11 +216,11 @@ SDL2, and the harness captures framebuffer screenshots directly as PNG; no PPM
 or conversion step is expected. A run on
 `DISPLAY=:0` has been verified past frame 2000 without the previous HLE
 `std::string` heap exhaustion. WebSocket/SDL2 pointer events now enter the
-guest through a minimal `AInputQueue`/`AMotionEvent` facade and MCPE's
-`Multitouch::feed` target hook; a traced tap at `427,240` reached both down and
-up feed calls. Do not call this playable yet: the framebuffer still stays on
-the gradient/loading frame after input, the fake MCPE texture/geometry/UI
-resource HLE remains a likely menu blocker, and audio remains stubbed.
+guest through a minimal Android `AInputQueue`/`AMotionEvent` facade. The old
+MCPE `Multitouch::feed` target hook is diagnostic-only and not linked by
+default. Do not call this playable yet: the framebuffer still stays on the
+gradient/loading frame after input, default execution now keeps MCPE
+texture/geometry/UI/resource logic native, and audio remains stubbed.
 Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,
@@ -304,18 +304,27 @@ The native path currently uses a 128x128 text atlas; the old HLE
 font-expansion path uses 256x256. Both profiles reject the known bad 64x32
 binding.
 
-For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
-`Font::init()` run, and set `AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND=1` to keep
-`font/default8.png`/`font/ascii_sga.png` at their original APK dimensions.
-`TextureGroup::getTexture(TextureData const&)`,
-`TextureGroup::getTexturePair(ResourceLocation const&)`, and
-`TextureGroup::isLoaded(ResourceLocation const&)` are native by default. Keep
-them together: mixing native `getTexturePair` with the old diagnostic
-`isLoaded(...) == true` HLE facade can make `TextureAtlas::redrawAtlas()` call
-`TexturePair::clear()` on a null native pair. To restore the old diagnostic HLE
-facades explicitly, set `AEMU_MCPE_HLE_TEXTURE_GROUP=1` or the narrower
+MCPE game/engine target facades are diagnostic only and must stay native by
+default. This includes `Font::init()`, `TextureGroup::*`, `AppPlatform::*`
+image loaders, `ImageUtils::*`, `GeometryGroup::*`, MCPE input/gamepad/menu
+methods, render helpers, profiler/telemetry, social, networking, and Realms
+methods. Keep AEMU HLE at Android/system/libc/libm/libstdc++/EGL/GLES import
+boundaries, not at MCPE gameplay or rendering-engine methods.
+
+For old experiments only, set `AEMU_MCPE_HLE_GAME_LOGIC=1` to restore all MCPE
+target HLE facades. To restore just the old TextureGroup diagnostic HLE
+facades, set `AEMU_MCPE_HLE_TEXTURE_GROUP=1` or the narrower
 `AEMU_MCPE_HLE_TEXTURE_DATA=1`, `AEMU_MCPE_HLE_TEXTURE_PAIR=1`, or
-`AEMU_MCPE_HLE_TEXTURE_IS_LOADED=1`.
+`AEMU_MCPE_HLE_TEXTURE_IS_LOADED=1`. Mixing native `getTexturePair` with the
+old diagnostic `isLoaded(...) == true` HLE facade can make
+`TextureAtlas::redrawAtlas()` call `TexturePair::clear()` on a null native
+pair.
+
+The old MCPE resource bridge that calls `MinecraftClient::onResourcesLoaded`
+from inside `GameRenderer::render` is also disabled by default. It may be
+restored only for old diagnostics with `AEMU_ENABLE_MCPE_RESOURCE_BRIDGE=1`
+or `AEMU_MCPE_HLE_GAME_LOGIC=1`.
+
 For native TextureData fallback traces captured in `run.log`, use:
 
 ```sh

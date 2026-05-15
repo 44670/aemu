@@ -682,7 +682,7 @@ fn align_up(value: u32, align: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crate::armv6::Memory;
 
@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn hle_symbols_override_native_exports_for_selected_runtime_helpers() {
+    fn hle_symbols_override_native_exports_for_runtime_helpers_but_not_game_logic() {
         let cxx_name = "_ZNSs14_M_replace_auxEjjjc";
         let target_name = "_ZN8WebTokenC2ERKS_";
         let support = test_so(&[], &[], &[(cxx_name, 0x1200)], &[]);
@@ -823,13 +823,12 @@ mod tests {
             .find(|symbol| symbol.name == target_name)
             .unwrap()
             .address;
-        let hle_target_addr = report
-            .hle_symbols
-            .iter()
-            .find(|symbol| symbol.name == target_name)
-            .unwrap()
-            .address;
-        assert_ne!(hle_target_addr, native_target_addr);
+        assert!(
+            report
+                .hle_symbols
+                .iter()
+                .all(|symbol| symbol.name != target_name)
+        );
 
         let game_bias = report
             .objects
@@ -840,7 +839,7 @@ mod tests {
         assert_eq!(report.memory.load32(game_bias + 0x700).unwrap(), hle_addr);
         assert_eq!(
             report.memory.load32(game_bias + 0x704).unwrap(),
-            hle_target_addr
+            native_target_addr
         );
         assert!(report.resolved_imports.iter().any(|import| {
             import.name == cxx_name
@@ -900,19 +899,29 @@ mod tests {
     }
 
     #[test]
-    fn minecraft_texture_group_exports_remain_native_by_default() {
-        let texture_pair_name = "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation";
-        let game = test_so(
-            &[],
-            &[],
-            &[(texture_pair_name, 0x1200)],
-            &[TestRelocation {
-                offset: 0x700,
-                symbol: Some(texture_pair_name),
+    fn minecraft_game_logic_exports_remain_native_by_default() {
+        let game_logic_names = [
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            "_ZN4Font4initEv",
+            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
+            "_ZN18MinecraftTelemetry4tickEv",
+        ];
+        let exports = game_logic_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (*name, 0x1200 + idx as u32 * 4))
+            .collect::<Vec<_>>();
+        let relocations = game_logic_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| TestRelocation {
+                offset: 0x700 + idx as u32 * 4,
+                symbol: Some(*name),
                 kind: 21,
                 addend: 0,
-            }],
-        );
+            })
+            .collect::<Vec<_>>();
+        let game = test_so(&[], &[], &exports, &relocations);
         let apk = zip_with_files(&[("lib/armeabi/libgame.so", game)]);
 
         let mut report = load_apk_native_libraries_bytes(
@@ -922,23 +931,23 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            report
-                .hle_symbols
-                .iter()
-                .all(|symbol| symbol.name != texture_pair_name)
-        );
-        let native_addr = report
-            .global_symbols
-            .iter()
-            .find(|symbol| symbol.name == texture_pair_name)
-            .unwrap()
-            .address;
         let game_bias = report.objects[0].load_bias;
-        assert_eq!(
-            report.memory.load32(game_bias + 0x700).unwrap(),
-            native_addr
-        );
+        for (idx, name) in game_logic_names.iter().enumerate() {
+            assert!(report.hle_symbols.iter().all(|symbol| symbol.name != *name));
+            let native_addr = report
+                .global_symbols
+                .iter()
+                .find(|symbol| symbol.name == *name)
+                .unwrap()
+                .address;
+            assert_eq!(
+                report
+                    .memory
+                    .load32(game_bias + 0x700 + idx as u32 * 4)
+                    .unwrap(),
+                native_addr
+            );
+        }
     }
 
     #[test]
@@ -964,6 +973,26 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn local_minecraft_link_has_no_game_logic_hle_symbols_when_present() {
+        let apk = Path::new("/mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk");
+        if !apk.exists() {
+            return;
+        }
+        let config = NativeLoadConfig {
+            abi: "armeabi-v7a".to_string(),
+            ..NativeLoadConfig::default()
+        };
+        let report = load_apk_native_libraries_with_config(apk, &config).unwrap();
+
+        assert!(
+            report
+                .hle_symbols
+                .iter()
+                .all(|symbol| symbol.kind != HleSymbolKind::Target)
+        );
     }
 
     struct TestRelocation {

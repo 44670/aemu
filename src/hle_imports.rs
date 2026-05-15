@@ -6038,7 +6038,7 @@ pub fn initialize_hle_symbol<M: Memory>(
 }
 
 pub(crate) fn should_link_hle_symbol(name: &str) -> bool {
-    !is_minecraft_texture_group_facade(name) || minecraft_texture_group_hle_enabled(name)
+    !is_minecraft_game_logic_facade(name) || minecraft_game_logic_hle_enabled(name)
 }
 
 fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
@@ -6351,23 +6351,13 @@ fn is_null_stub(name: &str) -> bool {
 }
 
 fn is_target_symbol(name: &str) -> bool {
-    if matches!(
-        name,
-        "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
-            | "_ZN9UIControl18_resolvePostCreateEv"
-    ) {
-        return std::env::var_os("AEMU_MCPE_NATIVE_UI_CONTROL").is_none();
-    }
-    if name == "_ZN4Font4initEv" {
-        return std::env::var_os("AEMU_MCPE_NATIVE_FONT_INIT").is_none();
-    }
-    if is_minecraft_texture_group_facade(name) {
-        return true;
-    }
     matches!(
         name,
         "_ZN8WebTokenC1ERKS_"
             | "_ZN8WebTokenC2ERKS_"
+            | "_ZN4Font4initEv"
+            | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
+            | "_ZN9UIControl18_resolvePostCreateEv"
             | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
             | "_ZN3mce12TextureGroup10getTextureERK11TextureData"
             | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
@@ -6467,6 +6457,17 @@ fn is_target_symbol(name: &str) -> bool {
     )
 }
 
+fn is_minecraft_game_logic_facade(name: &str) -> bool {
+    is_target_symbol(name)
+}
+
+fn minecraft_game_logic_hle_enabled(name: &str) -> bool {
+    if std::env::var_os("AEMU_MCPE_HLE_GAME_LOGIC").is_some() {
+        return true;
+    }
+    minecraft_texture_group_hle_enabled(name)
+}
+
 fn is_minecraft_texture_group_facade(name: &str) -> bool {
     matches!(
         name,
@@ -6477,6 +6478,9 @@ fn is_minecraft_texture_group_facade(name: &str) -> bool {
 }
 
 fn minecraft_texture_group_hle_enabled(name: &str) -> bool {
+    if !is_minecraft_texture_group_facade(name) {
+        return false;
+    }
     if std::env::var_os("AEMU_MCPE_HLE_TEXTURE_GROUP").is_some() {
         return true;
     }
@@ -9777,14 +9781,31 @@ mod tests {
     }
 
     #[test]
-    fn keeps_minecraft_texture_group_facades_native_by_default() {
+    fn keeps_minecraft_game_logic_facades_native_by_default() {
         for name in [
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
             "_ZN3mce12TextureGroup10getTextureERK11TextureData",
             "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation",
+            "_ZN4Font4initEv",
+            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
+            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai",
+            "_ZN13GeometryGroup11getGeometryERKSs",
+            "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb",
+            "_ZN18MinecraftTelemetry4tickEv",
         ] {
             assert!(describe_hle_import(name).is_some());
             assert!(!should_link_hle_symbol(name));
+        }
+
+        for name in [
+            "glCreateShader",
+            "eglSwapBuffers",
+            "AAssetManager_open",
+            "pthread_create",
+            "_ZNSsC1ERKSs",
+        ] {
+            assert!(describe_hle_import(name).is_some());
+            assert!(should_link_hle_symbol(name), "{name}");
         }
     }
 
