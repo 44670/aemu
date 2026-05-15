@@ -61,6 +61,11 @@ def gles_events_path(args) -> pathlib.Path:
     return pathlib.Path(args.gles_events) if args.gles_events else root / "gles_events.jsonl"
 
 
+def native_log_path(args) -> pathlib.Path:
+    root = pathlib.Path(args.trace_dir)
+    return pathlib.Path(args.native_log) if args.native_log else root / "run.log"
+
+
 def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path]:
     _root, hle_dir, draw_dir = trace_paths(args)
     uploads = read_jsonl(hle_dir / "manifest.jsonl")
@@ -208,6 +213,186 @@ def print_gles_event(args) -> int:
     print(f"gles-event {args.event}: path={path} rows={len(rows)}")
     for row in rows[: args.limit]:
         print(format_gles_event(row))
+    return 0
+
+
+MEM32_RE = re.compile(
+    r"(?P<prefix>THREAD_TRACE id=(?P<thread>\d+) )?"
+    r"MEM32 step=(?P<step>\d+) pc=(?P<pc>0x[0-9a-fA-F]+) "
+    r"(?P<base>[a-z0-9]+)=(?P<base_value>0x[0-9a-fA-F]+)(?P<fields>.*)"
+)
+MEM32_FIELD_RE = re.compile(
+    r"\[(?P<label>[^\]]+)@(?P<addr>0x[0-9a-fA-F]+)\]=(?P<value>0x[0-9a-fA-F]+)"
+)
+CXX_STRING_RE = re.compile(
+    r"(?P<prefix>THREAD_TRACE id=(?P<thread>\d+) )?"
+    r"CXX_STRING step=(?P<step>\d+) pc=(?P<pc>0x[0-9a-fA-F]+) "
+    r"(?P<base>[a-z0-9]+)\+(?P<offset>0x[0-9a-fA-F]+|0)=0x[0-9a-fA-F]+ "
+    r"data=(?P<data>0x[0-9a-fA-F]+) len=(?P<len>\d+) bytes=(?P<bytes>.*)"
+)
+
+
+def parse_trace_string(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        try:
+            return bytes(raw[1:-1], "utf-8").decode("unicode_escape")
+        except UnicodeDecodeError:
+            return raw[1:-1]
+    return raw
+
+
+def parse_native_log(args) -> tuple[list[dict], pathlib.Path]:
+    path = native_log_path(args)
+    if not path.exists():
+        raise TraceQueryError(f"{path}: missing native log")
+
+    pending_ctor: dict[str, str | int | None] | None = None
+    texture_fields: dict[int, dict[str, int]] = {}
+    ctor_by_out: dict[int, dict] = {}
+    rows = []
+
+    for line_no, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        cxx = CXX_STRING_RE.search(line)
+        if cxx and int(cxx.group("pc"), 0) == 0x716F2038:
+            step = int(cxx.group("step"))
+            offset = int(cxx.group("offset"), 0)
+            value = parse_trace_string(cxx.group("bytes"))
+            if pending_ctor is None or pending_ctor.get("step") != step:
+                pending_ctor = {
+                    "line": line_no,
+                    "step": step,
+                    "resource": None,
+                    "package": None,
+                }
+            if offset == 0:
+                pending_ctor["resource"] = value
+            elif offset == 4:
+                pending_ctor["package"] = value
+            continue
+
+        mem = MEM32_RE.search(line)
+        if not mem:
+            continue
+        pc = int(mem.group("pc"), 0)
+        step = int(mem.group("step"))
+        base_value = int(mem.group("base_value"), 0)
+        fields = {
+            item.group("label"): int(item.group("value"), 0)
+            for item in MEM32_FIELD_RE.finditer(mem.group("fields"))
+        }
+
+        if pc == 0x716F206E:
+            gl_name = next(
+                (value for label, value in fields.items() if label.startswith("r0+0x24")),
+                None,
+            )
+            target = next(
+                (value for label, value in fields.items() if label.startswith("r0+0x28")),
+                None,
+            )
+            if gl_name is not None:
+                texture_fields[base_value] = {
+                    "gl": gl_name,
+                    "target": target or 0,
+                    "line": line_no,
+                    "step": step,
+                }
+            continue
+
+        if pc == 0x716F2070:
+            texture = next(
+                (value for label, value in fields.items() if label.startswith("r6+0x4")),
+                None,
+            )
+            if texture is not None:
+                ctor = {
+                    "line": line_no,
+                    "step": step,
+                    "out": base_value,
+                    "texture": texture,
+                    "resource": None,
+                    "package": None,
+                    "gl": None,
+                    "target": None,
+                }
+                if pending_ctor is not None and step >= int(pending_ctor["step"]):
+                    ctor["resource"] = pending_ctor.get("resource")
+                    ctor["package"] = pending_ctor.get("package")
+                if texture in texture_fields:
+                    ctor.update(
+                        {
+                            "gl": texture_fields[texture].get("gl"),
+                            "target": texture_fields[texture].get("target"),
+                        }
+                    )
+                ctor_by_out[base_value] = ctor
+            continue
+
+        if pc in (0x716F03C8, 0x716F0402):
+            texture = next(
+                (
+                    value
+                    for label, value in fields.items()
+                    if label.startswith("r5+0x4")
+                ),
+                None,
+            )
+            row = {
+                "line": line_no,
+                "step": step,
+                "pc": pc,
+                "branch": "found" if pc == 0x716F03C8 else "fallback",
+                "out": base_value,
+                "texture": texture,
+                "resource": None,
+                "package": None,
+                "gl": None,
+                "target": None,
+            }
+            if base_value in ctor_by_out:
+                ctor = ctor_by_out[base_value]
+                row.update(
+                    {
+                        "texture": ctor.get("texture", texture),
+                        "resource": ctor.get("resource"),
+                        "package": ctor.get("package"),
+                        "gl": ctor.get("gl"),
+                        "target": ctor.get("target"),
+                    }
+                )
+            if row["texture"] in texture_fields:
+                row["gl"] = texture_fields[row["texture"]].get("gl")
+                row["target"] = texture_fields[row["texture"]].get("target")
+            rows.append(row)
+
+    return rows, path
+
+
+def print_mcpe_texturedata(args) -> int:
+    rows, path = parse_native_log(args)
+    if args.empty_only:
+        rows = [row for row in rows if row.get("resource") in (None, "")]
+    print(f"mcpe-texturedata: path={path} rows={len(rows)}")
+    for row in rows[: args.limit]:
+        resource = row.get("resource")
+        package = row.get("package")
+        texture = row.get("texture")
+        gl_name = row.get("gl")
+        target = row.get("target")
+        texture_text = "unknown" if texture is None else f"0x{texture:08x}"
+        gl_text = "unknown" if gl_name is None else str(gl_name)
+        target_text = "unknown" if target is None else f"0x{target:04x}"
+        print(
+            f"line={row['line']} step={row['step']} branch={row['branch']} "
+            f"out=0x{row['out']:08x} resource={resource!r} package={package!r} "
+            f"texture={texture_text} gl={gl_text} target={target_text}"
+        )
+    fallback_empty = [
+        row for row in rows if row.get("branch") == "fallback" and row.get("resource") in (None, "")
+    ]
+    if fallback_empty:
+        print(f"empty_resource_fallbacks={len(fallback_empty)}")
     return 0
 
 
@@ -373,6 +558,24 @@ def run_self_test() -> None:
             args.reject_texture_size,
         )
         assert failures
+        (root / "run.log").write_text(
+            "\n".join(
+                [
+                    'CXX_STRING step=10 pc=0x716f2038 r2+0x0=0x1000 data=0x2000 len=0 bytes=""',
+                    'CXX_STRING step=10 pc=0x716f2038 r2+0x4=0x1004 data=0x2010 len=18 bytes="InAppPackageImages"',
+                    "MEM32 step=12 pc=0x716f206e r0=0x60ff33f0 [r0+0x24@0x60ff3414]=0x00000145 [r0+0x28@0x60ff3418]=0x00000de1",
+                    "MEM32 step=13 pc=0x716f2070 r6=0x6dffde8c [r6+0x0@0x6dffde8c]=0x606c7150 [r6+0x4@0x6dffde90]=0x60ff33f0",
+                    "MEM32 step=14 pc=0x716f0402 r5=0x6dffde8c [r5+0x0@0x6dffde8c]=0x606c7150 [r5+0x4@0x6dffde90]=0x60ff33f0",
+                ]
+            )
+            + "\n"
+        )
+        native_args = argparse.Namespace(trace_dir=str(root), native_log=None, empty_only=True)
+        native_rows, _native_path = parse_native_log(native_args)
+        assert len(native_rows) == 1
+        assert native_rows[0]["branch"] == "fallback"
+        assert native_rows[0]["resource"] == ""
+        assert native_rows[0]["gl"] == 325
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -383,6 +586,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hle-dir", help="override HLE upload manifest directory")
     parser.add_argument("--draw-dir", help="override SDL draw manifest directory")
     parser.add_argument("--gles-events", help="override GLES event JSONL path")
+    parser.add_argument("--native-log", help="override native stderr trace log path")
     parser.add_argument("--self-test", action="store_true", help="run built-in self-test")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -409,6 +613,14 @@ def build_parser() -> argparse.ArgumentParser:
     mcpe.add_argument("--expect-texture-size", type=parse_size, default=(256, 256))
     mcpe.add_argument("--reject-texture-size", type=parse_size, default=(64, 32))
     mcpe.add_argument("--limit", type=int, default=40)
+
+    texture_data = subparsers.add_parser(
+        "mcpe-texturedata",
+        help="summarize MCPE TextureData native trace fallbacks from run.log",
+    )
+    texture_data.add_argument("--empty-only", action="store_true", default=True)
+    texture_data.add_argument("--all", action="store_false", dest="empty_only")
+    texture_data.add_argument("--limit", type=int, default=40)
     return parser
 
 
@@ -430,6 +642,8 @@ def main(argv=None) -> int:
         return print_program(args)
     if args.command == "mcpe-text":
         return print_mcpe_text(args)
+    if args.command == "mcpe-texturedata":
+        return print_mcpe_texturedata(args)
     raise SystemExit("command is required unless --self-test is used")
 
 

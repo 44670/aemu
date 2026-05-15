@@ -300,6 +300,17 @@ For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
 Set `AEMU_MCPE_NATIVE_TEXTURE_DATA=1` to bypass the HLE
 `TextureGroup::getTexture(TextureData const&)` facade and compare native
 TextureData texture pointer behavior.
+For native TextureData fallback traces captured in `run.log`, use:
+
+```sh
+tools/trace_query.py "$trace_dir" mcpe-texturedata
+```
+
+This summarizes the observed
+`TextureData -> ResourceLocation -> TextureOGL/gl_name` chain. In the known bad
+MCPE path, native `getTexture(TextureData const&)` falls back through an empty
+`ResourceLocation` and resolves `TextureOGL` GL name `325`; that is diagnostic
+evidence, not a long-term license to HLE MCPE engine methods.
 
 GLES event timeline tracing:
 
