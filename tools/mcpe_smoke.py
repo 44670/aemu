@@ -14,6 +14,41 @@ DEFAULT_APK = pathlib.Path("/mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.a
 DEFAULT_BINARY = pathlib.Path("target/release/aemu")
 DEFAULT_ABI = "armeabi-v7a"
 DEFAULT_OUT_DIR = pathlib.Path("target/mcpe-smoke")
+MCPE_LIBRARY = "libminecraftpe.so"
+
+MCPE_NATIVE_TRACE_PRESETS = {
+    "webtoken": {
+        "description": "trace MCPE certificate WebToken creation without HLE-ing game logic",
+        "events": [
+            (0x006AFD50, "Certificate::createBasicCertificate.copy-token-call"),
+            (0x006AE900, "WebToken::copy.entry"),
+            (0x006B2A40, "WebToken::createFromData.entry"),
+            (0x006B2A7E, "WebToken::createFromData.after-token-builder"),
+            (0x006B2A8C, "WebToken::createFromData.check-token-builder"),
+            (0x006B2BDE, "WebToken::createFromData.check-signature-compare"),
+            (0x006B2C24, "WebToken::createFromData.return-null-token-builder"),
+            (0x006B2C2C, "WebToken::createFromData.return-null-signature"),
+            (0x006B2C7C, "WebToken::createFromData.return-success"),
+        ],
+        "mem32": [
+            (0x006AFD50, "sp+0x5c,+0x60,+0xe0,+0x12c"),
+            (0x006AE900, "sp+0,+0x4,+0x8,+0xc,+0x10,+0x14,+0x18,+0x1c"),
+            (0x006B2A40, "r0+0"),
+            (0x006B2A40, "r1+0,+0x4,+0x8,+0xc,+0x10,+0x14,+0x18,+0x1c"),
+            (0x006B2A40, "r2+0,+0x4,+0x8,+0xc"),
+            (0x006B2A7E, "sp+0x6c,+0x70,+0x74,+0x78"),
+            (0x006B2A8C, "sp+0x6c,+0x70,+0x74,+0x78"),
+            (0x006B2BDE, "sp+0x6c,+0x70,+0x74,+0x78"),
+            (0x006B2C24, "r8+0"),
+            (0x006B2C2C, "r8+0"),
+            (0x006B2C7C, "r8+0"),
+        ],
+        "deref32": [
+            (0x006B2A40, "r2+0x8,+0x4"),
+        ],
+        "event_limit": 200,
+    },
+}
 
 OBJECT_RE = re.compile(
     r"^\s+(?P<name>[^:]+): load_bias (?P<load_bias>0x[0-9a-fA-F]+), "
@@ -117,6 +152,74 @@ def parse_link_objects(link_log: str):
             }
         )
     return objects
+
+
+def object_by_name(objects, name: str):
+    for obj in objects:
+        if obj["name"] == name:
+            return obj
+    return None
+
+
+def runtime_pc(objects, library_name: str, offset: int) -> int:
+    obj = object_by_name(objects, library_name)
+    if obj is None:
+        raise RuntimeError(f"{library_name} was not linked; cannot resolve native trace preset")
+    return obj["load_bias"] + offset
+
+
+def trace_spec_for_offset(objects, offset: int, suffix: str, *, library_name: str = MCPE_LIBRARY) -> str:
+    return f"0x{runtime_pc(objects, library_name, offset):08x}:{suffix}"
+
+
+def append_native_trace_preset(config, preset_name: str, objects):
+    preset = MCPE_NATIVE_TRACE_PRESETS[preset_name]
+    for offset, name in preset["events"]:
+        config["events"].append(trace_spec_for_offset(objects, offset, name))
+    for offset, fields in preset.get("mem32", []):
+        config["mem32"].append(trace_spec_for_offset(objects, offset, fields))
+    for offset, fields in preset.get("deref32", []):
+        config["deref32"].append(trace_spec_for_offset(objects, offset, fields))
+    for offset, fields in preset.get("cxx_string", []):
+        config["cxx_string"].append(trace_spec_for_offset(objects, offset, fields))
+    config["presets"].append(
+        {
+            "name": preset_name,
+            "description": preset["description"],
+            "library": MCPE_LIBRARY,
+            "event_count": len(preset["events"]),
+        }
+    )
+    config["event_limit"] = max(config["event_limit"] or 0, preset.get("event_limit", 0)) or None
+
+
+def build_native_trace_config(args, objects):
+    config = {
+        "presets": [],
+        "events": list(args.native_event or []),
+        "mem32": list(args.native_event_mem32 or []),
+        "deref32": list(args.native_event_deref32 or []),
+        "cxx_string": list(args.native_event_cxx_string or []),
+        "event_limit": args.native_event_limit,
+    }
+    for preset_name in args.native_trace_preset or []:
+        append_native_trace_preset(config, preset_name, objects)
+    return config
+
+
+def apply_native_trace_env(env, trace_dir: pathlib.Path, config):
+    if not config["events"]:
+        return
+    env["AEMU_TRACE_NATIVE_EVENTS_JSONL"] = str(trace_dir / "native_events.jsonl")
+    env["AEMU_TRACE_NATIVE_EVENTS"] = ";".join(config["events"])
+    if config["mem32"]:
+        env["AEMU_TRACE_NATIVE_EVENT_MEM32"] = ";".join(config["mem32"])
+    if config["deref32"]:
+        env["AEMU_TRACE_NATIVE_EVENT_DEREF32"] = ";".join(config["deref32"])
+    if config["cxx_string"]:
+        env["AEMU_TRACE_NATIVE_EVENT_CXX_STRING"] = ";".join(config["cxx_string"])
+    if config["event_limit"] is not None:
+        env["AEMU_TRACE_NATIVE_EVENTS_LIMIT"] = str(config["event_limit"])
 
 
 def parse_run_log(run_log: str):
@@ -235,13 +338,35 @@ def count_jsonl(path: pathlib.Path) -> int:
 def collect_artifacts(trace_dir: pathlib.Path):
     draw_dir = trace_dir / "sdl-draw"
     gles_path = trace_dir / "gles_events.jsonl"
+    native_events_path = trace_dir / "native_events.jsonl"
     return {
         "gles_events_jsonl": str(gles_path),
         "gles_event_count": count_jsonl(gles_path),
+        "native_events_jsonl": str(native_events_path),
+        "native_event_count": count_jsonl(native_events_path),
         "sdl_draw_dir": str(draw_dir),
         "sdl_draw_png_count": len(list(draw_dir.glob("*.png"))) if draw_dir.exists() else 0,
         "sdl_draw_manifest_count": count_jsonl(draw_dir / "draw_manifest.jsonl"),
     }
+
+
+def native_event_matches(row: dict, needle: str) -> bool:
+    needle = needle.lower()
+    event = row.get("event")
+    if isinstance(event, str) and needle in event.lower():
+        return True
+    pc = row.get("pc")
+    return isinstance(pc, int) and needle in f"0x{pc:08x}".lower()
+
+
+def read_jsonl(path: pathlib.Path):
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
 
 
 def validate_expectations(args, summary):
@@ -266,6 +391,11 @@ def validate_expectations(args, summary):
         errors.append(f"expected zero exit, got {summary['process']['returncode']}")
     if args.expect_exit == "nonzero" and summary["process"]["returncode"] == 0:
         errors.append("expected nonzero exit, got 0")
+    if args.expect_native_event:
+        native_events = read_jsonl(pathlib.Path(summary["artifacts"]["native_events_jsonl"]))
+        for expected in args.expect_native_event:
+            if not any(native_event_matches(row, expected) for row in native_events):
+                errors.append(f"expected native event matching {expected!r}")
     return errors
 
 
@@ -300,10 +430,19 @@ def print_summary(summary, expectation_errors):
             f"{symbolication.get('object')}+0x{symbolication.get('offset', 0):08x} "
             f"{symbol}{delta_text}"
         )
+    native_trace = summary.get("native_trace") or {}
+    if native_trace.get("presets") or native_trace.get("events"):
+        presets = ",".join(preset["name"] for preset in native_trace.get("presets", [])) or "manual"
+        print(
+            "native_trace: "
+            f"presets={presets} events={len(native_trace.get('events', []))} "
+            f"limit={native_trace.get('event_limit')}"
+        )
     artifacts = summary["artifacts"]
     print(
         "artifacts: "
         f"gles_events={artifacts['gles_event_count']} "
+        f"native_events={artifacts['native_event_count']} "
         f"sdl_draw_pngs={artifacts['sdl_draw_png_count']} "
         f"sdl_draw_manifest_rows={artifacts['sdl_draw_manifest_count']}"
     )
@@ -332,10 +471,42 @@ def build_arg_parser():
     parser.add_argument("--display", default=":0")
     parser.add_argument("--gles-event-limit", type=int, default=2000)
     parser.add_argument("--draw-dump-limit", type=int, default=10)
+    parser.add_argument(
+        "--native-trace-preset",
+        action="append",
+        choices=sorted(MCPE_NATIVE_TRACE_PRESETS),
+        help="enable a built-in native PC trace preset using the linked object load bias",
+    )
+    parser.add_argument(
+        "--native-event",
+        action="append",
+        help="append raw AEMU_TRACE_NATIVE_EVENTS spec, e.g. 0x70bb2a40:name",
+    )
+    parser.add_argument(
+        "--native-event-mem32",
+        action="append",
+        help="append raw AEMU_TRACE_NATIVE_EVENT_MEM32 spec",
+    )
+    parser.add_argument(
+        "--native-event-deref32",
+        action="append",
+        help="append raw AEMU_TRACE_NATIVE_EVENT_DEREF32 spec",
+    )
+    parser.add_argument(
+        "--native-event-cxx-string",
+        action="append",
+        help="append raw AEMU_TRACE_NATIVE_EVENT_CXX_STRING spec",
+    )
+    parser.add_argument("--native-event-limit", type=int)
     parser.add_argument("--expect-crash-pc")
     parser.add_argument("--expect-fault-address")
     parser.add_argument("--expect-stage", choices=[stage for stage, _marker in STAGE_MARKERS])
     parser.add_argument("--expect-exit", choices=["any", "zero", "nonzero"], default="any")
+    parser.add_argument(
+        "--expect-native-event",
+        action="append",
+        help="require at least one structured native event whose name or PC contains this text",
+    )
     parser.add_argument("--echo-log", action="store_true")
     return parser
 
@@ -364,6 +535,10 @@ def main(argv=None):
         log_path=link_log_path,
     )
     objects = parse_link_objects(link["output"])
+    try:
+        native_trace_config = build_native_trace_config(args, objects)
+    except RuntimeError as err:
+        raise SystemExit(str(err)) from err
 
     env = os.environ.copy()
     env.setdefault("DISPLAY", args.display)
@@ -377,6 +552,7 @@ def main(argv=None):
     env["AEMU_DUMP_SDL_DRAW_CHANGES_DIR"] = str(trace_dir / "sdl-draw")
     env["AEMU_DUMP_SDL_DRAW_CHANGES_MATCH"] = "all"
     env["AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT"] = str(args.draw_dump_limit)
+    apply_native_trace_env(env, trace_dir, native_trace_config)
 
     cmd = [
         str(binary),
@@ -419,6 +595,7 @@ def main(argv=None):
             "timed_out": run["timed_out"],
             "elapsed_seconds": run["elapsed_seconds"],
         },
+        "native_trace": native_trace_config,
         "run": parsed_run,
         "artifacts": collect_artifacts(trace_dir),
     }

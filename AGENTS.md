@@ -208,6 +208,17 @@ tools/mcpe_smoke.py --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
 ```
 
+For the current MCPE certificate/WebToken blocker, use the built-in native trace
+preset instead of hand-writing `AEMU_TRACE_NATIVE_*` environment variables:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset webtoken \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10 \
+  --expect-native-event WebToken::createFromData.return-null
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 20
+```
+
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.
 `run-apk-native --sdl2` implies `--until-swap` for now and replays the recorded
