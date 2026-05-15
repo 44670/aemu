@@ -160,7 +160,7 @@ fn run_qemu_tcg_smoke_exit() -> Result<aemu::qemu_tcg::QemuTcgExit, String> {
     runner
         .run_linux_exit_asm(
             aemu::qemu_tcg::QemuTcgArch::Armv7a,
-            aemu::qemu_tcg::armv7a_smoke_program(),
+            &aemu::qemu_tcg::armv7a_smoke_program(),
         )
         .map_err(|err| err.to_string())
 }
@@ -194,7 +194,7 @@ fn run_aemu_interpreter_smoke_exit() -> Result<i32, String> {
     let mut cpu = Cpu::new();
     let mut memory = VecMemory::new(0x1000, 0x1000);
     memory
-        .load_arm_words(0x1000, &[0xe3a0_002a, 0xe3a0_7001, 0xef00_0000])
+        .load_arm_words(0x1000, aemu::qemu_tcg::armv7a_smoke_arm_words())
         .map_err(|err| err.to_string())?;
     cpu.set_isa(Isa::Arm);
     cpu.branch_exchange(0x1000);

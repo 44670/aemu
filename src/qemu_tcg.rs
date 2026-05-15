@@ -123,14 +123,24 @@ impl QemuArmTcgRunner {
     }
 }
 
-pub fn armv7a_smoke_program() -> &'static str {
-    ".syntax unified\n\
-     .arch armv7-a\n\
-     .fpu neon\n\
-     .text\n\
-     .global _start\n\
-     _start:\n\
-       mov r0, #0x2a\n\
-       mov r7, #1\n\
-       svc #0\n"
+pub fn armv7a_smoke_arm_words() -> &'static [u32] {
+    &[
+        0xe3a0_002a, // mov r0, #42
+        0xe3a0_7001, // mov r7, #1
+        0xef00_0000, // svc #0
+    ]
+}
+
+pub fn armv7a_smoke_program() -> String {
+    let mut asm = ".syntax unified\n\
+                   .arch armv7-a\n\
+                   .fpu neon\n\
+                   .text\n\
+                   .global _start\n\
+                   _start:\n"
+        .to_string();
+    for word in armv7a_smoke_arm_words() {
+        asm.push_str(&format!("  .word 0x{word:08x}\n"));
+    }
+    asm
 }
