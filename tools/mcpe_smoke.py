@@ -187,7 +187,7 @@ MCPE_NATIVE_TRACE_PRESETS = {
         "events": [
             (0x0129CF1C, "BN_mod_sqr.entry"),
             (0x0129CF38, "BN_mod_sqr.after-bn-sqr"),
-            (0x0129CF54, "BN_mod_sqr.before-bn-nnmod"),
+            (0x0129CF54, "BN_mod_sqr.before-bn-div"),
             (0x0129CF58, "BN_mod_sqr.return"),
         ],
         "mem32": [

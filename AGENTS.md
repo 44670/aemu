@@ -292,7 +292,8 @@ tools/trace_query.py target/mcpe-smoke-<stamp> native-event --contains point_get
 
 If affine tracing shows `Z^-2` diverging after
 `ec_GFp_simple_field_sqr -> BN_mod_sqr`, use `bn-mod-sqr` to check bundled
-OpenSSL modular squaring directly against a host oracle:
+OpenSSL modular squaring directly against a host oracle. This preset verifies
+the `BN_sqr` output before the `BN_div` reduction step:
 
 ```sh
 tools/mcpe_smoke.py --native-trace-preset bn-mod-sqr \

@@ -509,10 +509,10 @@ def bn_mod_sqr_sequences(events: list[dict]) -> list[dict]:
             pending = pending_by_thread.get(thread)
             if pending:
                 pending[-1]["after_sqr"] = row
-        elif event == "BN_mod_sqr.before-bn-nnmod":
+        elif event in ("BN_mod_sqr.before-bn-div", "BN_mod_sqr.before-bn-nnmod"):
             pending = pending_by_thread.get(thread)
             if pending:
-                pending[-1]["before_nnmod"] = row
+                pending[-1]["before_div"] = row
         elif event == "BN_mod_sqr.return":
             pending = pending_by_thread.get(thread)
             if pending:
@@ -579,19 +579,19 @@ def check_bn_mod_sqr_sequence(seq: dict) -> tuple[bool, dict]:
             detail["square_actual"] = little_hex(square, square_words)
             detail["square_expected"] = little_hex(expected_square, square_words)
             detail["square_ok"] = square == expected_square
-    before_nnmod = seq.get("before_nnmod")
-    if isinstance(before_nnmod, dict):
+    before_div = seq.get("before_div")
+    if isinstance(before_div, dict):
         before_value, before_top, before_hex, before_err = bignum_value(
-            before_nnmod, "r6", "*r6+0", "pre-reduce"
+            before_div, "r6", "*r6+0", "pre-reduce"
         )
-        detail["before_nnmod_step"] = before_nnmod.get("step")
-        detail["before_nnmod_top"] = before_top
+        detail["before_div_step"] = before_div.get("step")
+        detail["before_div_top"] = before_top
         if before_err:
-            detail["before_nnmod_error"] = before_err
+            detail["before_div_error"] = before_err
         elif before_value is not None:
-            detail["before_nnmod"] = before_hex
+            detail["before_div"] = before_hex
             if "square_ok" in detail:
-                detail["before_nnmod_matches_square"] = before_value == value * value
+                detail["before_div_matches_square"] = before_value == value * value
     expected = (value * value) % modulus
     compare_words = max(output_top or 0, modulus_top, 1)
     detail["actual"] = little_hex(output, compare_words)
@@ -638,11 +638,11 @@ def print_bn_mod_sqr_check(args) -> int:
             )
             print(f"  square_actual  ={detail.get('square_actual')}")
             print(f"  square_expected={detail.get('square_expected')}")
-        if "before_nnmod_matches_square" in detail:
+        if "before_div_matches_square" in detail:
             print(
-                f"  before_nnmod_matches_square={detail.get('before_nnmod_matches_square')} "
-                f"before_nnmod_step={detail.get('before_nnmod_step')} "
-                f"before_nnmod_top={detail.get('before_nnmod_top')}"
+                f"  before_div_matches_square={detail.get('before_div_matches_square')} "
+                f"before_div_step={detail.get('before_div_step')} "
+                f"before_div_top={detail.get('before_div_top')}"
             )
         print(f"  input   ={detail.get('input')}")
         print(f"  modulus ={detail.get('modulus')}")
