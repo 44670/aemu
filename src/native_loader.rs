@@ -12,7 +12,7 @@ use crate::elf_loader::{ElfLoadError, ElfLoadPlan, load_elf_into_memory, plan_el
 use crate::guest_memory::{MappedMemory, MappedMemoryError};
 use crate::hle_imports::{
     HleCallBehavior, HleImportDescriptor, HleSymbolKind, HleSymbolShape, describe_hle_import,
-    initialize_hle_symbol,
+    initialize_hle_symbol, should_link_hle_symbol,
 };
 use crate::zip_probe::{ZipEntry, ZipProbeError, extract_parsed_zip_entry, parse_zip_entries};
 
@@ -472,12 +472,16 @@ fn collect_hle_symbols(
     let mut by_name = BTreeMap::<String, HleImportDescriptor>::new();
     for object in objects {
         for import in &object.imports {
-            if let Some(descriptor) = describe_hle_import(&import.name) {
+            if should_link_hle_symbol(&import.name)
+                && let Some(descriptor) = describe_hle_import(&import.name)
+            {
                 by_name.entry(import.name.clone()).or_insert(descriptor);
             }
         }
         for symbol in &object.defined_symbols {
-            if let Some(descriptor) = describe_hle_import(&symbol.name) {
+            if should_link_hle_symbol(&symbol.name)
+                && let Some(descriptor) = describe_hle_import(&symbol.name)
+            {
                 if descriptor.kind == HleSymbolKind::Target
                     || is_defined_hle_override_symbol(&symbol.name)
                 {
@@ -893,6 +897,48 @@ mod tests {
             .unwrap()
             .load_bias;
         assert_eq!(report.memory.load32(game_bias + 0x700).unwrap(), hle_addr);
+    }
+
+    #[test]
+    fn minecraft_texture_group_exports_remain_native_by_default() {
+        let texture_pair_name = "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation";
+        let game = test_so(
+            &[],
+            &[],
+            &[(texture_pair_name, 0x1200)],
+            &[TestRelocation {
+                offset: 0x700,
+                symbol: Some(texture_pair_name),
+                kind: 21,
+                addend: 0,
+            }],
+        );
+        let apk = zip_with_files(&[("lib/armeabi/libgame.so", game)]);
+
+        let mut report = load_apk_native_libraries_bytes(
+            PathBuf::from("game.apk"),
+            &apk,
+            &NativeLoadConfig::default(),
+        )
+        .unwrap();
+
+        assert!(
+            report
+                .hle_symbols
+                .iter()
+                .all(|symbol| symbol.name != texture_pair_name)
+        );
+        let native_addr = report
+            .global_symbols
+            .iter()
+            .find(|symbol| symbol.name == texture_pair_name)
+            .unwrap()
+            .address;
+        let game_bias = report.objects[0].load_bias;
+        assert_eq!(
+            report.memory.load32(game_bias + 0x700).unwrap(),
+            native_addr
+        );
     }
 
     #[test]
