@@ -233,11 +233,34 @@ tools/mcpe_smoke.py --native-trace-preset keygen \
 tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 40
 ```
 
+After key generation succeeds, use the `signdata` preset to inspect the bundled
+OpenSSL signing path without HLE-ing MCPE game or engine functions:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset signdata \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 80
+```
+
+If `signdata` shows `d2i_AutoPrivateKey` returning null, add the `d2i-private`
+preset to follow bundled OpenSSL's ASN.1 private-key decoder:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset signdata \
+  --native-trace-preset d2i-private \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 120
+```
+
 `--trace-hle`, `--trace-hle-limit`, and `--trace-hle-file` write the existing
 HLE dispatcher/file diagnostics into `run.log` and summarize their counts in
 `summary.json`, so system-boundary failures can be checked without long ad hoc
 environment-variable command lines. Prefix an HLE filter token with `=` for an
 exact imported-symbol match; for example `=read` avoids matching `pthread_*`.
+Native event byte samples use `--native-event-bytes PC:*reg+offset,len` for a
+32-bit pointer dereference or `PC:reg+offset,len` for a direct guest address.
 
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.

@@ -248,6 +248,7 @@ def format_native_event(row: dict) -> str:
     parts.extend(format_native_mem32(row.get("mem32"), "mem32"))
     parts.extend(format_native_deref32(row.get("deref32")))
     parts.extend(format_native_cxx_strings(row.get("cxx_strings")))
+    parts.extend(format_native_byte_samples(row.get("byte_samples")))
     return " ".join(parts)
 
 
@@ -317,6 +318,24 @@ def format_native_cxx_strings(items) -> list[str]:
             parts.append(f"cxx[{label}]={item.get('bytes')!r}")
         elif "error" in item:
             parts.append(f"cxx[{label}]=<{item.get('error')}>")
+    return parts
+
+
+def format_native_byte_samples(items) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    parts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        if "hex" in item:
+            parts.append(
+                f"bytes[{source}@{fmt_u32(item.get('addr'))}]"
+                f"=len={item.get('len')} sha1={item.get('sha1')} hex={item.get('hex')}"
+            )
+        elif "error" in item:
+            parts.append(f"bytes[{source}]=<{item.get('error')}>")
     return parts
 
 

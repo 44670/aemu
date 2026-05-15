@@ -9,6 +9,7 @@ use crate::hle_imports::{
     CreatedPthread, HLE_TRAP_ARM_INSTR, HleError, HleRuntime, HleUnwindTable,
 };
 use crate::native_loader::NativeLinkReport;
+use sha1::{Digest, Sha1};
 
 pub const DEFAULT_STACK_BASE: u32 = 0x6c00_0000;
 pub const DEFAULT_STACK_SIZE: usize = 0x0200_0000;
@@ -936,6 +937,7 @@ impl NativeRuntime {
         let trace_native_event_mem32 = parse_trace_native_event_mem32_specs();
         let trace_native_event_deref32 = parse_trace_native_event_deref32_specs();
         let trace_native_event_cxx_strings = parse_trace_native_event_cxx_string_specs();
+        let trace_native_event_bytes = parse_trace_native_event_bytes_specs();
         let trace_native_events_path = trace_native_events_path();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
@@ -1049,6 +1051,7 @@ impl NativeRuntime {
                         &trace_native_event_mem32,
                         &trace_native_event_deref32,
                         &trace_native_event_cxx_strings,
+                        &trace_native_event_bytes,
                     );
                 }
             }
@@ -1525,6 +1528,7 @@ impl NativeRuntime {
         let trace_native_event_mem32 = parse_trace_native_event_mem32_specs();
         let trace_native_event_deref32 = parse_trace_native_event_deref32_specs();
         let trace_native_event_cxx_strings = parse_trace_native_event_cxx_string_specs();
+        let trace_native_event_bytes = parse_trace_native_event_bytes_specs();
         let trace_native_events_path = trace_native_events_path();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
@@ -1625,6 +1629,7 @@ impl NativeRuntime {
                         &trace_native_event_mem32,
                         &trace_native_event_deref32,
                         &trace_native_event_cxx_strings,
+                        &trace_native_event_bytes,
                     );
                 }
             }
@@ -2122,6 +2127,7 @@ impl NativeRuntime {
         mem32_specs: &[TraceMem32Spec],
         deref32_specs: &[TraceMem32Spec],
         cxx_string_specs: &[TraceCxxStringSpec],
+        byte_specs: &[TraceBytesSpec],
     ) {
         let regs: serde_json::Map<String, serde_json::Value> = (0..16)
             .map(|idx| (format!("r{idx}"), serde_json::json!(self.cpu.reg(idx))))
@@ -2155,6 +2161,10 @@ impl NativeRuntime {
         let cxx_strings = self.native_event_cxx_string_values(spec.pc, cxx_string_specs);
         if !cxx_strings.is_empty() {
             row["cxx_strings"] = serde_json::Value::Array(cxx_strings);
+        }
+        let byte_samples = self.native_event_byte_values(spec.pc, byte_specs);
+        if !byte_samples.is_empty() {
+            row["byte_samples"] = serde_json::Value::Array(byte_samples);
         }
         if let Err(err) = append_trace_jsonl(path, &row) {
             eprintln!("native event trace append failed {path:?}: {err}");
@@ -2306,6 +2316,50 @@ impl NativeRuntime {
         }
         row
     }
+
+    fn native_event_byte_values(
+        &mut self,
+        pc: u32,
+        specs: &[TraceBytesSpec],
+    ) -> Vec<serde_json::Value> {
+        specs
+            .iter()
+            .filter(|spec| spec.pc == pc)
+            .map(|spec| self.native_event_byte_value(spec))
+            .collect()
+    }
+
+    fn native_event_byte_value(&mut self, spec: &TraceBytesSpec) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "source": spec.source.label(&self.cpu),
+            "max_len": spec.max_len,
+        });
+        let addr = match spec.source.addr(&self.cpu, &mut self.link.memory) {
+            Ok(addr) => addr,
+            Err(err) => {
+                row["error"] = serde_json::json!(err.to_string());
+                return row;
+            }
+        };
+        row["addr"] = serde_json::json!(addr);
+        let mut bytes = Vec::new();
+        for idx in 0..spec.max_len {
+            match self.link.memory.load8(addr.wrapping_add(idx)) {
+                Ok(byte) => bytes.push(byte),
+                Err(err) => {
+                    row["error"] = serde_json::json!(err.to_string());
+                    break;
+                }
+            }
+        }
+        row["len"] = serde_json::json!(bytes.len());
+        row["hex"] = serde_json::json!(hex_lower(&bytes));
+        row["escaped"] = serde_json::json!(format_trace_bytes(&bytes));
+        let mut sha1 = Sha1::new();
+        sha1.update(&bytes);
+        row["sha1"] = serde_json::json!(hex_lower(&sha1.finalize()));
+        row
+    }
 }
 
 fn parse_trace_pc_ranges() -> Vec<(u32, u32)> {
@@ -2350,6 +2404,19 @@ struct TraceCxxStringSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceBytesSpec {
+    pc: u32,
+    source: TraceBytesSource,
+    max_len: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TraceBytesSource {
+    Direct { base: TraceMemBase, offset: u32 },
+    Deref32 { base: TraceMemBase, offset: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceNativeEventSpec {
     pc: u32,
     name: String,
@@ -2376,6 +2443,27 @@ impl TraceMemBase {
             Self::Reg(15) => "pc".to_string(),
             Self::Reg(reg) => format!("r{reg}"),
             Self::Addr(addr) => format!("{addr:#010x}"),
+        }
+    }
+}
+
+impl TraceBytesSource {
+    fn addr<M: Memory>(&self, cpu: &Cpu, memory: &mut M) -> Result<u32, Trap> {
+        match *self {
+            Self::Direct { base, offset } => Ok(base.value(cpu).wrapping_add(offset)),
+            Self::Deref32 { base, offset } => memory.load32(base.value(cpu).wrapping_add(offset)),
+        }
+    }
+
+    fn label(&self, cpu: &Cpu) -> String {
+        match *self {
+            Self::Direct { base, offset } => {
+                format!("{}+{offset:#x}", base.label())
+            }
+            Self::Deref32 { base, offset } => {
+                let ptr_addr = base.value(cpu).wrapping_add(offset);
+                format!("*{}+{offset:#x}@{ptr_addr:#010x}", base.label())
+            }
         }
     }
 }
@@ -2433,6 +2521,13 @@ fn parse_trace_native_event_cxx_string_specs() -> Vec<TraceCxxStringSpec> {
     parse_trace_cxx_string_specs_raw(&raw)
 }
 
+fn parse_trace_native_event_bytes_specs() -> Vec<TraceBytesSpec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_NATIVE_EVENT_BYTES").ok() else {
+        return Vec::new();
+    };
+    parse_trace_bytes_specs_raw(&raw)
+}
+
 fn parse_trace_native_event_specs_raw(raw: &str) -> Vec<TraceNativeEventSpec> {
     raw.split(';')
         .filter_map(|entry| {
@@ -2452,6 +2547,41 @@ fn parse_trace_native_event_specs_raw(raw: &str) -> Vec<TraceNativeEventSpec> {
             Some(TraceNativeEventSpec { pc, name })
         })
         .collect()
+}
+
+fn parse_trace_bytes_specs_raw(raw: &str) -> Vec<TraceBytesSpec> {
+    raw.split(';')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (pc, fields) = entry.split_once(':')?;
+            let pc = parse_u32_env(pc)?;
+            let mut fields = fields
+                .split(',')
+                .map(str::trim)
+                .filter(|field| !field.is_empty());
+            let source = parse_trace_bytes_source(fields.next()?)?;
+            let max_len = fields.next().and_then(parse_u32_env).unwrap_or(64);
+            Some(TraceBytesSpec {
+                pc,
+                source,
+                max_len,
+            })
+        })
+        .collect()
+}
+
+fn parse_trace_bytes_source(raw: &str) -> Option<TraceBytesSource> {
+    let raw = raw.trim();
+    if let Some(deref) = raw.strip_prefix('*') {
+        let (base, offset) = parse_trace_mem32_base(deref)?;
+        Some(TraceBytesSource::Deref32 { base, offset })
+    } else {
+        let (base, offset) = parse_trace_mem32_base(raw)?;
+        Some(TraceBytesSource::Direct { base, offset })
+    }
 }
 
 fn parse_trace_cxx_string_specs_raw(raw: &str) -> Vec<TraceCxxStringSpec> {
@@ -2542,6 +2672,16 @@ fn format_trace_bytes(bytes: &[u8]) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes.iter().copied() {
+        out.push(char::from(HEX[(byte >> 4) as usize]));
+        out.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
     out
 }
 
@@ -2806,6 +2946,27 @@ mod tests {
                 offset: 0x04,
                 max_len: 96,
             }]
+        );
+        assert_eq!(
+            parse_trace_bytes_specs_raw("0x716f2038:*r2+0x4,32;0x716f2040:r3,16"),
+            vec![
+                TraceBytesSpec {
+                    pc: 0x716f_2038,
+                    source: TraceBytesSource::Deref32 {
+                        base: TraceMemBase::Reg(2),
+                        offset: 0x04,
+                    },
+                    max_len: 32,
+                },
+                TraceBytesSpec {
+                    pc: 0x716f_2040,
+                    source: TraceBytesSource::Direct {
+                        base: TraceMemBase::Reg(3),
+                        offset: 0,
+                    },
+                    max_len: 16,
+                },
+            ]
         );
     }
 

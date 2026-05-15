@@ -76,6 +76,144 @@ MCPE_NATIVE_TRACE_PRESETS = {
         ],
         "event_limit": 200,
     },
+    "signdata": {
+        "description": "trace MCPE PrivateKeyManager/OpenSSL signing after key generation succeeds",
+        "events": [
+            (0x006B11A0, "PrivateKeyManager::sign.entry"),
+            (0x006B11BA, "PrivateKeyManager::sign.virtual-call"),
+            (0x011CDD28, "OpenSSLInterface::signData.entry"),
+            (0x011CDD54, "OpenSSLInterface::signData.after-d2i-private"),
+            (0x011CDD62, "OpenSSLInterface::signData.after-ctx-new"),
+            (0x011CDD6E, "OpenSSLInterface::signData.after-sign-init"),
+            (0x011CDD94, "OpenSSLInterface::signData.after-ec-curve-ctrl"),
+            (0x011CDE28, "OpenSSLInterface::signData.after-ctx-ctrl"),
+            (0x011CDE48, "OpenSSLInterface::signData.after-sign-size"),
+            (0x011CDE68, "OpenSSLInterface::signData.after-sign-data"),
+            (0x011CDE82, "OpenSSLInterface::signData.success"),
+            (0x011CDDB2, "OpenSSLInterface::signData.fail-private"),
+            (0x011CDDBE, "OpenSSLInterface::signData.fail-ctx"),
+            (0x011CDDD0, "OpenSSLInterface::signData.fail-sign-init"),
+            (0x011CDDE8, "OpenSSLInterface::signData.fail-ec-curve"),
+            (0x011CDF00, "OpenSSLInterface::signData.fail-ctx-ctrl"),
+            (0x011CDE96, "OpenSSLInterface::signData.fail-sign-size"),
+            (0x011CDEAE, "OpenSSLInterface::signData.fail-sign-data"),
+            (0x006B11BC, "PrivateKeyManager::sign.returned"),
+        ],
+        "mem32": [
+            (0x011CDE48, "sp+0x14"),
+            (0x011CDE68, "sp+0x14"),
+            (0x011CDE82, "r9+0"),
+            (0x006B11BC, "r0+0"),
+        ],
+        "deref32": [
+            (0x006B11A0, "r1+0x8,+0,+0x14"),
+        ],
+        "cxx_string": [
+            (0x006B11A0, "r2+0,768"),
+            (0x011CDD28, "r2+0,192"),
+            (0x011CDD28, "r3+0,768"),
+            (0x006B11BC, "r0+0,256"),
+        ],
+        "bytes": [
+            (0x011CDD28, "*r2+0,167"),
+        ],
+        "event_limit": 250,
+    },
+    "d2i-private": {
+        "description": "trace bundled OpenSSL d2i_AutoPrivateKey and EC private-key decode",
+        "events": [
+            (0x0125555C, "d2i_AutoPrivateKey.entry"),
+            (0x01255584, "d2i_AutoPrivateKey.after-sequence-any"),
+            (0x0125558C, "d2i_AutoPrivateKey.after-type-num-1"),
+            (0x0125559C, "d2i_AutoPrivateKey.after-type-num-2"),
+            (0x012555AC, "d2i_AutoPrivateKey.after-type-num-3"),
+            (0x012555B8, "d2i_AutoPrivateKey.selected-keytype"),
+            (0x012555D8, "d2i_AutoPrivateKey.after-privatekey-decode"),
+            (0x01255604, "d2i_AutoPrivateKey.after-pkcs8-decode"),
+            (0x01255618, "d2i_AutoPrivateKey.after-pkcs8-convert"),
+            (0x01255648, "d2i_AutoPrivateKey.fail-pkcs8-convert"),
+            (0x01255670, "d2i_AutoPrivateKey.success-no-output-arg"),
+            (0x012A2170, "d2i_ECPrivateKey.entry"),
+            (0x012A2184, "d2i_ECPrivateKey.after-asn1-item-d2i"),
+            (0x012A21A0, "d2i_ECPrivateKey.have-output-key"),
+            (0x012A21CC, "d2i_ECPrivateKey.check-parameters-type"),
+            (0x012A2214, "d2i_ECPrivateKey.after-parameters"),
+            (0x012A2220, "d2i_ECPrivateKey.have-group"),
+            (0x012A223C, "d2i_ECPrivateKey.after-private-key-bn"),
+            (0x012A2260, "d2i_ECPrivateKey.after-public-point-new"),
+            (0x012A22A8, "d2i_ECPrivateKey.after-public-point-decode"),
+            (0x012A22B0, "d2i_ECPrivateKey.success"),
+            (0x012A22C4, "d2i_ECPrivateKey.return"),
+            (0x012A231C, "d2i_ECPrivateKey.fail-missing-public-key"),
+            (0x012A2364, "d2i_ECPrivateKey.fail-missing-private-key"),
+            (0x012A2388, "d2i_ECPrivateKey.fail-public-point-decode"),
+            (0x012A23C8, "d2i_ECPrivateKey.fail-missing-group"),
+            (0x012A23EC, "d2i_ECPrivateKey.fail-private-key-bn"),
+            (0x012A2410, "d2i_ECPrivateKey.fail-public-point-new"),
+            (0x012A2434, "d2i_ECPrivateKey.derive-public-from-private"),
+            (0x012A244C, "d2i_ECPrivateKey.after-public-derive"),
+            (0x012A2460, "d2i_ECPrivateKey.fail-public-derive"),
+            (0x012A2484, "d2i_ECPrivateKey.fail-asn1-item-d2i"),
+            (0x0123A4D4, "EC_POINT_oct2point.entry"),
+            (0x0123A594, "EC_POINT_oct2point.call-method"),
+            (0x0123A5A0, "EC_POINT_oct2point.after-method"),
+            (0x012A8520, "ec_GFp_simple_oct2point.entry"),
+            (0x012A8550, "ec_GFp_simple_oct2point.after-form-parse"),
+            (0x012A8624, "ec_GFp_simple_oct2point.after-length-check"),
+            (0x012A86BC, "ec_GFp_simple_oct2point.fail-length"),
+            (0x012A866C, "ec_GFp_simple_oct2point.after-x-bin2bn"),
+            (0x012A8684, "ec_GFp_simple_oct2point.after-x-range"),
+            (0x012A87AC, "ec_GFp_simple_oct2point.after-y-bin2bn"),
+            (0x012A87C4, "ec_GFp_simple_oct2point.after-y-range"),
+            (0x012A8870, "ec_GFp_simple_oct2point.after-set-affine"),
+            (0x012A873C, "ec_GFp_simple_oct2point.after-is-on-curve"),
+            (0x012A8748, "ec_GFp_simple_oct2point.fail-not-on-curve"),
+            (0x012A8768, "ec_GFp_simple_oct2point.fail"),
+            (0x012A876C, "ec_GFp_simple_oct2point.cleanup"),
+        ],
+        "mem32": [
+            (0x0125555C, "r1+0"),
+            (0x01255584, "sp+0xc"),
+            (0x012555B8, "r8"),
+            (0x012555D8, "r0"),
+            (0x01255604, "r0"),
+            (0x01255618, "r5"),
+            (0x012A2170, "r1+0"),
+            (0x012A2184, "r0"),
+            (0x012A21A0, "r4+0,+0x4,+0x8,+0xc,+0x10,+0x14"),
+            (0x012A21CC, "r7+0,+0x4"),
+            (0x012A2214, "r7+0"),
+            (0x012A2220, "r5+0,+0x4,+0x8,+0xc"),
+            (0x012A223C, "r0"),
+            (0x012A2260, "r0"),
+            (0x012A22A8, "r0"),
+            (0x012A22B0, "r4+0,+0x4,+0x8,+0xc,+0x10,+0x14"),
+            (0x012A22C4, "r4"),
+            (0x012A244C, "r0"),
+            (0x0123A4D4, "r0+0"),
+            (0x0123A4D4, "r1+0"),
+            (0x0123A594, "r2+0"),
+            (0x0123A5A0, "r0"),
+            (0x012A8520, "r0+0"),
+            (0x012A8520, "r1+0"),
+            (0x012A8520, "r2+0"),
+            (0x012A8550, "r2"),
+            (0x012A8624, "r2"),
+            (0x012A866C, "r0"),
+            (0x012A8684, "r0"),
+            (0x012A87AC, "r0"),
+            (0x012A87C4, "r0"),
+            (0x012A8870, "r0"),
+            (0x012A873C, "r0"),
+        ],
+        "bytes": [
+            (0x0125555C, "*r1+0,167"),
+            (0x012A2170, "*r1+0,167"),
+            (0x0123A4D4, "r2+0,100"),
+            (0x012A8520, "r2+0,100"),
+        ],
+        "event_limit": 300,
+    },
 }
 
 OBJECT_RE = re.compile(
@@ -210,6 +348,8 @@ def append_native_trace_preset(config, preset_name: str, objects):
         config["deref32"].append(trace_spec_for_offset(objects, offset, fields))
     for offset, fields in preset.get("cxx_string", []):
         config["cxx_string"].append(trace_spec_for_offset(objects, offset, fields))
+    for offset, fields in preset.get("bytes", []):
+        config["bytes"].append(trace_spec_for_offset(objects, offset, fields))
     config["presets"].append(
         {
             "name": preset_name,
@@ -228,6 +368,7 @@ def build_native_trace_config(args, objects):
         "mem32": list(args.native_event_mem32 or []),
         "deref32": list(args.native_event_deref32 or []),
         "cxx_string": list(args.native_event_cxx_string or []),
+        "bytes": list(args.native_event_bytes or []),
         "event_limit": args.native_event_limit,
     }
     for preset_name in args.native_trace_preset or []:
@@ -246,6 +387,8 @@ def apply_native_trace_env(env, trace_dir: pathlib.Path, config):
         env["AEMU_TRACE_NATIVE_EVENT_DEREF32"] = ";".join(config["deref32"])
     if config["cxx_string"]:
         env["AEMU_TRACE_NATIVE_EVENT_CXX_STRING"] = ";".join(config["cxx_string"])
+    if config["bytes"]:
+        env["AEMU_TRACE_NATIVE_EVENT_BYTES"] = ";".join(config["bytes"])
     if config["event_limit"] is not None:
         env["AEMU_TRACE_NATIVE_EVENTS_LIMIT"] = str(config["event_limit"])
 
@@ -544,6 +687,11 @@ def build_arg_parser():
         "--native-event-cxx-string",
         action="append",
         help="append raw AEMU_TRACE_NATIVE_EVENT_CXX_STRING spec",
+    )
+    parser.add_argument(
+        "--native-event-bytes",
+        action="append",
+        help="append raw AEMU_TRACE_NATIVE_EVENT_BYTES spec, e.g. 0x716cdd28:*r2+0,192",
     )
     parser.add_argument("--native-event-limit", type=int)
     parser.add_argument(
