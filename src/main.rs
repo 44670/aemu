@@ -156,11 +156,16 @@ fn run_qemu_tcg_smoke() -> Result<(), String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_qemu_tcg_smoke_exit() -> Result<aemu::qemu_tcg::QemuTcgExit, String> {
+    run_qemu_tcg_words_exit(aemu::qemu_tcg::armv7a_smoke_arm_words())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_qemu_tcg_words_exit(words: &[u32]) -> Result<aemu::qemu_tcg::QemuTcgExit, String> {
     let runner = aemu::qemu_tcg::QemuArmTcgRunner::probe().map_err(|err| err.to_string())?;
     runner
         .run_linux_exit_asm(
             aemu::qemu_tcg::QemuTcgArch::Armv7a,
-            &aemu::qemu_tcg::armv7a_smoke_program(),
+            &aemu::qemu_tcg::armv7a_linux_exit_program(words),
         )
         .map_err(|err| err.to_string())
 }
@@ -172,15 +177,29 @@ fn run_qemu_tcg_smoke() -> Result<(), String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_cpu_compare_smoke() -> Result<(), String> {
-    let qemu_exit = run_qemu_tcg_smoke_exit()?
-        .code
-        .ok_or_else(|| "qemu-arm exited without a numeric code".to_string())?;
-    let aemu_exit = run_aemu_interpreter_smoke_exit()?;
-    println!("cpu compare smoke: qemu={qemu_exit} aemu={aemu_exit}");
-    if qemu_exit != aemu_exit {
-        return Err(format!(
-            "backend mismatch for ARMv7-A smoke program: qemu={qemu_exit} aemu={aemu_exit}"
-        ));
+    let cases = [
+        (
+            "movw-exit",
+            aemu::qemu_tcg::armv7a_smoke_arm_words(),
+            42,
+        ),
+        (
+            "mls-exit",
+            aemu::qemu_tcg::armv7a_mls_smoke_arm_words(),
+            8,
+        ),
+    ];
+    for (name, words, expected) in cases {
+        let qemu_exit = run_qemu_tcg_words_exit(words)?
+            .code
+            .ok_or_else(|| "qemu-arm exited without a numeric code".to_string())?;
+        let aemu_exit = run_aemu_interpreter_words_exit(words)?;
+        println!("cpu compare smoke: {name} qemu={qemu_exit} aemu={aemu_exit}");
+        if qemu_exit != expected || aemu_exit != expected || qemu_exit != aemu_exit {
+            return Err(format!(
+                "backend mismatch for {name}: expected={expected} qemu={qemu_exit} aemu={aemu_exit}"
+            ));
+        }
     }
     Ok(())
 }
@@ -190,12 +209,10 @@ fn run_cpu_compare_smoke() -> Result<(), String> {
     Err("cpu-compare-smoke is only available on native hosts".to_string())
 }
 
-fn run_aemu_interpreter_smoke_exit() -> Result<i32, String> {
+fn run_aemu_interpreter_words_exit(words: &[u32]) -> Result<i32, String> {
     let mut cpu = Cpu::new();
     let mut memory = VecMemory::new(0x1000, 0x1000);
-    memory
-        .load_arm_words(0x1000, aemu::qemu_tcg::armv7a_smoke_arm_words())
-        .map_err(|err| err.to_string())?;
+    memory.load_arm_words(0x1000, words).map_err(|err| err.to_string())?;
     cpu.set_isa(Isa::Arm);
     cpu.branch_exchange(0x1000);
     for _ in 0..8 {

@@ -20,7 +20,7 @@ Add dual CPU backends for native Android execution:
 | QEMU ARMv7-A TCG executable runner | `src/qemu_tcg.rs` can compile an ARMv7-A Linux smoke program with clang and execute it under `qemu-arm`; `aemu qemu-tcg-smoke` verifies exit code 42. | Present as native-only diagnostic runner |
 | QEMU ARMv7-A TCG native-runtime backend | No runtime backend executes linked Android guest code through QEMU TCG yet. Existing QEMU execution is a native-only smoke runner plus instruction-level subprocess oracles in `tests/qemu_oracle.rs`. | Missing |
 | Bring MCPE up with QEMU backend | No `run-apk-native --cpu-backend qemu-armv7a-tcg` success path exists. | Missing |
-| Compare QEMU and AEMU behavior | `aemu cpu-compare-smoke` runs the same ARM instruction words under QEMU TCG and the AEMU interpreter and compares the exit value. Existing QEMU oracle tests also compare selected instructions. | Present for smoke snippets; missing for native-runtime traces |
+| Compare QEMU and AEMU behavior | `aemu cpu-compare-smoke` runs the same ARM instruction words under QEMU TCG and the AEMU interpreter and compares exit values for `MOVW` and `MLS` smoke cases. Existing QEMU oracle tests also compare selected instructions. | Present for smoke snippets; missing for native-runtime traces |
 
 ## Verification Commands
 

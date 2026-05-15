@@ -131,7 +131,22 @@ pub fn armv7a_smoke_arm_words() -> &'static [u32] {
     ]
 }
 
+pub fn armv7a_mls_smoke_arm_words() -> &'static [u32] {
+    &[
+        0xe3a0_1006, // mov r1, #6
+        0xe3a0_2007, // mov r2, #7
+        0xe3a0_3032, // mov r3, #50
+        0xe060_3291, // mls r0, r1, r2, r3
+        0xe3a0_7001, // mov r7, #1
+        0xef00_0000, // svc #0
+    ]
+}
+
 pub fn armv7a_smoke_program() -> String {
+    armv7a_linux_exit_program(armv7a_smoke_arm_words())
+}
+
+pub fn armv7a_linux_exit_program(words: &[u32]) -> String {
     let mut asm = ".syntax unified\n\
                    .arch armv7-a\n\
                    .fpu neon\n\
@@ -139,7 +154,7 @@ pub fn armv7a_smoke_program() -> String {
                    .global _start\n\
                    _start:\n"
         .to_string();
-    for word in armv7a_smoke_arm_words() {
+    for word in words {
         asm.push_str(&format!("  .word 0x{word:08x}\n"));
     }
     asm
