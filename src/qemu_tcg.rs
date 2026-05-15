@@ -125,7 +125,7 @@ impl QemuArmTcgRunner {
 
 pub fn armv7a_smoke_arm_words() -> &'static [u32] {
     &[
-        0xe3a0_002a, // mov r0, #42
+        0xe300_002a, // movw r0, #42
         0xe3a0_7001, // mov r7, #1
         0xef00_0000, // svc #0
     ]
