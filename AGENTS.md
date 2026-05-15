@@ -190,6 +190,24 @@ cargo run --features sdl2 -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCra
 DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 cargo run --release --features sdl2 -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live
 ```
 
+Prefer the one-command MCPE smoke harness when checking default SDL2 progress:
+
+```sh
+cargo build --release --features sdl2
+tools/mcpe_smoke.py
+```
+
+It creates a unique `target/mcpe-smoke-*` trace directory, writes `link.log`,
+`run.log`, `summary.json`, GLES event JSONL, and SDL draw PNG artifacts when a
+frame is reached. It also parses crash PC/fault address and symbolicates the PC
+against the linked native object. For known blocker tracking, pass explicit
+expectations such as:
+
+```sh
+tools/mcpe_smoke.py --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+```
+
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.
 `run-apk-native --sdl2` implies `--until-swap` for now and replays the recorded
