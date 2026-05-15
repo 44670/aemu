@@ -1056,6 +1056,22 @@ impl HleRuntime {
         self.resource_texture_aliases = None;
     }
 
+    pub(crate) fn load_apk_image_argb_pixels(
+        &self,
+        path: &str,
+    ) -> Result<(u32, u32, Vec<u32>), String> {
+        let texture = self.load_image_texture_for_path(path, ImageFormat::Any)?;
+        let mut pixels = Vec::with_capacity(texture.rgba.len() / 4);
+        for rgba in texture.rgba.chunks_exact(4) {
+            let r = u32::from(rgba[0]);
+            let g = u32::from(rgba[1]);
+            let b = u32::from(rgba[2]);
+            let a = u32::from(rgba[3]);
+            pixels.push((a << 24) | (r << 16) | (g << 8) | b);
+        }
+        Ok((texture.width, texture.height, pixels))
+    }
+
     pub fn set_unwind_tables(&mut self, unwind_tables: Vec<HleUnwindTable>) {
         self.unwind_tables = unwind_tables;
     }
@@ -8748,7 +8764,8 @@ fn rfind_subslice(haystack: &[u8], needle: &[u8], pos: u32) -> u32 {
         return CXX_STRING_NPOS;
     }
     let start = (pos as usize).min(haystack.len() - needle.len());
-    haystack[..=start]
+    let search_len = start + needle.len();
+    haystack[..search_len]
         .windows(needle.len())
         .rposition(|window| window == needle)
         .map(|idx| idx as u32)
@@ -11724,6 +11741,22 @@ mod tests {
         cpu.set_reg(2, 0);
         cpu.set_reg(3, 5);
         hle.dispatch("_ZNKSs4findEPKcjj", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 5);
+
+        memory.load_bytes(0x1130, b"stone.png\0").unwrap();
+        memory.load_bytes(0x1140, b".png\0").unwrap();
+        let fourth = 0x120c;
+        cpu.set_reg(0, fourth);
+        cpu.set_reg(1, 0x1130);
+        cpu.set_reg(2, 0);
+        hle.dispatch("_ZNSsC1EPKcRKSaIcE", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(0, fourth);
+        cpu.set_reg(1, 0x1140);
+        cpu.set_reg(2, 5);
+        cpu.set_reg(3, 4);
+        hle.dispatch("_ZNKSs5rfindEPKcjj", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 5);
 

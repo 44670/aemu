@@ -2173,7 +2173,7 @@ def run_self_test() -> None:
                             "thread": 1,
                             "pc": 0x70C3CA88,
                             "event": "Font::init.after-getTexturePair",
-                            "r0": 0,
+                            "r0": 0x60E68010,
                         },
                         separators=(",", ":"),
                     ),
@@ -2185,7 +2185,7 @@ def run_self_test() -> None:
             trace_dir=str(root),
             native_events=None,
             expect_default8="nonnull",
-            expect_ascii_sga="null",
+            expect_ascii_sga="nonnull",
             limit=4,
         )
         assert print_mcpe_font_pair_check(font_args) == 0
@@ -2791,7 +2791,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="check native Font::init TextureGroup atlas lookups",
     )
     font_pair.add_argument("--expect-default8", choices=("null", "nonnull", "any"), default="nonnull")
-    font_pair.add_argument("--expect-ascii-sga", choices=("null", "nonnull", "any"), default="null")
+    font_pair.add_argument("--expect-ascii-sga", choices=("null", "nonnull", "any"), default="nonnull")
     font_pair.add_argument("--limit", type=int, default=20)
 
     hle_uldivmod = subparsers.add_parser(

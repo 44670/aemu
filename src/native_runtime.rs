@@ -206,6 +206,9 @@ enum JniFunction {
     GetStringUtfLength,
     GetStringUtfChars,
     ReleaseStringUtfChars,
+    GetArrayLength,
+    GetIntArrayElements,
+    ReleaseIntArrayElements,
     GetJavaVm,
 }
 
@@ -778,6 +781,14 @@ impl NativeRuntime {
             "JNI ReleaseStringUTFChars",
             JniFunction::ReleaseStringUtfChars,
         )?;
+        let get_array_length =
+            self.write_runtime_trap("JNI GetArrayLength", JniFunction::GetArrayLength)?;
+        let get_int_array_elements =
+            self.write_runtime_trap("JNI GetIntArrayElements", JniFunction::GetIntArrayElements)?;
+        let release_int_array_elements = self.write_runtime_trap(
+            "JNI ReleaseIntArrayElements",
+            JniFunction::ReleaseIntArrayElements,
+        )?;
         let get_java_vm = self.write_runtime_trap("JNI GetJavaVM", JniFunction::GetJavaVm)?;
 
         let env_vtable = self.alloc_guest_zeroed(0x400, 4)?;
@@ -837,6 +848,9 @@ impl NativeRuntime {
         self.store_runtime32(env_vtable.wrapping_add(0x2a0), get_string_utf_length)?; // GetStringUTFLength
         self.store_runtime32(env_vtable.wrapping_add(0x2a4), get_string_utf_chars)?; // GetStringUTFChars
         self.store_runtime32(env_vtable.wrapping_add(0x2a8), release_string_utf_chars)?; // ReleaseStringUTFChars
+        self.store_runtime32(env_vtable.wrapping_add(0x2ac), get_array_length)?; // GetArrayLength
+        self.store_runtime32(env_vtable.wrapping_add(0x2ec), get_int_array_elements)?; // GetIntArrayElements
+        self.store_runtime32(env_vtable.wrapping_add(0x30c), release_int_array_elements)?; // ReleaseIntArrayElements
         self.store_runtime32(env_vtable.wrapping_add(0x36c), get_java_vm)?; // GetJavaVM
 
         self.store_runtime32(vm_vtable.wrapping_add(0x10), store_env)?; // AttachCurrentThread
@@ -1930,6 +1944,9 @@ impl NativeRuntime {
                 }
                 self.cpu.reg(1)
             }
+            JniFunction::GetArrayLength => self.jni_array_len()?,
+            JniFunction::GetIntArrayElements => self.jni_int_array_elements()?,
+            JniFunction::ReleaseIntArrayElements => 0,
             JniFunction::GetJavaVm => {
                 let out = self.cpu.reg(1);
                 if out != 0 {
@@ -1967,7 +1984,12 @@ impl NativeRuntime {
         let Some(method) = self.jni_method(self.cpu.reg(2)) else {
             return Ok(0);
         };
-        let value = match method.name.as_str() {
+        let method_name = method.name.clone();
+        let method_sig = method.sig.clone();
+        if matches!(method_name.as_str(), "_getImageData" | "getImageData") {
+            return self.call_jni_get_image_data();
+        }
+        let value = match method_name.as_str() {
             "getLocale" => "en_US",
             "getDeviceModel" | "getDeviceModelName" => "AEMU",
             "getAndroidVersion" => "19",
@@ -1977,10 +1999,83 @@ impl NativeRuntime {
             "getCacheDir" => "/data/data/com.mojang.minecraftpe/cache",
             "getUserInputString" => "",
             "getDeviceId" | "createUUID" => "00000000-0000-0000-0000-000000000000",
-            _ if method.sig.ends_with("Ljava/lang/String;") => "",
+            _ if method_sig.ends_with("Ljava/lang/String;") => "",
             _ => return Ok(0),
         };
         self.write_guest_c_string(value)
+    }
+
+    fn call_jni_get_image_data(&mut self) -> Result<u32, NativeRuntimeError> {
+        let Some((width, height, pixels)) = self.load_jni_image_data_arg()? else {
+            return Ok(0);
+        };
+        let pixel_len =
+            u32::try_from(pixels.len()).map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let array_len = pixel_len
+            .checked_add(2)
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        let data_bytes = array_len
+            .checked_mul(4)
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        let data = self.alloc_guest_zeroed(data_bytes, 4)?;
+        self.store_runtime32(data, width)?;
+        self.store_runtime32(data.wrapping_add(4), height)?;
+        for (idx, pixel) in pixels.into_iter().enumerate() {
+            let offset = 8u32
+                .checked_add(
+                    u32::try_from(idx)
+                        .map_err(|_| NativeRuntimeError::AddressOverflow)?
+                        .checked_mul(4)
+                        .ok_or(NativeRuntimeError::AddressOverflow)?,
+                )
+                .ok_or(NativeRuntimeError::AddressOverflow)?;
+            self.store_runtime32(data.wrapping_add(offset), pixel)?;
+        }
+
+        let handle = self.alloc_guest_zeroed(8, 4)?;
+        self.store_runtime32(handle, array_len)?;
+        self.store_runtime32(handle.wrapping_add(4), data)?;
+        Ok(handle)
+    }
+
+    fn load_jni_image_data_arg(
+        &mut self,
+    ) -> Result<Option<(u32, u32, Vec<u32>)>, NativeRuntimeError> {
+        let arg = self.cpu.reg(3);
+        for path_ptr in [Some(arg), self.load_runtime32(arg).ok()]
+            .into_iter()
+            .flatten()
+        {
+            let Ok(path) = self.load_guest_c_string(path_ptr, 4096) else {
+                continue;
+            };
+            if let Ok(image) = self.hle.load_apk_image_argb_pixels(&path) {
+                return Ok(Some(image));
+            }
+        }
+        Ok(None)
+    }
+
+    fn jni_array_len(&mut self) -> Result<u32, NativeRuntimeError> {
+        let array = self.cpu.reg(1);
+        if array == 0 {
+            return Ok(0);
+        }
+        self.load_runtime32(array)
+    }
+
+    fn jni_int_array_elements(&mut self) -> Result<u32, NativeRuntimeError> {
+        if self.cpu.reg(2) != 0 {
+            self.link
+                .memory
+                .store8(self.cpu.reg(2), 0)
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        }
+        let array = self.cpu.reg(1);
+        if array == 0 {
+            return Ok(0);
+        }
+        self.load_runtime32(array.wrapping_add(4))
     }
 
     fn call_jni_int_method(&self) -> u32 {
@@ -4011,6 +4106,66 @@ mod tests {
     }
 
     #[test]
+    fn jni_get_image_data_returns_android_argb_int_array_from_apk() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x10000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.hle.set_apk_bytes(stored_zip_with_one_file(
+            "assets/images/font/default8.png",
+            one_by_one_rgba_png(),
+        ));
+        runtime.jni_methods.push(JniMethod {
+            id: 0x1234,
+            name: "_getImageData".to_string(),
+            sig: "(Ljava/lang/String;)[I".to_string(),
+            is_static: false,
+        });
+        let path = runtime
+            .write_guest_c_string("images/font/default8.png")
+            .unwrap();
+        runtime.cpu.set_reg(2, 0x1234);
+        runtime.cpu.set_reg(3, path);
+
+        let array = runtime.call_jni_object_method().unwrap();
+        assert_ne!(array, 0);
+        runtime.cpu.set_reg(1, array);
+        assert_eq!(runtime.jni_array_len().unwrap(), 3);
+        runtime.cpu.set_reg(1, array);
+        runtime.cpu.set_reg(2, 0);
+        let data = runtime.jni_int_array_elements().unwrap();
+
+        assert_eq!(runtime.link.memory.load32(data).unwrap(), 1);
+        assert_eq!(runtime.link.memory.load32(data + 4).unwrap(), 1);
+        assert_eq!(runtime.link.memory.load32(data + 8).unwrap(), 0x4411_2233);
+
+        let vararg_path = runtime
+            .write_guest_c_string("images/font/default8.png")
+            .unwrap();
+        let vararg = runtime.alloc_guest_zeroed(4, 4).unwrap();
+        runtime.store_runtime32(vararg, vararg_path).unwrap();
+        runtime.cpu.set_reg(2, 0x1234);
+        runtime.cpu.set_reg(3, vararg);
+        assert_ne!(runtime.call_jni_object_method().unwrap(), 0);
+    }
+
+    #[test]
     fn finds_duplicate_symbol_in_requested_library() {
         let object = |library_name: &str, address: u32| LoadedNativeObject {
             entry_name: format!("lib/armeabi/{library_name}"),
@@ -4073,5 +4228,72 @@ mod tests {
             runtime.symbol_address_in_library("libminecraftpe.so", "JNI_OnLoad"),
             Some(0x7128_d499)
         );
+    }
+
+    fn one_by_one_rgba_png() -> &'static [u8] {
+        &[
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x78,
+            0x9c, 0x63, 0x10, 0x54, 0x32, 0x76, 0x01, 0x00, 0x01, 0x59, 0x00, 0xab, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    fn stored_zip_with_one_file(name: &str, contents: &[u8]) -> Vec<u8> {
+        let name_bytes = name.as_bytes();
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, 0x0403_4b50);
+        push_u16(&mut bytes, 20);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u16(&mut bytes, name_bytes.len() as u16);
+        push_u16(&mut bytes, 0);
+        bytes.extend_from_slice(name_bytes);
+        bytes.extend_from_slice(contents);
+
+        let central_offset = bytes.len() as u32;
+        push_u32(&mut bytes, 0x0201_4b50);
+        push_u16(&mut bytes, 20);
+        push_u16(&mut bytes, 20);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u32(&mut bytes, contents.len() as u32);
+        push_u16(&mut bytes, name_bytes.len() as u16);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        bytes.extend_from_slice(name_bytes);
+
+        let central_size = bytes.len() as u32 - central_offset;
+        push_u32(&mut bytes, 0x0605_4b50);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 0);
+        push_u16(&mut bytes, 1);
+        push_u16(&mut bytes, 1);
+        push_u32(&mut bytes, central_size);
+        push_u32(&mut bytes, central_offset);
+        push_u16(&mut bytes, 0);
+        bytes
+    }
+
+    fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
 }
