@@ -463,6 +463,90 @@ def validate_draw_manifest(
                 )
 
 
+def parse_size(raw: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(?P<width>\d+)x(?P<height>\d+)", raw.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(f"expected WxH size, got {raw!r}")
+    width = int(match.group("width"))
+    height = int(match.group("height"))
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(f"size must be positive, got {raw!r}")
+    return width, height
+
+
+def parse_program_size(raw: str) -> tuple[int, int, int]:
+    program_raw, sep, size_raw = raw.strip().partition(":")
+    if not sep:
+        raise argparse.ArgumentTypeError(f"expected PROGRAM:WxH, got {raw!r}")
+    try:
+        program = int(program_raw, 0)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"invalid program id {program_raw!r}") from err
+    width, height = parse_size(size_raw)
+    return program, width, height
+
+
+def draw_texture_size(row: dict) -> tuple[int, int] | None:
+    width = row.get("texture_width")
+    height = row.get("texture_height")
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return width, height
+    return None
+
+
+def validate_draw_program_gates(
+    manifest: list[dict],
+    manifest_path: pathlib.Path,
+    expect_programs: list[int],
+    require_sizes: list[tuple[int, int, int]],
+    reject_sizes: list[tuple[int, int, int]],
+) -> None:
+    for program in expect_programs:
+        if not any(row.get("program") == program for row in manifest):
+            raise TraceError(f"{manifest_path}: no draw manifest rows for program{program}")
+
+    for program, width, height in require_sizes:
+        rows = [row for row in manifest if row.get("program") == program]
+        if not rows:
+            raise TraceError(f"{manifest_path}: no draw manifest rows for program{program}")
+        bad_rows = []
+        for row in rows:
+            size = draw_texture_size(row)
+            if size is None:
+                raise TraceError(
+                    f"{manifest_path}: row {row.get('index')!r} for program{program} "
+                    "has no texture_width/texture_height; rerun the draw trace with current aemu"
+                )
+            if size != (width, height):
+                bad_rows.append((row, size))
+        if bad_rows:
+            sample = ", ".join(
+                f"row {row.get('index')} tex{row.get('texture')} "
+                f"{size[0]}x{size[1]}"
+                for row, size in bad_rows[:5]
+            )
+            raise TraceError(
+                f"{manifest_path}: program{program} expected texture size "
+                f"{width}x{height}, mismatches: {sample}"
+            )
+
+    for program, width, height in reject_sizes:
+        bad_rows = [
+            row
+            for row in manifest
+            if row.get("program") == program and draw_texture_size(row) == (width, height)
+        ]
+        if bad_rows:
+            sample = ", ".join(
+                f"row {row.get('index')} draw={row.get('draw')} tex{row.get('texture')}"
+                for row in bad_rows[:5]
+            )
+            raise TraceError(
+                f"{manifest_path}: program{program} used rejected texture size "
+                f"{width}x{height}: {sample}"
+            )
+
+
 def load_uploads(side: str, directory: pathlib.Path, min_nonzero_rgb: int) -> list[UploadArtifact]:
     if not directory.exists():
         return []
@@ -601,6 +685,21 @@ def run_check(args) -> dict:
         if not draw_manifest:
             raise TraceError(f"{draw_manifest_path}: missing draw manifest")
         validate_draw_manifest(draws, draw_manifest, draw_manifest_path)
+    draw_gate_enabled = (
+        args.expect_draw_program
+        or args.require_draw_texture_size
+        or args.reject_draw_texture_size
+    )
+    if draw_gate_enabled:
+        if not draw_manifest:
+            raise TraceError(f"{draw_manifest_path}: missing draw manifest")
+        validate_draw_program_gates(
+            draw_manifest,
+            draw_manifest_path,
+            args.expect_draw_program,
+            args.require_draw_texture_size,
+            args.reject_draw_texture_size,
+        )
     return {
         "ok": True,
         "trace_dir": str(root),
@@ -706,6 +805,15 @@ def run_self_test() -> None:
                     "viewport": [0, 0, 2, 1],
                     "changed_pixels": 2,
                     "changed_bytes": 8,
+                    "texture_width": 64,
+                    "texture_height": 32,
+                    "texture_format": GL_RGBA,
+                    "texture_type": GL_UNSIGNED_BYTE,
+                    "texture_last_upload_width": 64,
+                    "texture_last_upload_height": 32,
+                    "texture_last_payload_len": len(raw),
+                    "texture_last_nonzero_rgb_pixels": 2,
+                    "texture_last_nonzero_alpha_pixels": 2,
                     "width": 2,
                     "height": 1,
                     "png": f"{draw_stem}.png",
@@ -729,6 +837,9 @@ def run_self_test() -> None:
             screenshot=None,
             min_screenshot_nonzero_rgb=1,
             detail_limit=3,
+            expect_draw_program=[86],
+            require_draw_texture_size=[],
+            reject_draw_texture_size=[],
         )
         summary = run_check(args)
         assert summary["paired_uploads"] == 1
@@ -749,6 +860,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expect-hle", type=int, default=1)
     parser.add_argument("--expect-sdl", type=int, default=1)
     parser.add_argument("--expect-draws", type=int, default=0)
+    parser.add_argument(
+        "--expect-draw-program",
+        type=lambda raw: int(raw, 0),
+        action="append",
+        default=[],
+        help="require at least one draw manifest row with this GL program id",
+    )
+    parser.add_argument(
+        "--require-draw-texture-size",
+        type=parse_program_size,
+        action="append",
+        default=[],
+        metavar="PROGRAM:WxH",
+        help="require every captured draw for PROGRAM to use a texture with this size",
+    )
+    parser.add_argument(
+        "--reject-draw-texture-size",
+        type=parse_program_size,
+        action="append",
+        default=[],
+        metavar="PROGRAM:WxH",
+        help="fail if any captured draw for PROGRAM uses a texture with this size",
+    )
     parser.add_argument("--min-nonzero-rgb", type=int, default=1)
     parser.add_argument("--min-draw-nonzero-rgb", type=int, default=1)
     parser.add_argument("--min-screenshot-nonzero-rgb", type=int, default=1)

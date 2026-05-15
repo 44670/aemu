@@ -272,18 +272,52 @@ AEMU_DUMP_SDL_DRAW_CHANGES_MATCH=program86,tex325 \
 AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT=20 \
 DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
 tools/trace_check.py "$trace_dir" --expect-hle 0 --expect-sdl 0 --expect-draws 1 --no-require-pairs
+tools/trace_query.py "$trace_dir" mcpe-text
 ```
 
 `AEMU_DUMP_SDL_DRAW_CHANGES_DIR` writes changed default-framebuffer draws
-directly as `.png` files plus `draw_manifest.jsonl`. Use
+directly as `.png` files plus `draw_manifest.jsonl`. The manifest records the
+draw's program/texture, default framebuffer delta, and the bound texture's
+tracked dimensions, format/type, last upload size, payload length, and nonzero
+pixel counts. Use
 `AEMU_DUMP_SDL_DRAW_CHANGES_MATCH` tokens such as `all`, `DrawElements`,
 `event1671`, `draw42`, `program86`, `prog86`, or `tex325`.
+Use `tools/trace_query.py "$trace_dir" summary`, `texture 325`,
+`program 86`, or `mcpe-text` to inspect texture provenance without manually
+opening PNGs. For MCPE text regression checks, gate captured draws with either:
+
+```sh
+tools/trace_check.py "$trace_dir" --expect-hle 0 --expect-sdl 0 --expect-draws 1 \
+  --no-require-pairs --expect-draw-program 86 \
+  --require-draw-texture-size 86:256x256 --reject-draw-texture-size 86:64x32
+tools/trace_query.py "$trace_dir" mcpe-text
+```
+
 For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
 `Font::init()` run, and set `AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND=1` to keep
 `font/default8.png`/`font/ascii_sga.png` at their original APK dimensions.
 Set `AEMU_MCPE_NATIVE_TEXTURE_DATA=1` to bypass the HLE
 `TextureGroup::getTexture(TextureData const&)` facade and compare native
 TextureData texture pointer behavior.
+
+Do not treat HLE or patching of MCPE engine methods such as `TextureGroup`,
+`Font`, or render-object methods as the long-term fix. Those hooks are only
+allowed as temporary diagnostics or compatibility scaffolding while tracing the
+real boundary problem. The durable target is correct CPU/object ABI behavior and
+correct Android/OpenGL ES HLE at the system/import boundary.
+
+Targeted guest object tracing:
+
+```sh
+AEMU_TRACE_MEM32_DEREF='0x716eb818:r0+0x4,+0x24' \
+AEMU_TRACE_MEM32_DEREF_LIMIT=80 \
+DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
+```
+
+`AEMU_TRACE_MEM32_DEREF` uses the same `pc:base+offset,+offset` parser as
+`AEMU_TRACE_MEM32`, but each offset dereferences the previous loaded word. Use
+it for pointer chains such as `TexturePtr -> TextureOGL -> gl_name` when
+checking whether native object state diverges before `glBindTexture`.
 
 ## Guest Addressing
 

@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import pathlib
+import re
+import sys
+import tempfile
+
+
+class TraceQueryError(RuntimeError):
+    pass
+
+
+def parse_u32(raw: str) -> int:
+    try:
+        value = int(raw, 0)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"invalid integer {raw!r}") from err
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"integer must be non-negative, got {raw!r}")
+    return value
+
+
+def parse_size(raw: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(?P<width>\d+)x(?P<height>\d+)", raw.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(f"expected WxH, got {raw!r}")
+    width = int(match.group("width"))
+    height = int(match.group("height"))
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(f"size must be positive, got {raw!r}")
+    return width, height
+
+
+def read_jsonl(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = []
+    for line_no, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as err:
+            raise TraceQueryError(f"{path}:{line_no}: invalid JSON: {err}") from err
+        if not isinstance(row, dict):
+            raise TraceQueryError(f"{path}:{line_no}: expected JSON object")
+        rows.append(row)
+    return rows
+
+
+def trace_paths(args) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    root = pathlib.Path(args.trace_dir)
+    hle_dir = pathlib.Path(args.hle_dir) if args.hle_dir else root / "hle"
+    draw_dir = pathlib.Path(args.draw_dir) if args.draw_dir else root / "sdl-draw"
+    return root, hle_dir, draw_dir
+
+
+def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path]:
+    _root, hle_dir, draw_dir = trace_paths(args)
+    uploads = read_jsonl(hle_dir / "manifest.jsonl")
+    draws = read_jsonl(draw_dir / "draw_manifest.jsonl")
+    return uploads, draws, hle_dir / "manifest.jsonl", draw_dir / "draw_manifest.jsonl"
+
+
+def row_int(row: dict, key: str) -> int | None:
+    value = row.get(key)
+    return value if isinstance(value, int) else None
+
+
+def draw_texture_info(row: dict, uploads: list[dict]) -> dict:
+    texture = row_int(row, "texture")
+    width = row_int(row, "texture_width")
+    height = row_int(row, "texture_height")
+    if texture is None:
+        return {"texture": None, "source": "draw_manifest", "size": None}
+    if width is not None and height is not None and width > 0 and height > 0:
+        return {
+            "texture": texture,
+            "source": "draw_manifest",
+            "size": (width, height),
+            "format": row_int(row, "texture_format"),
+            "type": row_int(row, "texture_type"),
+            "payload_len": row_int(row, "texture_last_payload_len"),
+            "upload_event_index": None,
+        }
+
+    draw_event = row_int(row, "event_index")
+    candidates = [
+        upload
+        for upload in uploads
+        if row_int(upload, "texture") == texture
+        and row_int(upload, "width") is not None
+        and row_int(upload, "height") is not None
+        and (
+            draw_event is None
+            or row_int(upload, "event_index") is None
+            or row_int(upload, "event_index") <= draw_event
+        )
+    ]
+    candidates.sort(key=lambda item: row_int(item, "event_index") or -1)
+    if not candidates:
+        return {"texture": texture, "source": "missing", "size": None}
+    upload = candidates[-1]
+    return {
+        "texture": texture,
+        "source": "hle_manifest",
+        "size": (row_int(upload, "width"), row_int(upload, "height")),
+        "format": row_int(upload, "format"),
+        "type": row_int(upload, "type"),
+        "payload_len": row_int(upload, "payload_len"),
+        "upload_event_index": row_int(upload, "event_index"),
+    }
+
+
+def format_size(size: tuple[int, int] | None) -> str:
+    if size is None:
+        return "unknown"
+    return f"{size[0]}x{size[1]}"
+
+
+def format_draw(row: dict, uploads: list[dict]) -> str:
+    info = draw_texture_info(row, uploads)
+    parts = [
+        f"row={row.get('index')}",
+        f"event={row.get('event_index')}",
+        f"draw={row.get('draw')}",
+        f"kind={row.get('kind')}",
+        f"program={row.get('program')}",
+        f"tex{row.get('texture')}",
+        f"tex_size={format_size(info['size'])}",
+        f"source={info['source']}",
+    ]
+    if info.get("upload_event_index") is not None:
+        parts.append(f"upload_event={info['upload_event_index']}")
+    return " ".join(parts)
+
+
+def texture_rows(texture: int, uploads: list[dict], draws: list[dict]) -> dict:
+    return {
+        "uploads": [row for row in uploads if row_int(row, "texture") == texture],
+        "draws": [row for row in draws if row_int(row, "texture") == texture],
+    }
+
+
+def print_summary(args) -> int:
+    uploads, draws, hle_manifest, draw_manifest = load_trace(args)
+    programs = sorted({row.get("program") for row in draws if isinstance(row.get("program"), int)})
+    textures = sorted({row.get("texture") for row in draws if isinstance(row.get("texture"), int)})
+    print(f"hle_manifest={hle_manifest} rows={len(uploads)}")
+    print(f"draw_manifest={draw_manifest} rows={len(draws)}")
+    print(f"draw_programs={','.join(map(str, programs[:24])) or 'none'}")
+    if len(programs) > 24:
+        print(f"draw_programs_more={len(programs) - 24}")
+    print(f"draw_textures={','.join('tex' + str(texture) for texture in textures[:24]) or 'none'}")
+    if len(textures) > 24:
+        print(f"draw_textures_more={len(textures) - 24}")
+    return 0
+
+
+def print_texture(args) -> int:
+    uploads, draws, _hle_manifest, _draw_manifest = load_trace(args)
+    rows = texture_rows(args.texture, uploads, draws)
+    print(f"texture tex{args.texture}: uploads={len(rows['uploads'])} draws={len(rows['draws'])}")
+    for row in rows["uploads"][: args.limit]:
+        print(
+            "upload "
+            f"row={row.get('index')} event={row.get('event_index')} "
+            f"{row.get('kind')} {row.get('width')}x{row.get('height')} "
+            f"fmt=0x{row.get('format', 0):04x} type=0x{row.get('type', 0):04x} "
+            f"payload={row.get('payload_len')}"
+        )
+    for row in rows["draws"][: args.limit]:
+        print("draw " + format_draw(row, uploads))
+    return 0
+
+
+def validate_program_texture_sizes(
+    draws: list[dict],
+    uploads: list[dict],
+    program: int,
+    require_size: tuple[int, int] | None,
+    reject_size: tuple[int, int] | None,
+) -> list[str]:
+    failures = []
+    program_draws = [row for row in draws if row_int(row, "program") == program]
+    if not program_draws:
+        return [f"no captured draw rows for program{program}"]
+    for row in program_draws:
+        info = draw_texture_info(row, uploads)
+        size = info["size"]
+        if require_size is not None:
+            if size is None:
+                failures.append(
+                    f"draw {row.get('draw')} tex{row.get('texture')} has unknown texture size"
+                )
+            elif size != require_size:
+                failures.append(
+                    f"draw {row.get('draw')} tex{row.get('texture')} "
+                    f"has {format_size(size)}, expected {format_size(require_size)}"
+                )
+        if reject_size is not None and size == reject_size:
+            failures.append(
+                f"draw {row.get('draw')} tex{row.get('texture')} "
+                f"has rejected {format_size(reject_size)}"
+            )
+    return failures
+
+
+def print_program(args) -> int:
+    uploads, draws, _hle_manifest, _draw_manifest = load_trace(args)
+    program_draws = [row for row in draws if row_int(row, "program") == args.program]
+    if args.json:
+        out = []
+        for row in program_draws:
+            item = dict(row)
+            info = draw_texture_info(row, uploads)
+            item["resolved_texture_source"] = info["source"]
+            item["resolved_texture_size"] = info["size"]
+            item["resolved_upload_event_index"] = info.get("upload_event_index")
+            out.append(item)
+        print(json.dumps(out, indent=2, sort_keys=True))
+    else:
+        print(f"program{args.program}: draws={len(program_draws)}")
+        for row in program_draws[: args.limit]:
+            print(format_draw(row, uploads))
+    failures = validate_program_texture_sizes(
+        draws,
+        uploads,
+        args.program,
+        args.expect_texture_size,
+        args.reject_texture_size,
+    )
+    if failures:
+        for failure in failures[:10]:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def print_mcpe_text(args) -> int:
+    uploads, draws, _hle_manifest, _draw_manifest = load_trace(args)
+    program_draws = [row for row in draws if row_int(row, "program") == args.program]
+    print(f"mcpe-text program{args.program}: draws={len(program_draws)}")
+    for row in program_draws[: args.limit]:
+        print(format_draw(row, uploads))
+    failures = validate_program_texture_sizes(
+        draws,
+        uploads,
+        args.program,
+        args.expect_texture_size,
+        args.reject_texture_size,
+    )
+    if failures:
+        for failure in failures[:10]:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        return 1
+    print(
+        "mcpe-text ok: "
+        f"program{args.program} uses {format_size(args.expect_texture_size)} "
+        f"and avoids {format_size(args.reject_texture_size)}"
+    )
+    return 0
+
+
+def run_self_test() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = pathlib.Path(temp)
+        (root / "hle").mkdir()
+        (root / "sdl-draw").mkdir()
+        (root / "hle" / "manifest.jsonl").write_text(
+            json.dumps(
+                {
+                    "index": 0,
+                    "event_index": 7,
+                    "kind": "teximage2d",
+                    "texture": 325,
+                    "width": 64,
+                    "height": 32,
+                    "format": 0x1908,
+                    "type": 0x1401,
+                    "payload_len": 8192,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        (root / "sdl-draw" / "draw_manifest.jsonl").write_text(
+            json.dumps(
+                {
+                    "index": 0,
+                    "event_index": 11,
+                    "draw": 4,
+                    "kind": "DrawElements",
+                    "program": 86,
+                    "texture": 325,
+                    "width": 854,
+                    "height": 480,
+                    "png": "draw.png",
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        args = argparse.Namespace(
+            trace_dir=str(root),
+            hle_dir=None,
+            draw_dir=None,
+            program=86,
+            expect_texture_size=(256, 256),
+            reject_texture_size=(64, 32),
+        )
+        uploads, draws, _hle_manifest, _draw_manifest = load_trace(args)
+        assert draw_texture_info(draws[0], uploads)["size"] == (64, 32)
+        failures = validate_program_texture_sizes(
+            draws,
+            uploads,
+            args.program,
+            args.expect_texture_size,
+            args.reject_texture_size,
+        )
+        assert failures
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Query AEMU texture upload and SDL draw trace manifests"
+    )
+    parser.add_argument("trace_dir", nargs="?", help="trace root containing hle/ and sdl-draw/")
+    parser.add_argument("--hle-dir", help="override HLE upload manifest directory")
+    parser.add_argument("--draw-dir", help="override SDL draw manifest directory")
+    parser.add_argument("--self-test", action="store_true", help="run built-in self-test")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("summary", help="print manifest counts and captured programs/textures")
+
+    texture = subparsers.add_parser("texture", help="show uploads and draw uses for one texture")
+    texture.add_argument("texture", type=parse_u32)
+    texture.add_argument("--limit", type=int, default=40)
+
+    program = subparsers.add_parser("program", help="show captured draws for one GL program")
+    program.add_argument("program", type=parse_u32)
+    program.add_argument("--limit", type=int, default=40)
+    program.add_argument("--expect-texture-size", type=parse_size)
+    program.add_argument("--reject-texture-size", type=parse_size)
+    program.add_argument("--json", action="store_true")
+
+    mcpe = subparsers.add_parser("mcpe-text", help="gate MCPE text draw texture binding")
+    mcpe.add_argument("--program", type=parse_u32, default=86)
+    mcpe.add_argument("--expect-texture-size", type=parse_size, default=(256, 256))
+    mcpe.add_argument("--reject-texture-size", type=parse_size, default=(64, 32))
+    mcpe.add_argument("--limit", type=int, default=40)
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        print("trace_query self-test ok")
+        return 0
+    if not args.trace_dir:
+        raise SystemExit("trace_dir is required unless --self-test is used")
+    if args.command == "summary":
+        return print_summary(args)
+    if args.command == "texture":
+        return print_texture(args)
+    if args.command == "program":
+        return print_program(args)
+    if args.command == "mcpe-text":
+        return print_mcpe_text(args)
+    raise SystemExit("command is required unless --self-test is used")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except TraceQueryError as err:
+        print(f"trace_query failed: {err}", file=sys.stderr)
+        raise SystemExit(1) from err

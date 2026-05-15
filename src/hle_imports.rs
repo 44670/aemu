@@ -11392,10 +11392,7 @@ mod tests {
         assert_eq!(memory.load8(texture + 0x21).unwrap(), 1);
         assert_eq!(memory.load32(texture + 0x24).unwrap(), 1);
         assert_eq!(memory.load32(texture + 0x28).unwrap(), GL_TEXTURE_2D);
-        assert_eq!(
-            load_test_cxx_string(&mut memory, out + 0x0c),
-            b"InMemory"
-        );
+        assert_eq!(load_test_cxx_string(&mut memory, out + 0x0c), b"InMemory");
 
         let events = hle.take_gles_events();
         assert_eq!(

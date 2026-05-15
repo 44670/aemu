@@ -408,6 +408,7 @@ impl SdlDrawChangeTrace {
                 )
             });
         if should_dump {
+            let texture_info = host.replay.texture_info.get(&bound_texture_2d).copied();
             self.dump_draw_png(
                 event_index,
                 event,
@@ -420,6 +421,7 @@ impl SdlDrawChangeTrace {
                 changed_bytes,
                 width,
                 height,
+                texture_info,
                 &pixels,
             )?;
         }
@@ -456,6 +458,7 @@ impl SdlDrawChangeTrace {
         changed_bytes: usize,
         width: u32,
         height: u32,
+        texture_info: Option<ReplayTextureInfo>,
         rgba: &[u8],
     ) -> HostResult<()> {
         let Some(dir) = self.dump_dir.as_deref() else {
@@ -492,6 +495,7 @@ impl SdlDrawChangeTrace {
             changed_bytes,
             width,
             height,
+            texture_info,
         )?;
         self.dumped += 1;
         Ok(())
@@ -542,10 +546,11 @@ fn append_draw_dump_manifest(
     changed_bytes: usize,
     width: u32,
     height: u32,
+    texture_info: Option<ReplayTextureInfo>,
 ) -> HostResult<()> {
     use std::io::Write;
 
-    let row = serde_json::json!({
+    let mut row = serde_json::json!({
         "index": index,
         "event_index": event_index,
         "draw": draw,
@@ -561,6 +566,18 @@ fn append_draw_dump_manifest(
         "height": height,
         "png": png_path.file_name().and_then(|name| name.to_str()).unwrap_or(""),
     });
+    if let Some(info) = texture_info {
+        row["texture_width"] = serde_json::json!(info.width);
+        row["texture_height"] = serde_json::json!(info.height);
+        row["texture_format"] = serde_json::json!(info.format);
+        row["texture_type"] = serde_json::json!(info.ty);
+        row["texture_last_upload_width"] = serde_json::json!(info.last_upload_width);
+        row["texture_last_upload_height"] = serde_json::json!(info.last_upload_height);
+        row["texture_last_payload_len"] = serde_json::json!(info.last_payload_len);
+        row["texture_last_nonzero_rgb_pixels"] = serde_json::json!(info.last_nonzero_rgb_pixels);
+        row["texture_last_nonzero_alpha_pixels"] =
+            serde_json::json!(info.last_nonzero_alpha_pixels);
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)

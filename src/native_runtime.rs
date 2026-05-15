@@ -221,6 +221,7 @@ struct GuestThread {
     trace_tail: VecDeque<NativeRuntimeTraceEntry>,
     trace_pc_count: usize,
     trace_mem32_count: usize,
+    trace_mem32_deref_count: usize,
     trace_cxx_string_count: usize,
 }
 
@@ -925,15 +926,18 @@ impl NativeRuntime {
         let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         let trace_ranges = parse_trace_pc_ranges();
         let trace_mem32 = parse_trace_mem32_specs();
+        let trace_mem32_deref = parse_trace_mem32_deref_specs();
         let trace_cxx_strings = parse_trace_cxx_string_specs();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
+        let trace_mem32_deref_limit = parse_trace_limit("AEMU_TRACE_MEM32_DEREF_LIMIT");
         let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
         let trace_hle_limit = parse_trace_limit("AEMU_TRACE_HLE_LIMIT");
         let mut trace_pc_count = 0usize;
         let mut trace_mem32_count = 0usize;
+        let mut trace_mem32_deref_count = 0usize;
         let mut trace_cxx_string_count = 0usize;
         let mut trace_hle_count = 0usize;
         for step_idx in 0..max_steps {
@@ -995,6 +999,17 @@ impl NativeRuntime {
                     }
                     trace_mem32_count += 1;
                     self.trace_mem32(step_idx, spec);
+                }
+            }
+            if !trace_mem32_deref.is_empty() {
+                let pc = self.cpu.pc();
+                for spec in trace_mem32_deref.iter().filter(|spec| spec.pc == pc) {
+                    if trace_mem32_deref_limit.is_some_and(|limit| trace_mem32_deref_count >= limit)
+                    {
+                        break;
+                    }
+                    trace_mem32_deref_count += 1;
+                    self.trace_mem32_deref(step_idx, spec);
                 }
             }
             if !trace_cxx_strings.is_empty() {
@@ -1169,6 +1184,7 @@ impl NativeRuntime {
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
             trace_pc_count: 0,
             trace_mem32_count: 0,
+            trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
         })
     }
@@ -1473,9 +1489,11 @@ impl NativeRuntime {
     ) -> Result<bool, NativeRuntimeError> {
         let trace_ranges = parse_trace_pc_ranges();
         let trace_mem32 = parse_trace_mem32_specs();
+        let trace_mem32_deref = parse_trace_mem32_deref_specs();
         let trace_cxx_strings = parse_trace_cxx_string_specs();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
+        let trace_mem32_deref_limit = parse_trace_limit("AEMU_TRACE_MEM32_DEREF_LIMIT");
         let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
         let main_cpu = std::mem::replace(&mut self.cpu, thread.cpu.clone());
         let previous_thread = self.hle.current_pthread();
@@ -1526,6 +1544,19 @@ impl NativeRuntime {
                     thread.trace_mem32_count += 1;
                     eprint!("THREAD_TRACE id={} ", thread.id);
                     self.trace_mem32(step_idx, spec);
+                }
+            }
+            if !trace_mem32_deref.is_empty() {
+                let pc = self.cpu.pc();
+                for spec in trace_mem32_deref.iter().filter(|spec| spec.pc == pc) {
+                    if trace_mem32_deref_limit
+                        .is_some_and(|limit| thread.trace_mem32_deref_count >= limit)
+                    {
+                        break;
+                    }
+                    thread.trace_mem32_deref_count += 1;
+                    eprint!("THREAD_TRACE id={} ", thread.id);
+                    self.trace_mem32_deref(step_idx, spec);
                 }
             }
             if !trace_cxx_strings.is_empty() {
@@ -1953,6 +1984,34 @@ impl NativeRuntime {
         eprintln!();
     }
 
+    fn trace_mem32_deref(&mut self, step_idx: usize, spec: &TraceMem32Spec) {
+        let mut base = spec.base.value(&self.cpu);
+        let base_label = spec.base.label();
+        eprint!(
+            "MEM32_DEREF step={step_idx} pc={:#010x} {base_label}={base:#010x}",
+            spec.pc,
+        );
+        for (depth, &offset) in spec.offsets.iter().enumerate() {
+            let parent = if depth == 0 {
+                base_label.clone()
+            } else {
+                format!("deref{}", depth - 1)
+            };
+            let addr = base.wrapping_add(offset);
+            match self.link.memory.load32(addr) {
+                Ok(value) => {
+                    eprint!(" [{parent}+{offset:#x}@{addr:#010x}]=deref{depth}:{value:#010x}");
+                    base = value;
+                }
+                Err(err) => {
+                    eprint!(" [{parent}+{offset:#x}@{addr:#010x}]=<{err}>");
+                    break;
+                }
+            }
+        }
+        eprintln!();
+    }
+
     fn trace_cxx_string(&mut self, step_idx: usize, spec: &TraceCxxStringSpec) {
         let string = spec.base.value(&self.cpu).wrapping_add(spec.offset);
         let base_label = spec.base.label();
@@ -2067,6 +2126,13 @@ impl TraceMemBase {
 
 fn parse_trace_mem32_specs() -> Vec<TraceMem32Spec> {
     let Some(raw) = std::env::var("AEMU_TRACE_MEM32").ok() else {
+        return Vec::new();
+    };
+    parse_trace_mem32_specs_raw(&raw)
+}
+
+fn parse_trace_mem32_deref_specs() -> Vec<TraceMem32Spec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_MEM32_DEREF").ok() else {
         return Vec::new();
     };
     parse_trace_mem32_specs_raw(&raw)
@@ -2977,6 +3043,7 @@ mod tests {
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
             trace_pc_count: 0,
             trace_mem32_count: 0,
+            trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
         });
 
@@ -3066,6 +3133,7 @@ mod tests {
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
             trace_pc_count: 0,
             trace_mem32_count: 0,
+            trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
         });
 
