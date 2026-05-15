@@ -6360,6 +6360,9 @@ fn is_target_symbol(name: &str) -> bool {
     if name == "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" {
         return std::env::var_os("AEMU_MCPE_NATIVE_TEXTURE_PAIR").is_none();
     }
+    if name == "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation" {
+        return std::env::var_os("AEMU_MCPE_NATIVE_TEXTURE_IS_LOADED").is_none();
+    }
     if name == "_ZN3mce12TextureGroup10getTextureERK11TextureData" {
         return std::env::var_os("AEMU_MCPE_NATIVE_TEXTURE_DATA").is_none();
     }

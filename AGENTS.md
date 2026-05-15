@@ -294,6 +294,17 @@ tools/trace_check.py "$trace_dir" --expect-hle 0 --expect-sdl 0 --expect-draws 1
 tools/trace_query.py "$trace_dir" mcpe-text
 ```
 
+For the diagnostic all-native TextureGroup path
+(`AEMU_MCPE_NATIVE_TEXTURE_DATA=1`, `AEMU_MCPE_NATIVE_TEXTURE_PAIR=1`, and
+`AEMU_MCPE_NATIVE_TEXTURE_IS_LOADED=1`), use:
+
+```sh
+tools/trace_query.py "$trace_dir" mcpe-text --profile native
+```
+
+The native path currently uses a 128x128 text atlas; the HLE font-expansion
+path uses 256x256. Both profiles reject the known bad 64x32 binding.
+
 For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
 `Font::init()` run, and set `AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND=1` to keep
 `font/default8.png`/`font/ascii_sga.png` at their original APK dimensions.
@@ -302,7 +313,10 @@ Set `AEMU_MCPE_NATIVE_TEXTURE_DATA=1` to bypass the HLE
 TextureData texture pointer behavior. Set `AEMU_MCPE_NATIVE_TEXTURE_PAIR=1` to
 also bypass the HLE `TextureGroup::getTexturePair(ResourceLocation const&)`
 facade when checking whether native TextureGroup maps preserve TextureData
-pointer identity.
+pointer identity. Set `AEMU_MCPE_NATIVE_TEXTURE_IS_LOADED=1` with the native
+pair path to avoid mixing native `getTexturePair` with the diagnostic HLE
+`TextureGroup::isLoaded(...) == true` facade; that mixed path can make
+`TextureAtlas::redrawAtlas()` call `TexturePair::clear()` on a null native pair.
 For native TextureData fallback traces captured in `run.log`, use:
 
 ```sh

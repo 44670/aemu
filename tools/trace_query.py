@@ -604,6 +604,7 @@ def print_program(args) -> int:
 def print_mcpe_text(args) -> int:
     uploads, draws, _hle_manifest, _draw_manifest = load_trace(args)
     program_draws = [row for row in draws if row_int(row, "program") == args.program]
+    expect_texture_size, reject_texture_size = mcpe_text_texture_size_gates(args)
     print(f"mcpe-text program{args.program}: draws={len(program_draws)}")
     for row in program_draws[: args.limit]:
         print(format_draw(row, uploads))
@@ -611,8 +612,8 @@ def print_mcpe_text(args) -> int:
         draws,
         uploads,
         args.program,
-        args.expect_texture_size,
-        args.reject_texture_size,
+        expect_texture_size,
+        reject_texture_size,
     )
     if failures:
         for failure in failures[:10]:
@@ -620,10 +621,18 @@ def print_mcpe_text(args) -> int:
         return 1
     print(
         "mcpe-text ok: "
-        f"program{args.program} uses {format_size(args.expect_texture_size)} "
-        f"and avoids {format_size(args.reject_texture_size)}"
+        f"program{args.program} uses {format_size(expect_texture_size)} "
+        f"and avoids {format_size(reject_texture_size)}"
     )
     return 0
+
+
+def mcpe_text_texture_size_gates(args) -> tuple[tuple[int, int], tuple[int, int]]:
+    expect_texture_size = args.expect_texture_size
+    if expect_texture_size is None:
+        expect_texture_size = (128, 128) if args.profile == "native" else (256, 256)
+    reject_texture_size = args.reject_texture_size or (64, 32)
+    return expect_texture_size, reject_texture_size
 
 
 def run_self_test() -> None:
@@ -670,6 +679,7 @@ def run_self_test() -> None:
             hle_dir=None,
             draw_dir=None,
             program=86,
+            profile="hle",
             expect_texture_size=(256, 256),
             reject_texture_size=(64, 32),
         )
@@ -776,6 +786,17 @@ def run_self_test() -> None:
         assert "mem32=r0+0x24=0x00000145" in formatted
         assert "deref32=r0+0x4->0x60ff3414" in formatted
         assert "cxx[r2+0x4]='InAppPackageImages'" in formatted
+        native_args = argparse.Namespace(
+            trace_dir=str(root),
+            hle_dir=None,
+            draw_dir=None,
+            program=86,
+            profile="native",
+            expect_texture_size=None,
+            reject_texture_size=None,
+            limit=4,
+        )
+        assert mcpe_text_texture_size_gates(native_args) == ((128, 128), (64, 32))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -818,8 +839,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     mcpe = subparsers.add_parser("mcpe-text", help="gate MCPE text draw texture binding")
     mcpe.add_argument("--program", type=parse_u32, default=86)
-    mcpe.add_argument("--expect-texture-size", type=parse_size, default=(256, 256))
-    mcpe.add_argument("--reject-texture-size", type=parse_size, default=(64, 32))
+    mcpe.add_argument(
+        "--profile",
+        choices=("hle", "native"),
+        default="hle",
+        help="default expected atlas size profile",
+    )
+    mcpe.add_argument("--expect-texture-size", type=parse_size)
+    mcpe.add_argument("--reject-texture-size", type=parse_size)
     mcpe.add_argument("--limit", type=int, default=40)
 
     texture_data = subparsers.add_parser(
