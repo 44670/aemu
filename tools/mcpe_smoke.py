@@ -15,6 +15,8 @@ DEFAULT_BINARY = pathlib.Path("target/release/aemu")
 DEFAULT_ABI = "armeabi-v7a"
 DEFAULT_OUT_DIR = pathlib.Path("target/mcpe-smoke")
 MCPE_LIBRARY = "libminecraftpe.so"
+ARMV7_NEON_HWCAP = 0x0008B0D7
+ARMV7_NO_NEON_HWCAP = 0x0008A0D7
 
 MCPE_NATIVE_TRACE_PRESETS = {
     "webtoken": {
@@ -111,6 +113,74 @@ MCPE_NATIVE_TRACE_PRESETS = {
             (0x012EC71C, "r0"),
         ],
         "event_limit": 300,
+    },
+    "keygen-mul": {
+        "description": "trace EC_POINT_mul inputs and generated public-point coordinates",
+        "events": [
+            (0x011CD988, "OpenSSLInterface::generateKeyPair.entry"),
+            (0x012399B8, "EC_KEY_generate_key.entry"),
+            (0x01239A4C, "EC_KEY_generate_key.private-ready"),
+            (0x01237240, "EC_POINT_mul.entry"),
+            (0x012378EC, "ec_wNAF_mul.entry"),
+            (0x01237284, "EC_POINT_mul.after-method"),
+            (0x01239A98, "EC_KEY_generate_key.after-point-mul"),
+            (0x011CDB48, "OpenSSLInterface::generateKeyPair.return"),
+        ],
+        "mem32": [
+            (0x01237240, "r0+0,+0x4,+0x8,+0x1c,+0x48,+0x74,+0x88,+0xa0,+0xa4"),
+            (0x01237240, "r1+0,+0x4,+0x8,+0x18,+0x1c,+0x2c,+0x30,+0x40"),
+            (0x01237240, "r2+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x01237284, "r0"),
+            (0x01239A98, "r0"),
+            (0x01239A98, "r9+0,+0x4,+0x8,+0x18,+0x1c,+0x2c,+0x30,+0x40"),
+        ],
+        "deref32": [
+            (0x01237240, "r0+0x4,+0x4,+0"),
+            (0x01237240, "r0+0x4,+0x18,+0"),
+            (0x01237240, "r0+0x4,+0x2c,+0"),
+        ],
+        "bytes": [
+            (0x01237240, "*r0+0x4,+0x4,64"),
+            (0x01237240, "*r0+0x4,+0x18,64"),
+            (0x01237240, "*r0+0x4,+0x2c,64"),
+            (0x01237240, "*r2+0,64"),
+            (0x01239A98, "*r9+0x4,64"),
+            (0x01239A98, "*r9+0x18,64"),
+            (0x01239A98, "*r9+0x2c,64"),
+            (0x01239A98, "*r4+0,64"),
+        ],
+        "event_limit": 200,
+    },
+    "bn-mont": {
+        "description": "trace OpenSSL BN Montgomery multiplication inputs and outputs",
+        "events": [
+            (0x012A014C, "BN_mod_mul_montgomery.entry"),
+            (0x012E0620, "bn_mul_mont.entry"),
+            (0x012A0234, "BN_mod_mul_montgomery.after-bn_mul_mont"),
+            (0x012A0274, "BN_mod_mul_montgomery.fast-return"),
+        ],
+        "mem32": [
+            (0x012A014C, "r0+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012A014C, "r1+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012A014C, "r2+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012A014C, "r3+0x18,+0x1c,+0x40"),
+            (0x012E0620, "sp+0,+0x4"),
+            (0x012A0234, "r9+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012A0274, "r9+0,+0x4,+0x8,+0xc,+0x10"),
+        ],
+        "bytes": [
+            (0x012A014C, "*r1+0,64"),
+            (0x012A014C, "*r2+0,64"),
+            (0x012A014C, "*r3+0x18,64"),
+            (0x012E0620, "r0,64"),
+            (0x012E0620, "r1,64"),
+            (0x012E0620, "r2,64"),
+            (0x012E0620, "r3,64"),
+            (0x012E0620, "*sp+0,16"),
+            (0x012A0234, "*r9+0,64"),
+            (0x012A0274, "*r9+0,64"),
+        ],
+        "event_limit": 80,
     },
     "keygen-serialize": {
         "description": "trace bundled OpenSSL EC private-key DER serialization and point2oct output",
@@ -751,6 +821,14 @@ def build_arg_parser():
     parser.add_argument("--gles-event-limit", type=int, default=2000)
     parser.add_argument("--draw-dump-limit", type=int, default=10)
     parser.add_argument(
+        "--cpu-feature-preset",
+        choices=["default", "no-neon"],
+        default="default",
+        help="override guest AT_HWCAP for CPU feature selection diagnostics",
+    )
+    parser.add_argument("--hwcap", help="set exact guest AT_HWCAP value, e.g. 0x8a0d7")
+    parser.add_argument("--hwcap2", help="set exact guest AT_HWCAP2 value")
+    parser.add_argument(
         "--native-trace-preset",
         action="append",
         choices=sorted(MCPE_NATIVE_TRACE_PRESETS),
@@ -842,6 +920,12 @@ def main(argv=None):
     env = os.environ.copy()
     env.setdefault("DISPLAY", args.display)
     env.setdefault("SDL_VIDEO_X11_FORCE_EGL", "1")
+    if args.cpu_feature_preset == "no-neon":
+        env["AEMU_HWCAP"] = f"0x{ARMV7_NO_NEON_HWCAP:x}"
+    if args.hwcap:
+        env["AEMU_HWCAP"] = args.hwcap
+    if args.hwcap2:
+        env["AEMU_HWCAP2"] = args.hwcap2
     env["AEMU_TRACE_GLES_EVENTS_JSONL"] = str(trace_dir / "gles_events.jsonl")
     env["AEMU_TRACE_GLES_EVENTS_MATCH"] = (
         "SwapBuffers,UseProgram,BindTexture,DrawElements,TexImage2D,TexSubImage2D"

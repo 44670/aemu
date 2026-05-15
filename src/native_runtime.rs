@@ -2412,8 +2412,18 @@ struct TraceBytesSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TraceBytesSource {
-    Direct { base: TraceMemBase, offset: u32 },
-    Deref32 { base: TraceMemBase, offset: u32 },
+    Direct {
+        base: TraceMemBase,
+        offset: u32,
+    },
+    Deref32 {
+        base: TraceMemBase,
+        offset: u32,
+    },
+    Deref32Chain {
+        base: TraceMemBase,
+        offsets: Vec<u32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2452,6 +2462,13 @@ impl TraceBytesSource {
         match *self {
             Self::Direct { base, offset } => Ok(base.value(cpu).wrapping_add(offset)),
             Self::Deref32 { base, offset } => memory.load32(base.value(cpu).wrapping_add(offset)),
+            Self::Deref32Chain { base, ref offsets } => {
+                let mut addr = base.value(cpu);
+                for &offset in offsets {
+                    addr = memory.load32(addr.wrapping_add(offset))?;
+                }
+                Ok(addr)
+            }
         }
     }
 
@@ -2463,6 +2480,13 @@ impl TraceBytesSource {
             Self::Deref32 { base, offset } => {
                 let ptr_addr = base.value(cpu).wrapping_add(offset);
                 format!("*{}+{offset:#x}@{ptr_addr:#010x}", base.label())
+            }
+            Self::Deref32Chain { base, ref offsets } => {
+                let mut label = format!("*{}", base.label());
+                for &offset in offsets {
+                    label.push_str(&format!("+{offset:#x}"));
+                }
+                label
             }
         }
     }
@@ -2558,12 +2582,13 @@ fn parse_trace_bytes_specs_raw(raw: &str) -> Vec<TraceBytesSpec> {
             }
             let (pc, fields) = entry.split_once(':')?;
             let pc = parse_u32_env(pc)?;
-            let mut fields = fields
-                .split(',')
-                .map(str::trim)
-                .filter(|field| !field.is_empty());
-            let source = parse_trace_bytes_source(fields.next()?)?;
-            let max_len = fields.next().and_then(parse_u32_env).unwrap_or(64);
+            let (source_raw, max_len_raw) = fields
+                .rsplit_once(',')
+                .map_or((fields.trim(), None), |(source, max_len)| {
+                    (source.trim(), Some(max_len.trim()))
+                });
+            let source = parse_trace_bytes_source(source_raw)?;
+            let max_len = max_len_raw.and_then(parse_u32_env).unwrap_or(64);
             Some(TraceBytesSpec {
                 pc,
                 source,
@@ -2576,8 +2601,23 @@ fn parse_trace_bytes_specs_raw(raw: &str) -> Vec<TraceBytesSpec> {
 fn parse_trace_bytes_source(raw: &str) -> Option<TraceBytesSource> {
     let raw = raw.trim();
     if let Some(deref) = raw.strip_prefix('*') {
-        let (base, offset) = parse_trace_mem32_base(deref)?;
-        Some(TraceBytesSource::Deref32 { base, offset })
+        let mut parts = deref
+            .split(',')
+            .map(str::trim)
+            .filter(|field| !field.is_empty());
+        let (base, first_offset) = parse_trace_mem32_base(parts.next()?)?;
+        let mut offsets = vec![first_offset];
+        for part in parts {
+            offsets.push(parse_u32_env(part.trim_start_matches('+'))?);
+        }
+        if offsets.len() == 1 {
+            Some(TraceBytesSource::Deref32 {
+                base,
+                offset: first_offset,
+            })
+        } else {
+            Some(TraceBytesSource::Deref32Chain { base, offsets })
+        }
     } else {
         let (base, offset) = parse_trace_mem32_base(raw)?;
         Some(TraceBytesSource::Direct { base, offset })
@@ -2948,7 +2988,9 @@ mod tests {
             }]
         );
         assert_eq!(
-            parse_trace_bytes_specs_raw("0x716f2038:*r2+0x4,32;0x716f2040:r3,16"),
+            parse_trace_bytes_specs_raw(
+                "0x716f2038:*r2+0x4,32;0x716f2040:r3,16;0x716f2044:*r0+0x4,+0x18,64"
+            ),
             vec![
                 TraceBytesSpec {
                     pc: 0x716f_2038,
@@ -2965,6 +3007,14 @@ mod tests {
                         offset: 0,
                     },
                     max_len: 16,
+                },
+                TraceBytesSpec {
+                    pc: 0x716f_2044,
+                    source: TraceBytesSource::Deref32Chain {
+                        base: TraceMemBase::Reg(0),
+                        offsets: vec![0x04, 0x18],
+                    },
+                    max_len: 64,
                 },
             ]
         );

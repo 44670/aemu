@@ -68,6 +68,23 @@ const ARMV7_NEON_HWCAP: u32 = HWCAP_SWP
     | HWCAP_VFPV3
     | HWCAP_TLS
     | HWCAP_VFPD32;
+
+fn env_hwcap_value(name: &str, default_value: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| parse_env_u32_value(&raw))
+        .unwrap_or(default_value)
+}
+
+fn parse_env_u32_value(raw: &str) -> Option<u32> {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        raw.parse::<u32>().ok()
+    }
+}
+
 const EGL_DISPLAY_HANDLE: u32 = 1;
 const EGL_CONFIG_HANDLE: u32 = 2;
 const EGL_CONTEXT_HANDLE: u32 = 3;
@@ -1603,8 +1620,8 @@ impl HleRuntime {
 
     fn getauxval(&self, key: u32) -> u32 {
         match key {
-            AT_HWCAP => ARMV7_NEON_HWCAP,
-            AT_HWCAP2 => 0,
+            AT_HWCAP => env_hwcap_value("AEMU_HWCAP", ARMV7_NEON_HWCAP),
+            AT_HWCAP2 => env_hwcap_value("AEMU_HWCAP2", 0),
             _ => 0,
         }
     }
@@ -10162,6 +10179,13 @@ mod tests {
         cpu.set_reg(0, AT_HWCAP2);
         hle.dispatch("getauxval", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn parses_diagnostic_hwcap_override_values() {
+        assert_eq!(parse_env_u32_value("0x1234"), Some(0x1234));
+        assert_eq!(parse_env_u32_value("4660"), Some(0x1234));
+        assert_eq!(parse_env_u32_value("bad"), None);
     }
 
     #[test]

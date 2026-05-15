@@ -360,6 +360,143 @@ def print_native_event(args) -> int:
     return 0
 
 
+def byte_sample(row: dict, source_prefix: str) -> bytes | None:
+    samples = row.get("byte_samples")
+    if not isinstance(samples, list):
+        return None
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        source = sample.get("source")
+        hex_value = sample.get("hex")
+        if not isinstance(source, str) or not source.startswith(source_prefix):
+            continue
+        if not isinstance(hex_value, str):
+            continue
+        try:
+            return bytes.fromhex(hex_value)
+        except ValueError:
+            return None
+    return None
+
+
+def mem32_field_value(row: dict, base: str, label: str) -> int | None:
+    items = row.get("mem32")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict) or item.get("base") != base:
+            continue
+        fields = item.get("fields")
+        if not isinstance(fields, list):
+            continue
+        for field in fields:
+            if not isinstance(field, dict) or field.get("label") != label:
+                continue
+            value = field.get("value")
+            return value if isinstance(value, int) else None
+    return None
+
+
+def little_int(raw: bytes, words: int) -> int:
+    return int.from_bytes(raw[: words * 4], "little")
+
+
+def little_hex(value: int, words: int) -> str:
+    return value.to_bytes(words * 4, "little").hex()
+
+
+def bn_mont_pairs(events: list[dict]) -> list[tuple[dict, dict]]:
+    pairs = []
+    pending = None
+    for row in events:
+        event = row.get("event")
+        if event == "bn_mul_mont.entry":
+            pending = row
+        elif event == "BN_mod_mul_montgomery.after-bn_mul_mont" and pending is not None:
+            pairs.append((pending, row))
+            pending = None
+    return pairs
+
+
+def check_bn_mont_pair(entry: dict, after: dict) -> tuple[bool, dict]:
+    words = mem32_field_value(entry, "sp", "sp+0x4")
+    a = byte_sample(entry, "r1+0x0")
+    b = byte_sample(entry, "r2+0x0")
+    modulus = byte_sample(entry, "r3+0x0")
+    output = byte_sample(after, "*r9+0x0")
+    detail = {
+        "entry_step": entry.get("step"),
+        "after_step": after.get("step"),
+        "words": words,
+    }
+    if not isinstance(words, int) or words <= 0:
+        detail["error"] = "missing or invalid Montgomery word count"
+        return False, detail
+    if a is None or b is None or modulus is None or output is None:
+        detail["error"] = "missing input/output byte sample"
+        return False, detail
+    required_len = words * 4
+    if min(len(a), len(b), len(modulus), len(output)) < required_len:
+        detail["error"] = f"short byte sample for {words} words"
+        return False, detail
+
+    n = little_int(modulus, words)
+    if n <= 0 or n % 2 == 0:
+        detail["error"] = f"invalid odd Montgomery modulus 0x{n:x}"
+        return False, detail
+    radix = 1 << (32 * words)
+    expected = (little_int(a, words) * little_int(b, words) * pow(radix, -1, n)) % n
+    actual = little_int(output, words)
+    detail["actual"] = little_hex(actual, words)
+    detail["expected"] = little_hex(expected, words)
+    detail["a"] = a[:required_len].hex()
+    detail["b"] = b[:required_len].hex()
+    detail["modulus"] = modulus[:required_len].hex()
+    return actual == expected, detail
+
+
+def print_bn_mont_check(args) -> int:
+    events, path = load_native_events(args)
+    pairs = bn_mont_pairs(events)
+    if not pairs:
+        raise TraceQueryError(f"{path}: no bn_mul_mont.entry -> after-bn_mul_mont pairs found")
+    checked = 0
+    mismatches = []
+    incomplete = []
+    for entry, after in pairs:
+        ok, detail = check_bn_mont_pair(entry, after)
+        if "error" in detail:
+            incomplete.append(detail)
+            continue
+        checked += 1
+        if not ok:
+            mismatches.append(detail)
+
+    print(
+        f"bn-mont-check: path={path} pairs={len(pairs)} "
+        f"checked={checked} mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"entry_step={detail.get('entry_step')} after_step={detail.get('after_step')} "
+            f"words={detail.get('words')}"
+        )
+        print(f"  actual  ={detail.get('actual')}")
+        print(f"  expected={detail.get('expected')}")
+        print(f"  a       ={detail.get('a')}")
+        print(f"  b       ={detail.get('b')}")
+        print(f"  modulus ={detail.get('modulus')}")
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"entry_step={detail.get('entry_step')} after_step={detail.get('after_step')} "
+            f"words={detail.get('words')} error={detail.get('error')}"
+        )
+    return 1 if mismatches or incomplete else 0
+
+
 MEM32_RE = re.compile(
     r"(?P<prefix>THREAD_TRACE id=(?P<thread>\d+) )?"
     r"MEM32 step=(?P<step>\d+) pc=(?P<pc>0x[0-9a-fA-F]+) "
@@ -805,6 +942,45 @@ def run_self_test() -> None:
         assert "mem32=r0+0x24=0x00000145" in formatted
         assert "deref32=r0+0x4->0x60ff3414" in formatted
         assert "cxx[r2+0x4]='InAppPackageImages'" in formatted
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 20,
+                            "event": "bn_mul_mont.entry",
+                            "mem32": [
+                                {
+                                    "base": "sp",
+                                    "fields": [
+                                        {"label": "sp+0x4", "value": 1},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {"source": "r1+0x0", "hex": "03000000"},
+                                {"source": "r2+0x0", "hex": "04000000"},
+                                {"source": "r3+0x0", "hex": "0d000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 21,
+                            "event": "BN_mod_mul_montgomery.after-bn_mul_mont",
+                            "byte_samples": [
+                                {"source": "*r9+0x0@0x1000", "hex": "0a000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        bn_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_bn_mont_check(bn_args) == 0
         native_args = argparse.Namespace(
             trace_dir=str(root),
             hle_dir=None,
@@ -848,6 +1024,12 @@ def build_parser() -> argparse.ArgumentParser:
     native_event.add_argument("--pc", type=parse_u32)
     native_event.add_argument("--contains")
     native_event.add_argument("--limit", type=int, default=40)
+
+    bn_mont = subparsers.add_parser(
+        "bn-mont-check",
+        help="check bn_mul_mont native trace rows against a host Montgomery oracle",
+    )
+    bn_mont.add_argument("--limit", type=int, default=10)
 
     program = subparsers.add_parser("program", help="show captured draws for one GL program")
     program.add_argument("program", type=parse_u32)
@@ -894,6 +1076,8 @@ def main(argv=None) -> int:
         return print_gles_event(args)
     if args.command == "native-event":
         return print_native_event(args)
+    if args.command == "bn-mont-check":
+        return print_bn_mont_check(args)
     if args.command == "program":
         return print_program(args)
     if args.command == "mcpe-text":

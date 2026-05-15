@@ -243,6 +243,29 @@ tools/mcpe_smoke.py --native-trace-preset keygen-ec \
 tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 120
 ```
 
+Use `keygen-mul` to inspect `EC_POINT_mul` inputs, the group generator point,
+the private scalar BIGNUM limbs, and the generated public point. Combine it
+with `--cpu-feature-preset no-neon` to force OpenSSL away from its NEON
+Montgomery multiply path and compare scalar-vs-NEON behavior:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset keygen-mul \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/mcpe_smoke.py --cpu-feature-preset no-neon --native-trace-preset keygen-mul \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 80
+```
+
+Use `bn-mont` when `keygen-mul` points at low-level OpenSSL field arithmetic;
+it dumps `BN_mod_mul_montgomery` and `bn_mul_mont` limb buffers so individual
+Montgomery products can be checked against a host oracle:
+
+```sh
+tools/trace_query.py target/mcpe-smoke-<stamp> bn-mont-check
+```
+
 Use `keygen-serialize` to inspect whether `i2d_ECPrivateKey` / `point2oct`
 serializes the generated public point correctly:
 
