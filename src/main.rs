@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|qemu-armv7a-tcg] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|qemu-armv7a-tcg] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -508,6 +508,7 @@ fn print_unresolved_imports(report: &aemu::native_loader::NativeLinkReport, limi
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunApkNativeOptions {
+    cpu_backend: aemu::native_runtime::NativeCpuBackendKind,
     launch: bool,
     until_swap: bool,
     gles_summary: bool,
@@ -538,6 +539,7 @@ fn parse_run_apk_native_args(
     let mut max_steps = 100_000usize;
     let mut max_steps_set = false;
     let mut options = RunApkNativeOptions {
+        cpu_backend: aemu::native_runtime::NativeCpuBackendKind::AemuInterpreter,
         launch: false,
         until_swap: false,
         gles_summary: false,
@@ -553,6 +555,17 @@ fn parse_run_apk_native_args(
                 config.abi = iter
                     .next()
                     .ok_or_else(|| "--abi needs an ABI value".to_string())?;
+            }
+            "--cpu-backend" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--cpu-backend needs a backend value".to_string())?;
+                options.cpu_backend = aemu::native_runtime::NativeCpuBackendKind::parse(&value)
+                    .ok_or_else(|| {
+                        format!(
+                            "invalid --cpu-backend value: {value} (expected aemu or qemu-armv7a-tcg)"
+                        )
+                    })?;
             }
             "--steps" => {
                 let value = iter
@@ -636,9 +649,10 @@ fn run_apk_native(
             report.relocation_errors.len()
         ));
     }
-    let mut runtime = aemu::native_runtime::NativeRuntime::new(
+    let mut runtime = aemu::native_runtime::NativeRuntime::new_with_cpu_backend(
         report,
         aemu::native_runtime::NativeRuntimeConfig::default(),
+        options.cpu_backend,
     )
     .map_err(|err| format!("runtime setup failed: {err}"))?;
     let constructors = runtime

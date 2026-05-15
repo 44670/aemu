@@ -90,10 +90,34 @@ impl Default for NativeRuntimeConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCpuBackendKind {
+    AemuInterpreter,
+    QemuArmv7aTcg,
+}
+
+impl NativeCpuBackendKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "aemu" | "aemu-interpreter" => Some(Self::AemuInterpreter),
+            "qemu-armv7a-tcg" | "qemu-tcg" => Some(Self::QemuArmv7aTcg),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AemuInterpreter => "aemu",
+            Self::QemuArmv7aTcg => "qemu-armv7a-tcg",
+        }
+    }
+}
+
 pub struct NativeRuntime {
     pub link: NativeLinkReport,
     pub cpu: Cpu,
     pub hle: HleRuntime,
+    cpu_backend: NativeCpuBackendKind,
     runtime_hle_traps: Vec<RuntimeHleTrap>,
     jni_methods: Vec<JniMethod>,
     jni_java_vm: u32,
@@ -294,6 +318,7 @@ pub enum NativeRuntimeError {
     MemoryMap(MappedMemoryError),
     Memory(String),
     AddressOverflow,
+    UnsupportedCpuBackend(NativeCpuBackendKind),
     Cpu(Trap),
     CpuAt {
         pc: u32,
@@ -319,6 +344,11 @@ impl fmt::Display for NativeRuntimeError {
             Self::MemoryMap(err) => write!(f, "{err}"),
             Self::Memory(err) => write!(f, "{err}"),
             Self::AddressOverflow => write!(f, "runtime address range overflow"),
+            Self::UnsupportedCpuBackend(backend) => write!(
+                f,
+                "CPU backend '{}' is not wired into NativeRuntime yet",
+                backend.as_str()
+            ),
             Self::Cpu(err) => write!(f, "{err}"),
             Self::CpuAt { pc, isa, source } => {
                 write!(f, "{source} while executing {isa:?} at {pc:#010x}")
@@ -363,9 +393,21 @@ impl std::error::Error for NativeRuntimeError {}
 
 impl NativeRuntime {
     pub fn new(
-        mut link: NativeLinkReport,
+        link: NativeLinkReport,
         config: NativeRuntimeConfig,
     ) -> Result<Self, NativeRuntimeError> {
+        Self::new_with_cpu_backend(link, config, NativeCpuBackendKind::AemuInterpreter)
+    }
+
+    pub fn new_with_cpu_backend(
+        mut link: NativeLinkReport,
+        config: NativeRuntimeConfig,
+        cpu_backend: NativeCpuBackendKind,
+    ) -> Result<Self, NativeRuntimeError> {
+        if cpu_backend != NativeCpuBackendKind::AemuInterpreter {
+            return Err(NativeRuntimeError::UnsupportedCpuBackend(cpu_backend));
+        }
+
         link.memory
             .map_zeroed(config.stack_base, config.stack_size)
             .map_err(NativeRuntimeError::MemoryMap)?;
@@ -414,6 +456,7 @@ impl NativeRuntime {
             link,
             cpu,
             hle,
+            cpu_backend,
             runtime_hle_traps,
             jni_methods: Vec::new(),
             jni_java_vm: 0,
@@ -427,6 +470,10 @@ impl NativeRuntime {
             minecraft_resource_bridge_active: false,
             trace_native_event_count: 0,
         })
+    }
+
+    pub fn cpu_backend(&self) -> NativeCpuBackendKind {
+        self.cpu_backend
     }
 
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
@@ -3144,6 +3191,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_native_cpu_backend_names() {
+        assert_eq!(
+            NativeCpuBackendKind::parse("aemu"),
+            Some(NativeCpuBackendKind::AemuInterpreter)
+        );
+        assert_eq!(
+            NativeCpuBackendKind::parse("qemu-armv7a-tcg"),
+            Some(NativeCpuBackendKind::QemuArmv7aTcg)
+        );
+        assert_eq!(NativeCpuBackendKind::parse("qemu"), None);
+    }
+
+    #[test]
+    fn rejects_unwired_qemu_cpu_backend_without_fallback() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+
+        let err = match NativeRuntime::new_with_cpu_backend(
+            report,
+            config,
+            NativeCpuBackendKind::QemuArmv7aTcg,
+        ) {
+            Ok(_) => panic!("qemu backend should not silently fall back to the AEMU interpreter"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err,
+            NativeRuntimeError::UnsupportedCpuBackend(NativeCpuBackendKind::QemuArmv7aTcg)
+        );
+    }
+
+    #[test]
     fn write_guest_words_preserves_arm_alignment_after_byte_allocations() {
         let report = NativeLinkReport {
             apk_path: PathBuf::from("test.apk"),
@@ -4209,6 +4305,7 @@ mod tests {
             link: report,
             cpu: Cpu::new(),
             hle: HleRuntime::new(0, 0x6000_0000, 0x1000),
+            cpu_backend: NativeCpuBackendKind::AemuInterpreter,
             runtime_hle_traps: Vec::new(),
             jni_methods: Vec::new(),
             jni_java_vm: 0,
