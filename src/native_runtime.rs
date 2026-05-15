@@ -933,6 +933,9 @@ impl NativeRuntime {
         let trace_mem32_deref = parse_trace_mem32_deref_specs();
         let trace_cxx_strings = parse_trace_cxx_string_specs();
         let trace_native_events = parse_trace_native_event_specs();
+        let trace_native_event_mem32 = parse_trace_native_event_mem32_specs();
+        let trace_native_event_deref32 = parse_trace_native_event_deref32_specs();
+        let trace_native_event_cxx_strings = parse_trace_native_event_cxx_string_specs();
         let trace_native_events_path = trace_native_events_path();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
@@ -1038,7 +1041,15 @@ impl NativeRuntime {
                         break;
                     }
                     self.trace_native_event_count += 1;
-                    self.trace_native_event_jsonl(step_idx, self.hle.current_pthread(), spec, path);
+                    self.trace_native_event_jsonl(
+                        step_idx,
+                        self.hle.current_pthread(),
+                        spec,
+                        path,
+                        &trace_native_event_mem32,
+                        &trace_native_event_deref32,
+                        &trace_native_event_cxx_strings,
+                    );
                 }
             }
             tail.push_back(NativeRuntimeTraceEntry {
@@ -1511,6 +1522,9 @@ impl NativeRuntime {
         let trace_mem32_deref = parse_trace_mem32_deref_specs();
         let trace_cxx_strings = parse_trace_cxx_string_specs();
         let trace_native_events = parse_trace_native_event_specs();
+        let trace_native_event_mem32 = parse_trace_native_event_mem32_specs();
+        let trace_native_event_deref32 = parse_trace_native_event_deref32_specs();
+        let trace_native_event_cxx_strings = parse_trace_native_event_cxx_string_specs();
         let trace_native_events_path = trace_native_events_path();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
@@ -1603,7 +1617,15 @@ impl NativeRuntime {
                         break;
                     }
                     self.trace_native_event_count += 1;
-                    self.trace_native_event_jsonl(step_idx, thread.id, spec, path);
+                    self.trace_native_event_jsonl(
+                        step_idx,
+                        thread.id,
+                        spec,
+                        path,
+                        &trace_native_event_mem32,
+                        &trace_native_event_deref32,
+                        &trace_native_event_cxx_strings,
+                    );
                 }
             }
             push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
@@ -2092,16 +2114,19 @@ impl NativeRuntime {
     }
 
     fn trace_native_event_jsonl(
-        &self,
+        &mut self,
         step_idx: usize,
         thread_id: u32,
         spec: &TraceNativeEventSpec,
         path: &Path,
+        mem32_specs: &[TraceMem32Spec],
+        deref32_specs: &[TraceMem32Spec],
+        cxx_string_specs: &[TraceCxxStringSpec],
     ) {
         let regs: serde_json::Map<String, serde_json::Value> = (0..16)
             .map(|idx| (format!("r{idx}"), serde_json::json!(self.cpu.reg(idx))))
             .collect();
-        let row = serde_json::json!({
+        let mut row = serde_json::json!({
             "step": step_idx,
             "thread": thread_id,
             "pc": spec.pc,
@@ -2119,9 +2144,167 @@ impl NativeRuntime {
             "gl_current_program": self.hle.trace_gl_current_program(),
             "gl_bound_texture_2d": self.hle.trace_gl_bound_texture_2d(),
         });
+        let mem32 = self.native_event_mem32_values(spec.pc, mem32_specs);
+        if !mem32.is_empty() {
+            row["mem32"] = serde_json::Value::Array(mem32);
+        }
+        let deref32 = self.native_event_deref32_values(spec.pc, deref32_specs);
+        if !deref32.is_empty() {
+            row["deref32"] = serde_json::Value::Array(deref32);
+        }
+        let cxx_strings = self.native_event_cxx_string_values(spec.pc, cxx_string_specs);
+        if !cxx_strings.is_empty() {
+            row["cxx_strings"] = serde_json::Value::Array(cxx_strings);
+        }
         if let Err(err) = append_trace_jsonl(path, &row) {
             eprintln!("native event trace append failed {path:?}: {err}");
         }
+    }
+
+    fn native_event_mem32_values(
+        &mut self,
+        pc: u32,
+        specs: &[TraceMem32Spec],
+    ) -> Vec<serde_json::Value> {
+        specs
+            .iter()
+            .filter(|spec| spec.pc == pc)
+            .map(|spec| self.native_event_mem32_value(spec))
+            .collect()
+    }
+
+    fn native_event_mem32_value(&mut self, spec: &TraceMem32Spec) -> serde_json::Value {
+        let base = spec.base.value(&self.cpu);
+        let base_label = spec.base.label();
+        let fields = spec
+            .offsets
+            .iter()
+            .map(|&offset| {
+                let addr = base.wrapping_add(offset);
+                let mut field = serde_json::json!({
+                    "label": format!("{base_label}+{offset:#x}"),
+                    "offset": offset,
+                    "addr": addr,
+                });
+                match self.link.memory.load32(addr) {
+                    Ok(value) => field["value"] = serde_json::json!(value),
+                    Err(err) => field["error"] = serde_json::json!(err.to_string()),
+                }
+                field
+            })
+            .collect();
+        serde_json::json!({
+            "base": base_label,
+            "base_value": base,
+            "fields": serde_json::Value::Array(fields),
+        })
+    }
+
+    fn native_event_deref32_values(
+        &mut self,
+        pc: u32,
+        specs: &[TraceMem32Spec],
+    ) -> Vec<serde_json::Value> {
+        specs
+            .iter()
+            .filter(|spec| spec.pc == pc)
+            .map(|spec| self.native_event_deref32_value(spec))
+            .collect()
+    }
+
+    fn native_event_deref32_value(&mut self, spec: &TraceMem32Spec) -> serde_json::Value {
+        let mut base = spec.base.value(&self.cpu);
+        let base_label = spec.base.label();
+        let mut chain = Vec::new();
+        for (depth, &offset) in spec.offsets.iter().enumerate() {
+            let parent = if depth == 0 {
+                base_label.clone()
+            } else {
+                format!("deref{}", depth - 1)
+            };
+            let addr = base.wrapping_add(offset);
+            let label = format!("{parent}+{offset:#x}");
+            let mut item = serde_json::json!({
+                "depth": depth,
+                "parent": parent,
+                "label": label,
+                "offset": offset,
+                "addr": addr,
+            });
+            match self.link.memory.load32(addr) {
+                Ok(value) => {
+                    item["value"] = serde_json::json!(value);
+                    base = value;
+                }
+                Err(err) => {
+                    item["error"] = serde_json::json!(err.to_string());
+                    chain.push(item);
+                    break;
+                }
+            }
+            chain.push(item);
+        }
+        serde_json::json!({
+            "base": base_label,
+            "base_value": spec.base.value(&self.cpu),
+            "chain": chain,
+        })
+    }
+
+    fn native_event_cxx_string_values(
+        &mut self,
+        pc: u32,
+        specs: &[TraceCxxStringSpec],
+    ) -> Vec<serde_json::Value> {
+        specs
+            .iter()
+            .filter(|spec| spec.pc == pc)
+            .map(|spec| self.native_event_cxx_string_value(spec))
+            .collect()
+    }
+
+    fn native_event_cxx_string_value(&mut self, spec: &TraceCxxStringSpec) -> serde_json::Value {
+        let string = spec.base.value(&self.cpu).wrapping_add(spec.offset);
+        let base_label = spec.base.label();
+        let mut row = serde_json::json!({
+            "base": base_label,
+            "offset": spec.offset,
+            "addr": string,
+            "max_len": spec.max_len,
+        });
+        match self.link.memory.load32(string) {
+            Ok(data) if data != 0 => {
+                row["data"] = serde_json::json!(data);
+                let len = self
+                    .link
+                    .memory
+                    .load32(data.wrapping_sub(12))
+                    .unwrap_or(u32::MAX);
+                row["len"] = serde_json::json!(len);
+                let mut bytes = Vec::new();
+                for idx in 0..len.min(spec.max_len) {
+                    match self.link.memory.load8(data.wrapping_add(idx)) {
+                        Ok(byte) => bytes.push(byte),
+                        Err(err) => {
+                            row["error"] = serde_json::json!(err.to_string());
+                            return row;
+                        }
+                    }
+                }
+                row["bytes"] = serde_json::json!(String::from_utf8_lossy(&bytes).into_owned());
+                row["escaped"] = serde_json::json!(format_trace_bytes(&bytes));
+                row["truncated"] = serde_json::json!(len > spec.max_len);
+            }
+            Ok(data) => {
+                row["data"] = serde_json::json!(data);
+                row["len"] = serde_json::json!(0);
+                row["bytes"] = serde_json::json!("");
+                row["escaped"] = serde_json::json!("\"\"");
+                row["truncated"] = serde_json::json!(false);
+            }
+            Err(err) => row["error"] = serde_json::json!(err.to_string()),
+        }
+        row
     }
 }
 
@@ -2227,6 +2410,27 @@ fn parse_trace_native_event_specs() -> Vec<TraceNativeEventSpec> {
         return Vec::new();
     };
     parse_trace_native_event_specs_raw(&raw)
+}
+
+fn parse_trace_native_event_mem32_specs() -> Vec<TraceMem32Spec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_NATIVE_EVENT_MEM32").ok() else {
+        return Vec::new();
+    };
+    parse_trace_mem32_specs_raw(&raw)
+}
+
+fn parse_trace_native_event_deref32_specs() -> Vec<TraceMem32Spec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_NATIVE_EVENT_DEREF32").ok() else {
+        return Vec::new();
+    };
+    parse_trace_mem32_specs_raw(&raw)
+}
+
+fn parse_trace_native_event_cxx_string_specs() -> Vec<TraceCxxStringSpec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_NATIVE_EVENT_CXX_STRING").ok() else {
+        return Vec::new();
+    };
+    parse_trace_cxx_string_specs_raw(&raw)
 }
 
 fn parse_trace_native_event_specs_raw(raw: &str) -> Vec<TraceNativeEventSpec> {
@@ -2548,6 +2752,23 @@ mod tests {
                     name: "0x716eb818".to_string(),
                 },
             ]
+        );
+        assert_eq!(
+            parse_trace_mem32_specs_raw("0x716eb818:r0+0x24,+0x28"),
+            vec![TraceMem32Spec {
+                pc: 0x716e_b818,
+                base: TraceMemBase::Reg(0),
+                offsets: vec![0x24, 0x28],
+            }]
+        );
+        assert_eq!(
+            parse_trace_cxx_string_specs_raw("0x716f2038:r2+0x4,96"),
+            vec![TraceCxxStringSpec {
+                pc: 0x716f_2038,
+                base: TraceMemBase::Reg(2),
+                offset: 0x04,
+                max_len: 96,
+            }]
         );
     }
 

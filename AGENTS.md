@@ -335,7 +335,10 @@ Structured native PC event tracing:
 
 ```sh
 AEMU_TRACE_NATIVE_EVENTS_JSONL=$trace_dir/native_events.jsonl \
-AEMU_TRACE_NATIVE_EVENTS='0x716f0534:TextureGroup::uploadTexture;0x716f1fec:TexturePair::clear;0x716eb570:TextureOGL::deleteTexture;0x716eb818:TextureOGL::bindTexture' \
+AEMU_TRACE_NATIVE_EVENTS='0x716f0534:TextureGroup::uploadTexture;0x716f2070:TexturePtr::ctor.afterGet;0x716f1fec:TexturePair::clear;0x716eb570:TextureOGL::deleteTexture;0x716eb818:TextureOGL::bindTexture' \
+AEMU_TRACE_NATIVE_EVENT_MEM32='0x716eb818:r0+0x24,+0x28;0x716f0534:r2,+0x38,+0x3c' \
+AEMU_TRACE_NATIVE_EVENT_DEREF32='0x716f2070:r6+0x4,+0x24' \
+AEMU_TRACE_NATIVE_EVENT_CXX_STRING='0x716f2038:r2+0,96;0x716f2038:r2+0x4,96' \
 AEMU_TRACE_NATIVE_EVENTS_LIMIT=200 \
 DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
 tools/trace_query.py "$trace_dir" native-event --contains Texture
@@ -344,8 +347,13 @@ tools/trace_query.py "$trace_dir" native-event --contains Texture
 `native_events.jsonl` captures exact-PC guest events with thread id, r0-r3,
 sp/lr, full registers, and the current GLES boundary context
 (`gles_next_event_index`, current program, active texture, and bound 2D
-texture). Use it to line up native object/lifecycle state with GLES import
-events without scraping large stderr traces.
+texture). `AEMU_TRACE_NATIVE_EVENT_MEM32` and
+`AEMU_TRACE_NATIVE_EVENT_DEREF32` use the same syntax as `AEMU_TRACE_MEM32` and
+`AEMU_TRACE_MEM32_DEREF`, but attach object fields directly to each native JSONL
+event. `AEMU_TRACE_NATIVE_EVENT_CXX_STRING` uses the same syntax as
+`AEMU_TRACE_CXX_STRING` for string fields. Use these to line up native
+object/lifecycle state with GLES import events without scraping large stderr
+traces.
 
 Do not treat HLE or patching of MCPE engine methods such as `TextureGroup`,
 `Font`, or render-object methods as the long-term fix. Those hooks are only

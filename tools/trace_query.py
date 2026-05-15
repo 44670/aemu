@@ -245,7 +245,79 @@ def format_native_event(row: dict) -> str:
         f"program={row.get('gl_current_program')}",
         f"bound_tex2d={row.get('gl_bound_texture_2d')}",
     ]
+    parts.extend(format_native_mem32(row.get("mem32"), "mem32"))
+    parts.extend(format_native_deref32(row.get("deref32")))
+    parts.extend(format_native_cxx_strings(row.get("cxx_strings")))
     return " ".join(parts)
+
+
+def fmt_u32(value) -> str:
+    return f"0x{value:08x}" if isinstance(value, int) else str(value)
+
+
+def format_native_mem32(items, prefix: str) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    parts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        fields = item.get("fields")
+        if not isinstance(fields, list):
+            continue
+        values = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            label = field.get("label")
+            if "value" in field:
+                values.append(f"{label}={fmt_u32(field.get('value'))}")
+            elif "error" in field:
+                values.append(f"{label}=<{field.get('error')}>")
+        if values:
+            parts.append(f"{prefix}=" + ",".join(values))
+    return parts
+
+
+def format_native_deref32(items) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    parts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        chain = item.get("chain")
+        if not isinstance(chain, list):
+            continue
+        values = []
+        for field in chain:
+            if not isinstance(field, dict):
+                continue
+            label = field.get("label")
+            if "value" in field:
+                values.append(f"{label}->{fmt_u32(field.get('value'))}")
+            elif "error" in field:
+                values.append(f"{label}=<{field.get('error')}>")
+        if values:
+            parts.append("deref32=" + ",".join(values))
+    return parts
+
+
+def format_native_cxx_strings(items) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    parts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        offset = item.get("offset", 0)
+        offset_text = f"0x{offset:x}" if isinstance(offset, int) else str(offset)
+        label = f"{item.get('base')}+{offset_text}"
+        if "bytes" in item:
+            parts.append(f"cxx[{label}]={item.get('bytes')!r}")
+        elif "error" in item:
+            parts.append(f"cxx[{label}]=<{item.get('error')}>")
+    return parts
 
 
 def native_event_matches_contains(row: dict, needle: str) -> bool:
@@ -646,6 +718,48 @@ def run_self_test() -> None:
                     "gles_next_event_index": 21600,
                     "gl_current_program": 79,
                     "gl_bound_texture_2d": 325,
+                    "mem32": [
+                        {
+                            "base": "r0",
+                            "base_value": 0x60FF33F0,
+                            "fields": [
+                                {
+                                    "label": "r0+0x24",
+                                    "offset": 0x24,
+                                    "addr": 0x60FF3414,
+                                    "value": 325,
+                                }
+                            ],
+                        }
+                    ],
+                    "deref32": [
+                        {
+                            "base": "r0",
+                            "base_value": 0x60FF33F0,
+                            "chain": [
+                                {
+                                    "depth": 0,
+                                    "parent": "r0",
+                                    "label": "r0+0x4",
+                                    "offset": 4,
+                                    "addr": 0x60FF33F4,
+                                    "value": 0x60FF3414,
+                                }
+                            ],
+                        }
+                    ],
+                    "cxx_strings": [
+                        {
+                            "base": "r2",
+                            "offset": 4,
+                            "addr": 0x1004,
+                            "data": 0x2010,
+                            "len": 18,
+                            "bytes": "InAppPackageImages",
+                            "escaped": '"InAppPackageImages"',
+                            "truncated": False,
+                        }
+                    ],
                 },
                 separators=(",", ":"),
             )
@@ -657,7 +771,11 @@ def run_self_test() -> None:
         native_events, _events_path = load_native_events(event_args)
         assert len(native_events) == 1
         assert native_event_matches_contains(native_events[0], "bindtexture")
-        assert "gles_next=21600" in format_native_event(native_events[0])
+        formatted = format_native_event(native_events[0])
+        assert "gles_next=21600" in formatted
+        assert "mem32=r0+0x24=0x00000145" in formatted
+        assert "deref32=r0+0x4->0x60ff3414" in formatted
+        assert "cxx[r2+0x4]='InAppPackageImages'" in formatted
 
 
 def build_parser() -> argparse.ArgumentParser:
