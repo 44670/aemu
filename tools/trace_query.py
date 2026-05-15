@@ -56,11 +56,21 @@ def trace_paths(args) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     return root, hle_dir, draw_dir
 
 
+def gles_events_path(args) -> pathlib.Path:
+    root = pathlib.Path(args.trace_dir)
+    return pathlib.Path(args.gles_events) if args.gles_events else root / "gles_events.jsonl"
+
+
 def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path]:
     _root, hle_dir, draw_dir = trace_paths(args)
     uploads = read_jsonl(hle_dir / "manifest.jsonl")
     draws = read_jsonl(draw_dir / "draw_manifest.jsonl")
     return uploads, draws, hle_dir / "manifest.jsonl", draw_dir / "draw_manifest.jsonl"
+
+
+def load_gles_events(args) -> tuple[list[dict], pathlib.Path]:
+    path = gles_events_path(args)
+    return read_jsonl(path), path
 
 
 def row_int(row: dict, key: str) -> int | None:
@@ -145,16 +155,59 @@ def texture_rows(texture: int, uploads: list[dict], draws: list[dict]) -> dict:
 
 def print_summary(args) -> int:
     uploads, draws, hle_manifest, draw_manifest = load_trace(args)
+    gles_events, gles_path = load_gles_events(args)
     programs = sorted({row.get("program") for row in draws if isinstance(row.get("program"), int)})
     textures = sorted({row.get("texture") for row in draws if isinstance(row.get("texture"), int)})
     print(f"hle_manifest={hle_manifest} rows={len(uploads)}")
     print(f"draw_manifest={draw_manifest} rows={len(draws)}")
+    print(f"gles_events={gles_path} rows={len(gles_events)}")
     print(f"draw_programs={','.join(map(str, programs[:24])) or 'none'}")
     if len(programs) > 24:
         print(f"draw_programs_more={len(programs) - 24}")
     print(f"draw_textures={','.join('tex' + str(texture) for texture in textures[:24]) or 'none'}")
     if len(textures) > 24:
         print(f"draw_textures_more={len(textures) - 24}")
+    return 0
+
+
+def format_gles_event(row: dict) -> str:
+    parts = [
+        f"event={row.get('index')}",
+        f"kind={row.get('kind')}",
+        f"program={row.get('current_program')}",
+        f"bound_tex2d={row.get('bound_texture_2d')}",
+    ]
+    for key in (
+        "target",
+        "texture",
+        "mode",
+        "count",
+        "type",
+        "indices",
+        "width",
+        "height",
+        "format",
+        "payload_len",
+    ):
+        if key in row:
+            parts.append(f"{key}={row.get(key)}")
+    return " ".join(parts)
+
+
+def print_gles_event(args) -> int:
+    events, path = load_gles_events(args)
+    if not events:
+        raise TraceQueryError(f"{path}: missing or empty GLES event trace")
+    low = max(0, args.event - args.context)
+    high = args.event + args.context
+    rows = [
+        row
+        for row in events
+        if isinstance(row.get("index"), int) and low <= row["index"] <= high
+    ]
+    print(f"gles-event {args.event}: path={path} rows={len(rows)}")
+    for row in rows[: args.limit]:
+        print(format_gles_event(row))
     return 0
 
 
@@ -329,6 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("trace_dir", nargs="?", help="trace root containing hle/ and sdl-draw/")
     parser.add_argument("--hle-dir", help="override HLE upload manifest directory")
     parser.add_argument("--draw-dir", help="override SDL draw manifest directory")
+    parser.add_argument("--gles-events", help="override GLES event JSONL path")
     parser.add_argument("--self-test", action="store_true", help="run built-in self-test")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -337,6 +391,11 @@ def build_parser() -> argparse.ArgumentParser:
     texture = subparsers.add_parser("texture", help="show uploads and draw uses for one texture")
     texture.add_argument("texture", type=parse_u32)
     texture.add_argument("--limit", type=int, default=40)
+
+    event = subparsers.add_parser("gles-event", help="show GLES event timeline rows by index")
+    event.add_argument("event", type=parse_u32)
+    event.add_argument("--context", type=int, default=3)
+    event.add_argument("--limit", type=int, default=40)
 
     program = subparsers.add_parser("program", help="show captured draws for one GL program")
     program.add_argument("program", type=parse_u32)
@@ -365,6 +424,8 @@ def main(argv=None) -> int:
         return print_summary(args)
     if args.command == "texture":
         return print_texture(args)
+    if args.command == "gles-event":
+        return print_gles_event(args)
     if args.command == "program":
         return print_program(args)
     if args.command == "mcpe-text":

@@ -349,10 +349,12 @@ pub struct HleRuntime {
     gl_bound_array_buffer: u32,
     gl_bound_element_array_buffer: u32,
     gl_active_texture: u32,
+    gl_current_program: u32,
     gl_bound_textures: Vec<GuestGlTextureBinding>,
     gl_buffers: Vec<GuestGlBuffer>,
     gl_vertex_attribs: Vec<GuestVertexAttrib>,
     gles_events: VecDeque<GlesEvent>,
+    gles_event_index: usize,
     gles_texture_upload_dump_index: usize,
     next_fd: u32,
     files: Vec<FakeFile>,
@@ -804,6 +806,55 @@ impl GlesClientAttribPayload {
     }
 }
 
+fn gles_event_trace_matches(matcher: &str, event_index: usize, event: &GlesEvent) -> bool {
+    matcher
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            token.eq_ignore_ascii_case("all")
+                || token.eq_ignore_ascii_case(event.kind())
+                || token.eq_ignore_ascii_case(&event_index.to_string())
+                || token.eq_ignore_ascii_case(&format!("event{event_index}"))
+                || gles_event_trace_token_matches(token, event)
+        })
+}
+
+fn gles_event_trace_token_matches(token: &str, event: &GlesEvent) -> bool {
+    match event {
+        GlesEvent::BindTexture { texture, target } => {
+            token == texture.to_string()
+                || token.eq_ignore_ascii_case(&format!("tex{texture}"))
+                || token.eq_ignore_ascii_case(&format!("0x{texture:x}"))
+                || token.eq_ignore_ascii_case(&format!("target{target:x}"))
+        }
+        GlesEvent::UseProgram { program } => {
+            token == program.to_string()
+                || token.eq_ignore_ascii_case(&format!("program{program}"))
+                || token.eq_ignore_ascii_case(&format!("prog{program}"))
+        }
+        GlesEvent::TexImage2D {
+            width,
+            height,
+            format,
+            ty,
+            ..
+        }
+        | GlesEvent::TexSubImage2D {
+            width,
+            height,
+            format,
+            ty,
+            ..
+        } => {
+            token.eq_ignore_ascii_case(&format!("{width}x{height}"))
+                || token.eq_ignore_ascii_case(&format!("fmt{format:04x}"))
+                || token.eq_ignore_ascii_case(&format!("ty{ty:04x}"))
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct HleAllocation {
     ptr: u32,
@@ -924,10 +975,12 @@ impl HleRuntime {
             gl_bound_array_buffer: 0,
             gl_bound_element_array_buffer: 0,
             gl_active_texture: GL_TEXTURE0,
+            gl_current_program: 0,
             gl_bound_textures: Vec::new(),
             gl_buffers: Vec::new(),
             gl_vertex_attribs: Vec::new(),
             gles_events: VecDeque::new(),
+            gles_event_index: 0,
             gles_texture_upload_dump_index: 0,
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
@@ -4807,6 +4860,7 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glUseProgram" => {
+                self.gl_current_program = cpu.reg(0);
                 self.push_gles_event(GlesEvent::UseProgram {
                     program: cpu.reg(0),
                 });
@@ -5120,10 +5174,151 @@ impl HleRuntime {
     }
 
     fn push_gles_event(&mut self, event: GlesEvent) {
+        let event_index = self.gles_event_index;
+        self.gles_event_index = self.gles_event_index.saturating_add(1);
+        self.maybe_trace_gles_event(event_index, &event);
         if self.gles_events.len() == GLES_EVENT_LIMIT {
             self.gles_events.pop_front();
         }
         self.gles_events.push_back(event);
+    }
+
+    fn maybe_trace_gles_event(&self, event_index: usize, event: &GlesEvent) {
+        let Some(path) = std::env::var_os("AEMU_TRACE_GLES_EVENTS_JSONL") else {
+            return;
+        };
+        let limit = std::env::var("AEMU_TRACE_GLES_EVENTS_LIMIT")
+            .ok()
+            .and_then(|raw| parse_env_usize(&raw))
+            .unwrap_or(usize::MAX);
+        if event_index >= limit {
+            return;
+        }
+        let matcher = std::env::var("AEMU_TRACE_GLES_EVENTS_MATCH").ok();
+        if matcher
+            .as_deref()
+            .is_some_and(|matcher| !gles_event_trace_matches(matcher, event_index, event))
+        {
+            return;
+        }
+        let row = self.gles_event_trace_row(event_index, event);
+        if let Err(err) = append_text_file(std::path::Path::new(&path), &format!("{row}\n")) {
+            eprintln!("HLE GLES event trace append failed {:?}: {err}", path);
+        }
+    }
+
+    fn gles_event_trace_row(&self, event_index: usize, event: &GlesEvent) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "index": event_index,
+            "kind": event.kind(),
+            "active_texture": self.gl_active_texture,
+            "current_program": self.gl_current_program,
+            "bound_texture_2d": self.bound_guest_texture(GL_TEXTURE_2D),
+            "payload_len": event.payload_len(),
+        });
+        match event {
+            GlesEvent::ActiveTexture { texture } => {
+                row["texture_unit"] = serde_json::json!(texture);
+            }
+            GlesEvent::BindTexture { target, texture } => {
+                row["target"] = serde_json::json!(target);
+                row["texture"] = serde_json::json!(texture);
+            }
+            GlesEvent::UseProgram { program } => {
+                row["program"] = serde_json::json!(program);
+            }
+            GlesEvent::DrawArrays {
+                mode, first, count, ..
+            } => {
+                row["mode"] = serde_json::json!(mode);
+                row["first"] = serde_json::json!(first);
+                row["count"] = serde_json::json!(count);
+            }
+            GlesEvent::DrawElements {
+                mode,
+                count,
+                ty,
+                indices,
+                ..
+            } => {
+                row["mode"] = serde_json::json!(mode);
+                row["count"] = serde_json::json!(count);
+                row["type"] = serde_json::json!(ty);
+                row["indices"] = serde_json::json!(indices);
+            }
+            GlesEvent::TexImage2D {
+                target,
+                level,
+                internal_format,
+                width,
+                height,
+                format,
+                ty,
+                pixels,
+                ..
+            } => {
+                row["target"] = serde_json::json!(target);
+                row["level"] = serde_json::json!(level);
+                row["internal_format"] = serde_json::json!(internal_format);
+                row["width"] = serde_json::json!(width);
+                row["height"] = serde_json::json!(height);
+                row["format"] = serde_json::json!(format);
+                row["type"] = serde_json::json!(ty);
+                row["pixels"] = serde_json::json!(pixels);
+            }
+            GlesEvent::TexSubImage2D {
+                target,
+                level,
+                xoffset,
+                yoffset,
+                width,
+                height,
+                format,
+                ty,
+                pixels,
+                ..
+            } => {
+                row["target"] = serde_json::json!(target);
+                row["level"] = serde_json::json!(level);
+                row["xoffset"] = serde_json::json!(xoffset);
+                row["yoffset"] = serde_json::json!(yoffset);
+                row["width"] = serde_json::json!(width);
+                row["height"] = serde_json::json!(height);
+                row["format"] = serde_json::json!(format);
+                row["type"] = serde_json::json!(ty);
+                row["pixels"] = serde_json::json!(pixels);
+            }
+            GlesEvent::BindBuffer { target, buffer } => {
+                row["target"] = serde_json::json!(target);
+                row["buffer"] = serde_json::json!(buffer);
+            }
+            GlesEvent::BufferData {
+                target,
+                size,
+                data,
+                usage,
+                ..
+            } => {
+                row["target"] = serde_json::json!(target);
+                row["size"] = serde_json::json!(size);
+                row["data"] = serde_json::json!(data);
+                row["usage"] = serde_json::json!(usage);
+            }
+            GlesEvent::BufferSubData {
+                target,
+                offset,
+                size,
+                data,
+                ..
+            } => {
+                row["target"] = serde_json::json!(target);
+                row["offset"] = serde_json::json!(offset);
+                row["size"] = serde_json::json!(size);
+                row["data"] = serde_json::json!(data);
+            }
+            _ => {}
+        }
+        row
     }
 
     fn bind_guest_texture(&mut self, target: u32, texture: u32) {
@@ -9226,6 +9421,12 @@ fn parse_env_usize(raw: &str) -> Option<usize> {
 }
 
 fn append_text_file(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

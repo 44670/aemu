@@ -283,8 +283,9 @@ pixel counts. Use
 `AEMU_DUMP_SDL_DRAW_CHANGES_MATCH` tokens such as `all`, `DrawElements`,
 `event1671`, `draw42`, `program86`, `prog86`, or `tex325`.
 Use `tools/trace_query.py "$trace_dir" summary`, `texture 325`,
-`program 86`, or `mcpe-text` to inspect texture provenance without manually
-opening PNGs. For MCPE text regression checks, gate captured draws with either:
+`program 86`, `gles-event 21624`, or `mcpe-text` to inspect texture provenance
+without manually opening PNGs. For MCPE text regression checks, gate captured
+draws with either:
 
 ```sh
 tools/trace_check.py "$trace_dir" --expect-hle 0 --expect-sdl 0 --expect-draws 1 \
@@ -299,6 +300,22 @@ For MCPE font experiments, set `AEMU_MCPE_NATIVE_FONT_INIT=1` to let native
 Set `AEMU_MCPE_NATIVE_TEXTURE_DATA=1` to bypass the HLE
 `TextureGroup::getTexture(TextureData const&)` facade and compare native
 TextureData texture pointer behavior.
+
+GLES event timeline tracing:
+
+```sh
+AEMU_TRACE_GLES_EVENTS_JSONL=$trace_dir/gles_events.jsonl \
+AEMU_TRACE_GLES_EVENTS_MATCH=UseProgram,BindTexture,DrawElements,tex325,program86 \
+AEMU_TRACE_GLES_EVENTS_LIMIT=25000 \
+DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --sdl2-frames 1
+tools/trace_query.py "$trace_dir" gles-event 21624 --context 4
+```
+
+`gles_events.jsonl` uses the same event index space as
+`draw_manifest.jsonl:event_index`, so a dumped SDL draw can be traced back to
+the captured GLES import-boundary event. Each row includes the event kind,
+current program, active texture, bound 2D texture, payload length, and
+event-specific fields such as bind target/texture or draw count/type.
 
 Do not treat HLE or patching of MCPE engine methods such as `TextureGroup`,
 `Font`, or render-object methods as the long-term fix. Those hooks are only
