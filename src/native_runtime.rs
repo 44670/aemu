@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::armv6::{Cpu, Isa, Memory, Trap};
 use crate::guest_memory::MappedMemoryError;
@@ -102,6 +104,7 @@ pub struct NativeRuntime {
     main_wait: GuestThreadWait,
     minecraft_resource_bridge: Option<MinecraftResourceBridge>,
     minecraft_resource_bridge_active: bool,
+    trace_native_event_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,6 +417,7 @@ impl NativeRuntime {
             main_wait: GuestThreadWait::Runnable,
             minecraft_resource_bridge,
             minecraft_resource_bridge_active: false,
+            trace_native_event_count: 0,
         })
     }
 
@@ -928,12 +932,15 @@ impl NativeRuntime {
         let trace_mem32 = parse_trace_mem32_specs();
         let trace_mem32_deref = parse_trace_mem32_deref_specs();
         let trace_cxx_strings = parse_trace_cxx_string_specs();
+        let trace_native_events = parse_trace_native_event_specs();
+        let trace_native_events_path = trace_native_events_path();
         let trace_step_interval = parse_trace_step_interval();
         let trace_hle = parse_trace_hle_filter();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
         let trace_mem32_deref_limit = parse_trace_limit("AEMU_TRACE_MEM32_DEREF_LIMIT");
         let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
+        let trace_native_event_limit = parse_trace_limit("AEMU_TRACE_NATIVE_EVENTS_LIMIT");
         let trace_hle_limit = parse_trace_limit("AEMU_TRACE_HLE_LIMIT");
         let mut trace_pc_count = 0usize;
         let mut trace_mem32_count = 0usize;
@@ -1020,6 +1027,18 @@ impl NativeRuntime {
                     }
                     trace_cxx_string_count += 1;
                     self.trace_cxx_string(step_idx, spec);
+                }
+            }
+            if let Some(path) = trace_native_events_path.as_deref() {
+                let pc = self.cpu.pc();
+                for spec in trace_native_events.iter().filter(|spec| spec.pc == pc) {
+                    if trace_native_event_limit
+                        .is_some_and(|limit| self.trace_native_event_count >= limit)
+                    {
+                        break;
+                    }
+                    self.trace_native_event_count += 1;
+                    self.trace_native_event_jsonl(step_idx, self.hle.current_pthread(), spec, path);
                 }
             }
             tail.push_back(NativeRuntimeTraceEntry {
@@ -1491,10 +1510,13 @@ impl NativeRuntime {
         let trace_mem32 = parse_trace_mem32_specs();
         let trace_mem32_deref = parse_trace_mem32_deref_specs();
         let trace_cxx_strings = parse_trace_cxx_string_specs();
+        let trace_native_events = parse_trace_native_event_specs();
+        let trace_native_events_path = trace_native_events_path();
         let trace_pc_limit = parse_trace_limit("AEMU_TRACE_PC_LIMIT");
         let trace_mem32_limit = parse_trace_limit("AEMU_TRACE_MEM32_LIMIT");
         let trace_mem32_deref_limit = parse_trace_limit("AEMU_TRACE_MEM32_DEREF_LIMIT");
         let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
+        let trace_native_event_limit = parse_trace_limit("AEMU_TRACE_NATIVE_EVENTS_LIMIT");
         let main_cpu = std::mem::replace(&mut self.cpu, thread.cpu.clone());
         let previous_thread = self.hle.current_pthread();
         self.hle.set_current_pthread(thread.id);
@@ -1570,6 +1592,18 @@ impl NativeRuntime {
                     thread.trace_cxx_string_count += 1;
                     eprint!("THREAD_TRACE id={} ", thread.id);
                     self.trace_cxx_string(step_idx, spec);
+                }
+            }
+            if let Some(path) = trace_native_events_path.as_deref() {
+                let pc = self.cpu.pc();
+                for spec in trace_native_events.iter().filter(|spec| spec.pc == pc) {
+                    if trace_native_event_limit
+                        .is_some_and(|limit| self.trace_native_event_count >= limit)
+                    {
+                        break;
+                    }
+                    self.trace_native_event_count += 1;
+                    self.trace_native_event_jsonl(step_idx, thread.id, spec, path);
                 }
             }
             push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
@@ -2056,6 +2090,39 @@ impl NativeRuntime {
             ),
         }
     }
+
+    fn trace_native_event_jsonl(
+        &self,
+        step_idx: usize,
+        thread_id: u32,
+        spec: &TraceNativeEventSpec,
+        path: &Path,
+    ) {
+        let regs: serde_json::Map<String, serde_json::Value> = (0..16)
+            .map(|idx| (format!("r{idx}"), serde_json::json!(self.cpu.reg(idx))))
+            .collect();
+        let row = serde_json::json!({
+            "step": step_idx,
+            "thread": thread_id,
+            "pc": spec.pc,
+            "isa": format!("{:?}", self.cpu.isa()),
+            "event": spec.name,
+            "r0": self.cpu.reg(0),
+            "r1": self.cpu.reg(1),
+            "r2": self.cpu.reg(2),
+            "r3": self.cpu.reg(3),
+            "sp": self.cpu.reg(13),
+            "lr": self.cpu.reg(14),
+            "regs": regs,
+            "gles_next_event_index": self.hle.trace_gles_event_index(),
+            "gl_active_texture": self.hle.trace_gl_active_texture(),
+            "gl_current_program": self.hle.trace_gl_current_program(),
+            "gl_bound_texture_2d": self.hle.trace_gl_bound_texture_2d(),
+        });
+        if let Err(err) = append_trace_jsonl(path, &row) {
+            eprintln!("native event trace append failed {path:?}: {err}");
+        }
+    }
 }
 
 fn parse_trace_pc_ranges() -> Vec<(u32, u32)> {
@@ -2097,6 +2164,12 @@ struct TraceCxxStringSpec {
     base: TraceMemBase,
     offset: u32,
     max_len: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceNativeEventSpec {
+    pc: u32,
+    name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2143,6 +2216,38 @@ fn parse_trace_cxx_string_specs() -> Vec<TraceCxxStringSpec> {
         return Vec::new();
     };
     parse_trace_cxx_string_specs_raw(&raw)
+}
+
+fn trace_native_events_path() -> Option<PathBuf> {
+    std::env::var_os("AEMU_TRACE_NATIVE_EVENTS_JSONL").map(PathBuf::from)
+}
+
+fn parse_trace_native_event_specs() -> Vec<TraceNativeEventSpec> {
+    let Some(raw) = std::env::var("AEMU_TRACE_NATIVE_EVENTS").ok() else {
+        return Vec::new();
+    };
+    parse_trace_native_event_specs_raw(&raw)
+}
+
+fn parse_trace_native_event_specs_raw(raw: &str) -> Vec<TraceNativeEventSpec> {
+    raw.split(';')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            let (pc, name) = entry
+                .split_once(':')
+                .map_or((entry, ""), |(pc, name)| (pc.trim(), name.trim()));
+            let pc = parse_u32_env(pc)?;
+            let name = if name.is_empty() {
+                format!("{pc:#010x}")
+            } else {
+                name.to_string()
+            };
+            Some(TraceNativeEventSpec { pc, name })
+        })
+        .collect()
 }
 
 fn parse_trace_cxx_string_specs_raw(raw: &str) -> Vec<TraceCxxStringSpec> {
@@ -2372,6 +2477,22 @@ fn parse_u32_env(raw: &str) -> Option<u32> {
     }
 }
 
+fn append_trace_jsonl(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, row)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+    file.write_all(b"\n")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2406,6 +2527,25 @@ mod tests {
                     pc: 1234,
                     base: TraceMemBase::Addr(0x6000_0000),
                     offsets: vec![0],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_native_event_trace_specs() {
+        assert_eq!(
+            parse_trace_native_event_specs_raw(
+                "0x716f0534:TextureGroup::uploadTexture; 0x716eb818"
+            ),
+            vec![
+                TraceNativeEventSpec {
+                    pc: 0x716f_0534,
+                    name: "TextureGroup::uploadTexture".to_string(),
+                },
+                TraceNativeEventSpec {
+                    pc: 0x716e_b818,
+                    name: "0x716eb818".to_string(),
                 },
             ]
         );
@@ -3423,6 +3563,7 @@ mod tests {
             main_wait: GuestThreadWait::Runnable,
             minecraft_resource_bridge: None,
             minecraft_resource_bridge_active: false,
+            trace_native_event_count: 0,
         };
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));

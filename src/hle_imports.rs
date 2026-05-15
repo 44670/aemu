@@ -1125,6 +1125,22 @@ impl HleRuntime {
         self.current_pthread
     }
 
+    pub(crate) fn trace_gles_event_index(&self) -> usize {
+        self.gles_event_index
+    }
+
+    pub(crate) fn trace_gl_active_texture(&self) -> u32 {
+        self.gl_active_texture
+    }
+
+    pub(crate) fn trace_gl_current_program(&self) -> u32 {
+        self.gl_current_program
+    }
+
+    pub(crate) fn trace_gl_bound_texture_2d(&self) -> u32 {
+        self.bound_guest_texture(GL_TEXTURE_2D)
+    }
+
     pub(crate) fn set_current_pthread(&mut self, thread: u32) {
         self.current_pthread = thread;
     }
@@ -6340,6 +6356,9 @@ fn is_target_symbol(name: &str) -> bool {
     }
     if name == "_ZN4Font4initEv" {
         return std::env::var_os("AEMU_MCPE_NATIVE_FONT_INIT").is_none();
+    }
+    if name == "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" {
+        return std::env::var_os("AEMU_MCPE_NATIVE_TEXTURE_PAIR").is_none();
     }
     if name == "_ZN3mce12TextureGroup10getTextureERK11TextureData" {
         return std::env::var_os("AEMU_MCPE_NATIVE_TEXTURE_DATA").is_none();

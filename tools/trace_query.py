@@ -66,6 +66,11 @@ def native_log_path(args) -> pathlib.Path:
     return pathlib.Path(args.native_log) if args.native_log else root / "run.log"
 
 
+def native_events_path(args) -> pathlib.Path:
+    root = pathlib.Path(args.trace_dir)
+    return pathlib.Path(args.native_events) if args.native_events else root / "native_events.jsonl"
+
+
 def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path]:
     _root, hle_dir, draw_dir = trace_paths(args)
     uploads = read_jsonl(hle_dir / "manifest.jsonl")
@@ -75,6 +80,11 @@ def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path
 
 def load_gles_events(args) -> tuple[list[dict], pathlib.Path]:
     path = gles_events_path(args)
+    return read_jsonl(path), path
+
+
+def load_native_events(args) -> tuple[list[dict], pathlib.Path]:
+    path = native_events_path(args)
     return read_jsonl(path), path
 
 
@@ -161,11 +171,13 @@ def texture_rows(texture: int, uploads: list[dict], draws: list[dict]) -> dict:
 def print_summary(args) -> int:
     uploads, draws, hle_manifest, draw_manifest = load_trace(args)
     gles_events, gles_path = load_gles_events(args)
+    native_events, native_path = load_native_events(args)
     programs = sorted({row.get("program") for row in draws if isinstance(row.get("program"), int)})
     textures = sorted({row.get("texture") for row in draws if isinstance(row.get("texture"), int)})
     print(f"hle_manifest={hle_manifest} rows={len(uploads)}")
     print(f"draw_manifest={draw_manifest} rows={len(draws)}")
     print(f"gles_events={gles_path} rows={len(gles_events)}")
+    print(f"native_events={native_path} rows={len(native_events)}")
     print(f"draw_programs={','.join(map(str, programs[:24])) or 'none'}")
     if len(programs) > 24:
         print(f"draw_programs_more={len(programs) - 24}")
@@ -213,6 +225,47 @@ def print_gles_event(args) -> int:
     print(f"gles-event {args.event}: path={path} rows={len(rows)}")
     for row in rows[: args.limit]:
         print(format_gles_event(row))
+    return 0
+
+
+def format_native_event(row: dict) -> str:
+    parts = [
+        f"step={row.get('step')}",
+        f"thread={row.get('thread')}",
+        f"pc=0x{row.get('pc'):08x}" if isinstance(row.get("pc"), int) else f"pc={row.get('pc')}",
+        f"event={row.get('event')}",
+        f"isa={row.get('isa')}",
+        f"r0=0x{row.get('r0'):08x}" if isinstance(row.get("r0"), int) else f"r0={row.get('r0')}",
+        f"r1=0x{row.get('r1'):08x}" if isinstance(row.get("r1"), int) else f"r1={row.get('r1')}",
+        f"r2=0x{row.get('r2'):08x}" if isinstance(row.get("r2"), int) else f"r2={row.get('r2')}",
+        f"r3=0x{row.get('r3'):08x}" if isinstance(row.get("r3"), int) else f"r3={row.get('r3')}",
+        f"sp=0x{row.get('sp'):08x}" if isinstance(row.get("sp"), int) else f"sp={row.get('sp')}",
+        f"lr=0x{row.get('lr'):08x}" if isinstance(row.get("lr"), int) else f"lr={row.get('lr')}",
+        f"gles_next={row.get('gles_next_event_index')}",
+        f"program={row.get('gl_current_program')}",
+        f"bound_tex2d={row.get('gl_bound_texture_2d')}",
+    ]
+    return " ".join(parts)
+
+
+def native_event_matches_contains(row: dict, needle: str) -> bool:
+    if needle in str(row.get("event", "")).lower():
+        return True
+    pc = row.get("pc")
+    return isinstance(pc, int) and needle in f"0x{pc:08x}".lower()
+
+
+def print_native_event(args) -> int:
+    events, path = load_native_events(args)
+    rows = events
+    if args.pc is not None:
+        rows = [row for row in rows if row_int(row, "pc") == args.pc]
+    if args.contains:
+        needle = args.contains.lower()
+        rows = [row for row in rows if native_event_matches_contains(row, needle)]
+    print(f"native-event: path={path} rows={len(rows)}")
+    for row in rows[: args.limit]:
+        print(format_native_event(row))
     return 0
 
 
@@ -576,6 +629,35 @@ def run_self_test() -> None:
         assert native_rows[0]["branch"] == "fallback"
         assert native_rows[0]["resource"] == ""
         assert native_rows[0]["gl"] == 325
+        (root / "native_events.jsonl").write_text(
+            json.dumps(
+                {
+                    "step": 17,
+                    "thread": 1,
+                    "pc": 0x716EB818,
+                    "event": "TextureOGL::bindTexture",
+                    "isa": "Thumb",
+                    "r0": 0x60FF33F0,
+                    "r1": 0x145,
+                    "r2": 0,
+                    "r3": 0,
+                    "sp": 0x6DFF0000,
+                    "lr": 0x716F0000,
+                    "gles_next_event_index": 21600,
+                    "gl_current_program": 79,
+                    "gl_bound_texture_2d": 325,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        event_args = argparse.Namespace(
+            trace_dir=str(root), native_events=None, pc=None, contains="bindtexture", limit=4
+        )
+        native_events, _events_path = load_native_events(event_args)
+        assert len(native_events) == 1
+        assert native_event_matches_contains(native_events[0], "bindtexture")
+        assert "gles_next=21600" in format_native_event(native_events[0])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -587,6 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--draw-dir", help="override SDL draw manifest directory")
     parser.add_argument("--gles-events", help="override GLES event JSONL path")
     parser.add_argument("--native-log", help="override native stderr trace log path")
+    parser.add_argument("--native-events", help="override native event JSONL path")
     parser.add_argument("--self-test", action="store_true", help="run built-in self-test")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -600,6 +683,13 @@ def build_parser() -> argparse.ArgumentParser:
     event.add_argument("event", type=parse_u32)
     event.add_argument("--context", type=int, default=3)
     event.add_argument("--limit", type=int, default=40)
+
+    native_event = subparsers.add_parser(
+        "native-event", help="show structured native PC event trace rows"
+    )
+    native_event.add_argument("--pc", type=parse_u32)
+    native_event.add_argument("--contains")
+    native_event.add_argument("--limit", type=int, default=40)
 
     program = subparsers.add_parser("program", help="show captured draws for one GL program")
     program.add_argument("program", type=parse_u32)
@@ -638,6 +728,8 @@ def main(argv=None) -> int:
         return print_texture(args)
     if args.command == "gles-event":
         return print_gles_event(args)
+    if args.command == "native-event":
+        return print_native_event(args)
     if args.command == "program":
         return print_program(args)
     if args.command == "mcpe-text":
