@@ -113,6 +113,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("qemu-tcg-smoke") => {
+            if let Err(err) = run_qemu_tcg_smoke() {
+                eprintln!("qemu tcg smoke failed: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("sdl2-shell") => run_sdl2_shell(args.collect()),
         _ => {
             eprintln!("usage:");
@@ -125,9 +131,31 @@ fn main() {
             eprintln!(
                 "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|qemu-armv7a-tcg] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
             );
+            eprintln!("  aemu qemu-tcg-smoke");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_qemu_tcg_smoke() -> Result<(), String> {
+    let runner = aemu::qemu_tcg::QemuArmTcgRunner::probe().map_err(|err| err.to_string())?;
+    let exit = runner
+        .run_linux_exit_asm(
+            aemu::qemu_tcg::QemuTcgArch::Armv7a,
+            aemu::qemu_tcg::armv7a_smoke_program(),
+        )
+        .map_err(|err| err.to_string())?;
+    println!("qemu-armv7a-tcg smoke exit: {}", exit.status_text);
+    if exit.code != Some(42) {
+        return Err(format!("expected exit code 42, got {:?}", exit.code));
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_qemu_tcg_smoke() -> Result<(), String> {
+    Err("qemu-tcg-smoke is only available on native hosts".to_string())
 }
 
 fn print_probe(probe: &aemu::elf_probe::ElfProbe) {
