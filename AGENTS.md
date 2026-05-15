@@ -266,6 +266,72 @@ Montgomery products can be checked against a host oracle:
 tools/trace_query.py target/mcpe-smoke-<stamp> bn-mont-check
 ```
 
+Use `ec-point-ops` after Montgomery multiplication checks out; it traces
+bundled OpenSSL `ec_GFp_simple_dbl`, `ec_GFp_simple_add`, and
+`ec_GFp_simple_make_affine` point-coordinate inputs/outputs so the bad public
+point can be narrowed to point arithmetic or affine conversion:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset ec-point-ops \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 80
+```
+
+Use `point-affine` when `EC_POINT_mul` produces the correct Jacobian point but
+`ec_GFp_simple_point2oct` serializes the wrong affine coordinates; it traces
+`ec_GFp_simple_point_get_affine_coordinates` through decoded Z, Z inverse,
+Z-inverse squared, and final output `BIGNUM` limbs:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset point-affine \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --contains point_get_affine --limit 120
+```
+
+If affine tracing shows `Z^-2` diverging after
+`ec_GFp_simple_field_sqr -> BN_mod_sqr`, use `bn-mod-sqr` to check bundled
+OpenSSL modular squaring directly against a host oracle:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset bn-mod-sqr \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> bn-mod-sqr-check
+```
+
+If `bn-mod-sqr-check` reports `square_ok=True` but the final reduced result is
+wrong, use `bn-nnmod` to isolate the bundled OpenSSL division/remainder path:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset bn-nnmod \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> bn-nnmod-check
+```
+
+If `bn-nnmod-check` points at `BN_div`, first verify the 64-bit division import
+used by the quotient-estimation path:
+
+```sh
+tools/mcpe_smoke.py --trace-hle =__aeabi_uldivmod --trace-hle-limit 80 \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> hle-uldivmod-check
+```
+
+The static OpenSSL `bn_div_words` wrapper is available as an extra check, but
+the current MCPE `BN_div` hot path may call `__aeabi_uldivmod` through PLT
+directly and record no `bn_div_words` events:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset bn-div-words \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-words-check
+```
+
 Use `keygen-serialize` to inspect whether `i2d_ECPrivateKey` / `point2oct`
 serializes the generated public point correctly:
 

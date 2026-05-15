@@ -1079,7 +1079,7 @@ impl NativeRuntime {
                     {
                         trace_hle_count += 1;
                         eprintln!(
-                            "HLE function={:#010x} step={} pc={:#010x} name={} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x}",
+                            "HLE function={:#010x} step={} pc={:#010x} name={} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} ret0={:#010x} ret1={:#010x} ret2={:#010x} ret3={:#010x}",
                             address,
                             step_idx,
                             hle_address,
@@ -1088,6 +1088,10 @@ impl NativeRuntime {
                             args[1],
                             args[2],
                             args[3],
+                            self.cpu.reg(0),
+                            self.cpu.reg(1),
+                            self.cpu.reg(2),
+                            self.cpu.reg(3),
                         );
                     }
                     if should_service_threads {

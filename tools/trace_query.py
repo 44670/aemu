@@ -497,6 +497,572 @@ def print_bn_mont_check(args) -> int:
     return 1 if mismatches or incomplete else 0
 
 
+def bn_mod_sqr_sequences(events: list[dict]) -> list[dict]:
+    sequences = []
+    pending_by_thread: dict[int | None, list[dict]] = {}
+    for row in events:
+        event = row.get("event")
+        thread = row.get("thread") if isinstance(row.get("thread"), int) else None
+        if event == "BN_mod_sqr.entry":
+            pending_by_thread.setdefault(thread, []).append({"entry": row})
+        elif event == "BN_mod_sqr.after-bn-sqr":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                pending[-1]["after_sqr"] = row
+        elif event == "BN_mod_sqr.before-bn-nnmod":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                pending[-1]["before_nnmod"] = row
+        elif event == "BN_mod_sqr.return":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                seq = pending.pop()
+                seq["return"] = row
+                sequences.append(seq)
+    return sequences
+
+
+def bignum_value(
+    row: dict, base: str, sample_prefix: str, name: str
+) -> tuple[int | None, int | None, str | None, str | None]:
+    top = mem32_field_value(row, base, f"{base}+0x4")
+    raw = byte_sample(row, sample_prefix)
+    if not isinstance(top, int):
+        return None, None, None, f"missing {name} BIGNUM top"
+    if top < 0:
+        return None, top, None, f"negative {name} BIGNUM top {top}"
+    if raw is None:
+        return None, top, None, f"missing {name} BIGNUM byte sample"
+    required_len = top * 4
+    if len(raw) < required_len:
+        return None, top, raw.hex(), f"short {name} BIGNUM sample for top={top}"
+    return little_int(raw, top), top, raw[:required_len].hex(), None
+
+
+def check_bn_mod_sqr_sequence(seq: dict) -> tuple[bool, dict]:
+    entry = seq["entry"]
+    ret = seq["return"]
+    value, value_top, value_hex, value_err = bignum_value(entry, "r1", "*r1+0", "input")
+    modulus, modulus_top, modulus_hex, modulus_err = bignum_value(
+        entry, "r2", "*r2+0", "modulus"
+    )
+    output, output_top, output_hex, output_err = bignum_value(ret, "r6", "*r6+0", "output")
+    detail = {
+        "entry_step": entry.get("step"),
+        "return_step": ret.get("step"),
+        "input_top": value_top,
+        "modulus_top": modulus_top,
+        "output_top": output_top,
+    }
+    errors = [err for err in (value_err, modulus_err, output_err) if err]
+    if errors:
+        detail["error"] = "; ".join(errors)
+        return False, detail
+    if modulus is None or modulus <= 0:
+        detail["error"] = f"invalid modulus 0x{modulus or 0:x}"
+        return False, detail
+    assert value is not None
+    assert output is not None
+    assert modulus_top is not None
+    after_sqr = seq.get("after_sqr")
+    if isinstance(after_sqr, dict):
+        square, square_top, square_hex, square_err = bignum_value(
+            after_sqr, "r6", "*r6+0", "square"
+        )
+        detail["square_step"] = after_sqr.get("step")
+        detail["square_top"] = square_top
+        if square_err:
+            detail["square_error"] = square_err
+        elif square is not None:
+            expected_square = value * value
+            square_words = max(square_top or 0, (expected_square.bit_length() + 31) // 32, 1)
+            detail["square_actual"] = little_hex(square, square_words)
+            detail["square_expected"] = little_hex(expected_square, square_words)
+            detail["square_ok"] = square == expected_square
+    before_nnmod = seq.get("before_nnmod")
+    if isinstance(before_nnmod, dict):
+        before_value, before_top, before_hex, before_err = bignum_value(
+            before_nnmod, "r6", "*r6+0", "pre-reduce"
+        )
+        detail["before_nnmod_step"] = before_nnmod.get("step")
+        detail["before_nnmod_top"] = before_top
+        if before_err:
+            detail["before_nnmod_error"] = before_err
+        elif before_value is not None:
+            detail["before_nnmod"] = before_hex
+            if "square_ok" in detail:
+                detail["before_nnmod_matches_square"] = before_value == value * value
+    expected = (value * value) % modulus
+    compare_words = max(output_top or 0, modulus_top, 1)
+    detail["actual"] = little_hex(output, compare_words)
+    detail["expected"] = little_hex(expected, compare_words)
+    detail["input"] = value_hex
+    detail["modulus"] = modulus_hex
+    return output == expected and detail.get("square_ok", True), detail
+
+
+def print_bn_mod_sqr_check(args) -> int:
+    events, path = load_native_events(args)
+    sequences = bn_mod_sqr_sequences(events)
+    if not sequences:
+        raise TraceQueryError(f"{path}: no BN_mod_sqr.entry -> BN_mod_sqr.return pairs found")
+    checked = 0
+    mismatches = []
+    incomplete = []
+    for seq in sequences:
+        ok, detail = check_bn_mod_sqr_sequence(seq)
+        if "error" in detail:
+            incomplete.append(detail)
+            continue
+        checked += 1
+        if not ok:
+            mismatches.append(detail)
+
+    print(
+        f"bn-mod-sqr-check: path={path} pairs={len(sequences)} "
+        f"checked={checked} mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"entry_step={detail.get('entry_step')} return_step={detail.get('return_step')} "
+            f"input_top={detail.get('input_top')} modulus_top={detail.get('modulus_top')} "
+            f"output_top={detail.get('output_top')}"
+        )
+        print(f"  actual  ={detail.get('actual')}")
+        print(f"  expected={detail.get('expected')}")
+        if "square_ok" in detail:
+            print(
+                f"  square_ok={detail.get('square_ok')} "
+                f"square_step={detail.get('square_step')} square_top={detail.get('square_top')}"
+            )
+            print(f"  square_actual  ={detail.get('square_actual')}")
+            print(f"  square_expected={detail.get('square_expected')}")
+        if "before_nnmod_matches_square" in detail:
+            print(
+                f"  before_nnmod_matches_square={detail.get('before_nnmod_matches_square')} "
+                f"before_nnmod_step={detail.get('before_nnmod_step')} "
+                f"before_nnmod_top={detail.get('before_nnmod_top')}"
+            )
+        print(f"  input   ={detail.get('input')}")
+        print(f"  modulus ={detail.get('modulus')}")
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"entry_step={detail.get('entry_step')} return_step={detail.get('return_step')} "
+            f"input_top={detail.get('input_top')} modulus_top={detail.get('modulus_top')} "
+            f"output_top={detail.get('output_top')} error={detail.get('error')}"
+        )
+    return 1 if mismatches or incomplete else 0
+
+
+def bn_nnmod_sequences(events: list[dict]) -> list[dict]:
+    sequences = []
+    pending_by_thread: dict[int | None, list[dict]] = {}
+    for row in events:
+        event = row.get("event")
+        thread = row.get("thread") if isinstance(row.get("thread"), int) else None
+        if event == "BN_nnmod.entry":
+            pending_by_thread.setdefault(thread, []).append({"entry": row})
+        elif event == "BN_nnmod.after-bn-div":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                pending[-1]["after_div"] = row
+        elif event == "BN_nnmod.before-corrective-add":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                pending[-1]["before_corrective_add"] = row
+        elif event == "BN_nnmod.return":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                seq = pending.pop()
+                seq["return"] = row
+                sequences.append(seq)
+    return sequences
+
+
+def check_bn_nnmod_sequence(seq: dict) -> tuple[bool, dict]:
+    entry = seq["entry"]
+    ret = seq["return"]
+    value, value_top, value_hex, value_err = bignum_value(entry, "r1", "*r1+0", "input")
+    modulus, modulus_top, modulus_hex, modulus_err = bignum_value(
+        entry, "r2", "*r2+0", "modulus"
+    )
+    output, output_top, output_hex, output_err = bignum_value(ret, "r4", "*r4+0", "output")
+    input_neg = mem32_field_value(entry, "r1", "r1+0xc") == 1
+    output_neg = mem32_field_value(ret, "r4", "r4+0xc") == 1
+    detail = {
+        "entry_step": entry.get("step"),
+        "return_step": ret.get("step"),
+        "input_top": value_top,
+        "modulus_top": modulus_top,
+        "output_top": output_top,
+        "input_neg": input_neg,
+        "output_neg": output_neg,
+    }
+    errors = [err for err in (value_err, modulus_err, output_err) if err]
+    if errors:
+        detail["error"] = "; ".join(errors)
+        return False, detail
+    if modulus is None or modulus <= 0:
+        detail["error"] = f"invalid modulus 0x{modulus or 0:x}"
+        return False, detail
+    assert value is not None
+    assert output is not None
+    assert modulus_top is not None
+    signed_value = -value if input_neg else value
+    expected = signed_value % modulus
+    expected_div_remainder = value % modulus if not input_neg else -(value % modulus)
+    signed_output = -output if output_neg else output
+    compare_words = max(output_top or 0, modulus_top, 1)
+    detail["actual"] = little_hex(output, compare_words)
+    detail["expected"] = little_hex(expected, compare_words)
+    detail["input"] = value_hex
+    detail["modulus"] = modulus_hex
+    after_div = seq.get("after_div")
+    if isinstance(after_div, dict):
+        remainder, remainder_top, _remainder_hex, remainder_err = bignum_value(
+            after_div, "r4", "*r4+0", "BN_div remainder"
+        )
+        detail["after_div_step"] = after_div.get("step")
+        detail["after_div_top"] = remainder_top
+        detail["after_div_neg"] = mem32_field_value(after_div, "r4", "r4+0xc")
+        if remainder_err:
+            detail["after_div_error"] = remainder_err
+        elif remainder is not None:
+            detail["after_div_actual"] = little_hex(remainder, compare_words)
+            remainder_neg = detail["after_div_neg"] == 1
+            signed_remainder = -remainder if remainder_neg else remainder
+            detail["after_div_ok"] = signed_remainder == expected_div_remainder
+    return signed_output == expected and detail.get("after_div_ok", True), detail
+
+
+def print_bn_nnmod_check(args) -> int:
+    events, path = load_native_events(args)
+    sequences = bn_nnmod_sequences(events)
+    if not sequences:
+        raise TraceQueryError(f"{path}: no BN_nnmod.entry -> BN_nnmod.return pairs found")
+    checked = 0
+    mismatches = []
+    incomplete = []
+    for seq in sequences:
+        ok, detail = check_bn_nnmod_sequence(seq)
+        if "error" in detail:
+            incomplete.append(detail)
+            continue
+        checked += 1
+        if not ok:
+            mismatches.append(detail)
+
+    print(
+        f"bn-nnmod-check: path={path} pairs={len(sequences)} "
+        f"checked={checked} mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"entry_step={detail.get('entry_step')} return_step={detail.get('return_step')} "
+            f"input_top={detail.get('input_top')} modulus_top={detail.get('modulus_top')} "
+            f"output_top={detail.get('output_top')} input_neg={detail.get('input_neg')} "
+            f"output_neg={detail.get('output_neg')}"
+        )
+        print(f"  actual  ={detail.get('actual')}")
+        print(f"  expected={detail.get('expected')}")
+        if "after_div_ok" in detail:
+            print(
+                f"  after_div_ok={detail.get('after_div_ok')} "
+                f"after_div_step={detail.get('after_div_step')} "
+                f"after_div_top={detail.get('after_div_top')} "
+                f"after_div_neg={detail.get('after_div_neg')}"
+            )
+            print(f"  after_div_actual={detail.get('after_div_actual')}")
+        print(f"  input   ={detail.get('input')}")
+        print(f"  modulus ={detail.get('modulus')}")
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"entry_step={detail.get('entry_step')} return_step={detail.get('return_step')} "
+            f"input_top={detail.get('input_top')} modulus_top={detail.get('modulus_top')} "
+            f"output_top={detail.get('output_top')} error={detail.get('error')}"
+        )
+    return 1 if mismatches or incomplete else 0
+
+
+def bn_div_words_pairs(events: list[dict]) -> list[tuple[dict, dict]]:
+    pairs = []
+    pending_by_thread: dict[int | None, list[dict]] = {}
+    for row in events:
+        event = row.get("event")
+        thread = row.get("thread") if isinstance(row.get("thread"), int) else None
+        if event == "bn_div_words.entry":
+            pending_by_thread.setdefault(thread, []).append(row)
+        elif event == "bn_div_words.return":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                pairs.append((pending.pop(), row))
+    return pairs
+
+
+def check_bn_div_words_pair(entry: dict, ret: dict) -> tuple[bool, dict]:
+    high = row_int(entry, "r0")
+    low = row_int(entry, "r1")
+    divisor = row_int(entry, "r2")
+    actual = row_int(ret, "r0")
+    detail = {
+        "entry_step": entry.get("step"),
+        "return_step": ret.get("step"),
+        "high": high,
+        "low": low,
+        "divisor": divisor,
+        "actual": actual,
+    }
+    if high is None or low is None or divisor is None or actual is None:
+        detail["error"] = "missing entry or return register"
+        return False, detail
+    if divisor == 0:
+        detail["error"] = "zero divisor"
+        return False, detail
+    numerator = ((high & 0xFFFF_FFFF) << 32) | (low & 0xFFFF_FFFF)
+    expected = (numerator // divisor) & 0xFFFF_FFFF
+    detail["expected"] = expected
+    detail["numerator"] = numerator
+    return actual == expected, detail
+
+
+def print_bn_div_words_check(args) -> int:
+    events, path = load_native_events(args)
+    pairs = bn_div_words_pairs(events)
+    if not pairs:
+        raise TraceQueryError(f"{path}: no bn_div_words.entry -> bn_div_words.return pairs found")
+    checked = 0
+    mismatches = []
+    incomplete = []
+    for entry, ret in pairs:
+        ok, detail = check_bn_div_words_pair(entry, ret)
+        if "error" in detail:
+            incomplete.append(detail)
+            continue
+        checked += 1
+        if not ok:
+            mismatches.append(detail)
+    print(
+        f"bn-div-words-check: path={path} pairs={len(pairs)} "
+        f"checked={checked} mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"entry_step={detail.get('entry_step')} return_step={detail.get('return_step')} "
+            f"high=0x{detail.get('high'):08x} low=0x{detail.get('low'):08x} "
+            f"divisor=0x{detail.get('divisor'):08x}"
+        )
+        print(f"  numerator=0x{detail.get('numerator'):016x}")
+        print(f"  actual=0x{detail.get('actual'):08x} expected=0x{detail.get('expected'):08x}")
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"entry_step={detail.get('entry_step')} return_step={detail.get('return_step')} "
+            f"error={detail.get('error')}"
+        )
+    return 1 if mismatches or incomplete else 0
+
+
+P384_P = int(
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
+    16,
+)
+P384_B = int(
+    "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef",
+    16,
+)
+P384_WORDS = 12
+P384_BYTES = P384_WORDS * 4
+P384_R = 1 << (32 * P384_WORDS)
+P384_R_INV = pow(P384_R, -1, P384_P)
+
+
+def mont_decode_p384(raw: bytes) -> int:
+    return (little_int(raw, P384_WORDS) * P384_R_INV) % P384_P
+
+
+def point_samples(row: dict, reg: str) -> tuple[dict | None, str | None]:
+    x_raw = byte_sample(row, f"*{reg}+0x4")
+    y_raw = byte_sample(row, f"*{reg}+0x18")
+    z_raw = byte_sample(row, f"*{reg}+0x2c")
+    if x_raw is None or y_raw is None or z_raw is None:
+        return None, f"missing {reg} coordinate byte samples"
+    if min(len(x_raw), len(y_raw), len(z_raw)) < P384_BYTES:
+        return None, f"short {reg} coordinate byte sample"
+    return {
+        "reg": reg,
+        "x_mont": little_int(x_raw, P384_WORDS),
+        "y_mont": little_int(y_raw, P384_WORDS),
+        "z_mont": little_int(z_raw, P384_WORDS),
+        "x": mont_decode_p384(x_raw),
+        "y": mont_decode_p384(y_raw),
+        "z": mont_decode_p384(z_raw),
+        "z_is_one": mem32_field_value(row, reg, f"{reg}+0x40"),
+    }, None
+
+
+def affine_from_jacobian(point: dict) -> tuple[int, int] | None:
+    z = 1 if point.get("z_is_one") == 1 else point["z"]
+    if z == 0:
+        return None
+    z_inv = pow(z, -1, P384_P)
+    z2_inv = (z_inv * z_inv) % P384_P
+    z3_inv = (z2_inv * z_inv) % P384_P
+    return ((point["x"] * z2_inv) % P384_P, (point["y"] * z3_inv) % P384_P)
+
+
+def p384_add_affine(
+    left: tuple[int, int] | None, right: tuple[int, int] | None
+) -> tuple[int, int] | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    x1, y1 = left
+    x2, y2 = right
+    if x1 == x2:
+        if (y1 + y2) % P384_P == 0:
+            return None
+        return p384_double_affine(left)
+    slope = ((y2 - y1) * pow((x2 - x1) % P384_P, -1, P384_P)) % P384_P
+    x3 = (slope * slope - x1 - x2) % P384_P
+    y3 = (slope * (x1 - x3) - y1) % P384_P
+    return (x3, y3)
+
+
+def p384_double_affine(point: tuple[int, int] | None) -> tuple[int, int] | None:
+    if point is None:
+        return None
+    x, y = point
+    if y == 0:
+        return None
+    slope = ((3 * x * x - 3) * pow((2 * y) % P384_P, -1, P384_P)) % P384_P
+    x3 = (slope * slope - 2 * x) % P384_P
+    y3 = (slope * (x - x3) - y) % P384_P
+    return (x3, y3)
+
+
+def point_on_p384(point: tuple[int, int] | None) -> bool:
+    if point is None:
+        return True
+    x, y = point
+    return (y * y - (x * x * x - 3 * x + P384_B)) % P384_P == 0
+
+
+def fmt_p384_point(point: tuple[int, int] | None) -> str:
+    if point is None:
+        return "infinity"
+    x, y = point
+    return f"x={x:096x} y={y:096x}"
+
+
+def ec_point_pairs(events: list[dict], entry_name: str, return_name: str) -> list[tuple[dict, dict]]:
+    pairs = []
+    pending = None
+    for row in events:
+        event = row.get("event")
+        if event == entry_name:
+            pending = row
+        elif event == return_name and pending is not None:
+            pairs.append((pending, row))
+            pending = None
+    return pairs
+
+
+def check_ec_dbl_pair(entry: dict, ret: dict) -> tuple[bool, dict]:
+    src, err = point_samples(entry, "r2")
+    if err:
+        return False, {"entry_step": entry.get("step"), "error": err}
+    out, err = point_samples(ret, "r10")
+    if err:
+        return False, {"entry_step": entry.get("step"), "after_step": ret.get("step"), "error": err}
+    src_affine = affine_from_jacobian(src)
+    out_affine = affine_from_jacobian(out)
+    expected = p384_double_affine(src_affine)
+    return out_affine == expected, {
+        "op": "dbl",
+        "entry_step": entry.get("step"),
+        "after_step": ret.get("step"),
+        "input_on_curve": point_on_p384(src_affine),
+        "output_on_curve": point_on_p384(out_affine),
+        "input": fmt_p384_point(src_affine),
+        "actual": fmt_p384_point(out_affine),
+        "expected": fmt_p384_point(expected),
+    }
+
+
+def check_ec_add_pair(entry: dict, ret: dict) -> tuple[bool, dict]:
+    left, err = point_samples(entry, "r2")
+    if err:
+        return False, {"entry_step": entry.get("step"), "error": err}
+    right, err = point_samples(entry, "r3")
+    if err:
+        return False, {"entry_step": entry.get("step"), "error": err}
+    out, err = point_samples(ret, "r8")
+    if err:
+        return False, {"entry_step": entry.get("step"), "after_step": ret.get("step"), "error": err}
+    left_affine = affine_from_jacobian(left)
+    right_affine = affine_from_jacobian(right)
+    out_affine = affine_from_jacobian(out)
+    expected = p384_add_affine(left_affine, right_affine)
+    return out_affine == expected, {
+        "op": "add",
+        "entry_step": entry.get("step"),
+        "after_step": ret.get("step"),
+        "left_on_curve": point_on_p384(left_affine),
+        "right_on_curve": point_on_p384(right_affine),
+        "output_on_curve": point_on_p384(out_affine),
+        "left": fmt_p384_point(left_affine),
+        "right": fmt_p384_point(right_affine),
+        "actual": fmt_p384_point(out_affine),
+        "expected": fmt_p384_point(expected),
+    }
+
+
+def print_ec_point_check(args) -> int:
+    events, path = load_native_events(args)
+    checks = []
+    for entry, ret in ec_point_pairs(
+        events, "ec_GFp_simple_dbl.entry", "ec_GFp_simple_dbl.return"
+    ):
+        checks.append(check_ec_dbl_pair(entry, ret))
+    for entry, ret in ec_point_pairs(
+        events, "ec_GFp_simple_add.entry", "ec_GFp_simple_add.return"
+    ):
+        checks.append(check_ec_add_pair(entry, ret))
+    if not checks:
+        raise TraceQueryError(f"{path}: no ec_GFp_simple_dbl/add pairs found")
+    failures = [detail for ok, detail in checks if not ok]
+    print(
+        f"ec-point-check: path={path} checked={len(checks)} "
+        f"failures={len(failures)}"
+    )
+    for detail in failures[: args.limit]:
+        print(
+            "failure "
+            f"op={detail.get('op')} entry_step={detail.get('entry_step')} "
+            f"after_step={detail.get('after_step')} error={detail.get('error')}"
+        )
+        for key in (
+            "input_on_curve",
+            "left_on_curve",
+            "right_on_curve",
+            "output_on_curve",
+            "input",
+            "left",
+            "right",
+            "actual",
+            "expected",
+        ):
+            if key in detail:
+                print(f"  {key}={detail.get(key)}")
+    return 1 if failures else 0
+
+
 MEM32_RE = re.compile(
     r"(?P<prefix>THREAD_TRACE id=(?P<thread>\d+) )?"
     r"MEM32 step=(?P<step>\d+) pc=(?P<pc>0x[0-9a-fA-F]+) "
@@ -510,6 +1076,14 @@ CXX_STRING_RE = re.compile(
     r"CXX_STRING step=(?P<step>\d+) pc=(?P<pc>0x[0-9a-fA-F]+) "
     r"(?P<base>[a-z0-9]+)\+(?P<offset>0x[0-9a-fA-F]+|0)=0x[0-9a-fA-F]+ "
     r"data=(?P<data>0x[0-9a-fA-F]+) len=(?P<len>\d+) bytes=(?P<bytes>.*)"
+)
+HLE_RE = re.compile(
+    r"HLE function=(?P<function>0x[0-9a-fA-F]+) step=(?P<step>\d+) "
+    r"pc=(?P<pc>0x[0-9a-fA-F]+) name=(?P<name>\S+) "
+    r"r0=(?P<r0>0x[0-9a-fA-F]+) r1=(?P<r1>0x[0-9a-fA-F]+) "
+    r"r2=(?P<r2>0x[0-9a-fA-F]+) r3=(?P<r3>0x[0-9a-fA-F]+)"
+    r"(?: ret0=(?P<ret0>0x[0-9a-fA-F]+) ret1=(?P<ret1>0x[0-9a-fA-F]+) "
+    r"ret2=(?P<ret2>0x[0-9a-fA-F]+) ret3=(?P<ret3>0x[0-9a-fA-F]+))?"
 )
 
 
@@ -648,6 +1222,91 @@ def parse_native_log(args) -> tuple[list[dict], pathlib.Path]:
             rows.append(row)
 
     return rows, path
+
+
+def parse_hle_log(args) -> tuple[list[dict], pathlib.Path]:
+    path = native_log_path(args)
+    if not path.exists():
+        raise TraceQueryError(f"{path}: missing native log")
+    rows = []
+    for line_no, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        match = HLE_RE.search(line)
+        if not match:
+            continue
+        row = {
+            "line": line_no,
+            "step": int(match.group("step")),
+            "pc": int(match.group("pc"), 0),
+            "name": match.group("name"),
+        }
+        for key in ("r0", "r1", "r2", "r3", "ret0", "ret1", "ret2", "ret3"):
+            value = match.group(key)
+            if value is not None:
+                row[key] = int(value, 0)
+        rows.append(row)
+    return rows, path
+
+
+def print_hle_uldivmod_check(args) -> int:
+    rows, path = parse_hle_log(args)
+    calls = [row for row in rows if row.get("name") == "__aeabi_uldivmod"]
+    if not calls:
+        raise TraceQueryError(f"{path}: no __aeabi_uldivmod HLE trace rows found")
+    checked = 0
+    mismatches = []
+    incomplete = []
+    for row in calls:
+        if any(key not in row for key in ("ret0", "ret1", "ret2", "ret3")):
+            incomplete.append({"line": row.get("line"), "step": row.get("step"), "error": "missing ret registers"})
+            continue
+        lhs = row["r0"] | (row["r1"] << 32)
+        rhs = row["r2"] | (row["r3"] << 32)
+        if rhs == 0:
+            expected_q = 0
+            expected_r = 0
+        else:
+            expected_q = lhs // rhs
+            expected_r = lhs % rhs
+        actual_q = row["ret0"] | (row["ret1"] << 32)
+        actual_r = row["ret2"] | (row["ret3"] << 32)
+        checked += 1
+        if actual_q != expected_q or actual_r != expected_r:
+            mismatches.append(
+                {
+                    "line": row.get("line"),
+                    "step": row.get("step"),
+                    "lhs": lhs,
+                    "rhs": rhs,
+                    "actual_q": actual_q,
+                    "expected_q": expected_q,
+                    "actual_r": actual_r,
+                    "expected_r": expected_r,
+                }
+            )
+    print(
+        f"hle-uldivmod-check: path={path} calls={len(calls)} "
+        f"checked={checked} mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"line={detail.get('line')} step={detail.get('step')} "
+            f"lhs=0x{detail.get('lhs'):016x} rhs=0x{detail.get('rhs'):016x}"
+        )
+        print(
+            f"  quotient actual=0x{detail.get('actual_q'):016x} "
+            f"expected=0x{detail.get('expected_q'):016x}"
+        )
+        print(
+            f"  remainder actual=0x{detail.get('actual_r'):016x} "
+            f"expected=0x{detail.get('expected_r'):016x}"
+        )
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"line={detail.get('line')} step={detail.get('step')} error={detail.get('error')}"
+        )
+    return 1 if mismatches or incomplete else 0
 
 
 def print_mcpe_texturedata(args) -> int:
@@ -942,6 +1601,13 @@ def run_self_test() -> None:
         assert "mem32=r0+0x24=0x00000145" in formatted
         assert "deref32=r0+0x4->0x60ff3414" in formatted
         assert "cxx[r2+0x4]='InAppPackageImages'" in formatted
+        (root / "run.log").write_text(
+            "HLE function=0x7128eef5 step=99 pc=0x6f000198 name=__aeabi_uldivmod "
+            "r0=0x00000000 r1=0x00000001 r2=0x00000003 r3=0x00000000 "
+            "ret0=0x55555555 ret1=0x00000000 ret2=0x00000001 ret3=0x00000000\n"
+        )
+        hle_args = argparse.Namespace(trace_dir=str(root), native_log=None, limit=4)
+        assert print_hle_uldivmod_check(hle_args) == 0
         (root / "native_events.jsonl").write_text(
             "\n".join(
                 [
@@ -981,6 +1647,223 @@ def run_self_test() -> None:
         )
         bn_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
         assert print_bn_mont_check(bn_args) == 0
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 24,
+                            "event": "BN_mod_sqr.entry",
+                            "mem32": [
+                                {
+                                    "base": "r1",
+                                    "fields": [
+                                        {"label": "r1+0x4", "value": 1},
+                                    ],
+                                },
+                                {
+                                    "base": "r2",
+                                    "fields": [
+                                        {"label": "r2+0x4", "value": 1},
+                                    ],
+                                },
+                            ],
+                            "byte_samples": [
+                                {"source": "*r1+0@0x1100", "hex": "05000000"},
+                                {"source": "*r2+0@0x1200", "hex": "0d000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 25,
+                            "event": "BN_mod_sqr.return",
+                            "mem32": [
+                                {
+                                    "base": "r6",
+                                    "fields": [
+                                        {"label": "r6+0x4", "value": 1},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {"source": "*r6+0@0x1300", "hex": "0c000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        bn_sqr_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_bn_mod_sqr_check(bn_sqr_args) == 0
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 26,
+                            "event": "BN_nnmod.entry",
+                            "mem32": [
+                                {
+                                    "base": "r1",
+                                    "fields": [
+                                        {"label": "r1+0x4", "value": 1},
+                                    ],
+                                },
+                                {
+                                    "base": "r2",
+                                    "fields": [
+                                        {"label": "r2+0x4", "value": 1},
+                                    ],
+                                },
+                            ],
+                            "byte_samples": [
+                                {"source": "*r1+0@0x1400", "hex": "19000000"},
+                                {"source": "*r2+0@0x1500", "hex": "0d000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 27,
+                            "event": "BN_nnmod.after-bn-div",
+                            "mem32": [
+                                {
+                                    "base": "r4",
+                                    "fields": [
+                                        {"label": "r4+0x4", "value": 1},
+                                        {"label": "r4+0xc", "value": 0},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {"source": "*r4+0@0x1600", "hex": "0c000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 28,
+                            "event": "BN_nnmod.return",
+                            "mem32": [
+                                {
+                                    "base": "r4",
+                                    "fields": [
+                                        {"label": "r4+0x4", "value": 1},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {"source": "*r4+0@0x1600", "hex": "0c000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        bn_nnmod_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_bn_nnmod_check(bn_nnmod_args) == 0
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 29,
+                            "event": "bn_div_words.entry",
+                            "r0": 1,
+                            "r1": 0,
+                            "r2": 3,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 30,
+                            "event": "bn_div_words.return",
+                            "r0": 0x55555555,
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        div_words_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_bn_div_words_check(div_words_args) == 0
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 30,
+                            "event": "ec_GFp_simple_dbl.entry",
+                            "mem32": [
+                                {
+                                    "base": "r2",
+                                    "fields": [
+                                        {"label": "r2+0x40", "value": 1},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {
+                                    "source": "*r2+0x4@0x1000",
+                                    "hex": "28b5c0496675d03d38ced6a0e278e3206e4d1b54fc3a9c87ff0ea359848654642bde4e6123f72f8113159e29c2ad3a4d",
+                                },
+                                {
+                                    "source": "*r2+0x18@0x1100",
+                                    "hex": "fea4034bad3d0423aca9b47bbfa8bfa150b0832e56e7ad8bd9fff4681952c3c640a86939260280dde9c5155ac2ab782b",
+                                },
+                                {
+                                    "source": "*r2+0x2c@0x1200",
+                                    "hex": "01000000ffffffffffffffff000000000100000000000000000000000000000000000000000000000000000000000000",
+                                },
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 31,
+                            "event": "ec_GFp_simple_dbl.return",
+                            "mem32": [
+                                {
+                                    "base": "r10",
+                                    "fields": [
+                                        {"label": "r10+0x40", "value": 0},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {
+                                    "source": "*r10+0x4@0x2000",
+                                    "hex": "ce77131719f475173fd52df0ccca8d8f02167257d9af8e106ee14930c6b6fb2b3acb3026b1eeaac216a92fe862fde518",
+                                },
+                                {
+                                    "source": "*r10+0x18@0x2100",
+                                    "hex": "e019f8ef222e96d974f283eff8b8ac05d6a6a30a32497f6b2fd0f638d40a33f54203dee8115f0f1b2848eaf36284ef49",
+                                },
+                                {
+                                    "source": "*r10+0x2c@0x2200",
+                                    "hex": "fc4907965a7b0846585369f77e517f43a160075dacce5b17b3ffe9d132a4868d8150d3724c0400bbd38b2bb48457f156",
+                                },
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        ec_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_ec_point_check(ec_args) == 0
         native_args = argparse.Namespace(
             trace_dir=str(root),
             hle_dir=None,
@@ -1031,6 +1914,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bn_mont.add_argument("--limit", type=int, default=10)
 
+    bn_mod_sqr = subparsers.add_parser(
+        "bn-mod-sqr-check",
+        help="check BN_mod_sqr native trace rows against a host modular-square oracle",
+    )
+    bn_mod_sqr.add_argument("--limit", type=int, default=10)
+
+    bn_nnmod = subparsers.add_parser(
+        "bn-nnmod-check",
+        help="check BN_nnmod native trace rows against a host modulus oracle",
+    )
+    bn_nnmod.add_argument("--limit", type=int, default=10)
+
+    bn_div_words = subparsers.add_parser(
+        "bn-div-words-check",
+        help="check bn_div_words native trace rows against a host quotient oracle",
+    )
+    bn_div_words.add_argument("--limit", type=int, default=10)
+
+    ec_point = subparsers.add_parser(
+        "ec-point-check",
+        help="check ec_GFp_simple add/double traces against P-384 affine arithmetic",
+    )
+    ec_point.add_argument("--limit", type=int, default=10)
+
     program = subparsers.add_parser("program", help="show captured draws for one GL program")
     program.add_argument("program", type=parse_u32)
     program.add_argument("--limit", type=int, default=40)
@@ -1057,6 +1964,12 @@ def build_parser() -> argparse.ArgumentParser:
     texture_data.add_argument("--empty-only", action="store_true", default=True)
     texture_data.add_argument("--all", action="store_false", dest="empty_only")
     texture_data.add_argument("--limit", type=int, default=40)
+
+    hle_uldivmod = subparsers.add_parser(
+        "hle-uldivmod-check",
+        help="check traced __aeabi_uldivmod HLE calls against a host oracle",
+    )
+    hle_uldivmod.add_argument("--limit", type=int, default=10)
     return parser
 
 
@@ -1078,12 +1991,22 @@ def main(argv=None) -> int:
         return print_native_event(args)
     if args.command == "bn-mont-check":
         return print_bn_mont_check(args)
+    if args.command == "bn-mod-sqr-check":
+        return print_bn_mod_sqr_check(args)
+    if args.command == "bn-nnmod-check":
+        return print_bn_nnmod_check(args)
+    if args.command == "bn-div-words-check":
+        return print_bn_div_words_check(args)
+    if args.command == "ec-point-check":
+        return print_ec_point_check(args)
     if args.command == "program":
         return print_program(args)
     if args.command == "mcpe-text":
         return print_mcpe_text(args)
     if args.command == "mcpe-texturedata":
         return print_mcpe_texturedata(args)
+    if args.command == "hle-uldivmod-check":
+        return print_hle_uldivmod_check(args)
     raise SystemExit("command is required unless --self-test is used")
 
 
