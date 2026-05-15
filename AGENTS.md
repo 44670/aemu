@@ -233,6 +233,16 @@ tools/mcpe_smoke.py --native-trace-preset keygen \
 tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 40
 ```
 
+If generated EC private keys later fail point validation, use `keygen-ec` to
+follow bundled OpenSSL's `EC_KEY_generate_key` and `EC_POINT_mul` path:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset keygen-ec \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 120
+```
+
 After key generation succeeds, use the `signdata` preset to inspect the bundled
 OpenSSL signing path without HLE-ing MCPE game or engine functions:
 
