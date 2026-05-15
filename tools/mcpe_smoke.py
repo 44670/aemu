@@ -48,6 +48,34 @@ MCPE_NATIVE_TRACE_PRESETS = {
         ],
         "event_limit": 200,
     },
+    "keygen": {
+        "description": "trace the MCPE PrivateKeyManager/OpenSSL key generation path",
+        "events": [
+            (0x006B0F26, "PrivateKeyManager::ctor.generate-call"),
+            (0x011CD458, "Asymmetric::generateKeyPair.wrapper-entry"),
+            (0x011CD45E, "Asymmetric::generateKeyPair.wrapper-jump"),
+            (0x011CD988, "OpenSSLInterface::generateKeyPair.entry"),
+            (0x011CD9AC, "OpenSSLInterface::generateKeyPair.after-new-ctx"),
+            (0x011CD9B8, "OpenSSLInterface::generateKeyPair.after-keygen-init"),
+            (0x011CD9EA, "OpenSSLInterface::generateKeyPair.after-ec-curve-ctrl"),
+            (0x011CD9F8, "OpenSSLInterface::generateKeyPair.after-paramgen"),
+            (0x011CDA0C, "OpenSSLInterface::generateKeyPair.keygen-ctx-created"),
+            (0x011CDA1A, "OpenSSLInterface::generateKeyPair.after-keygen-init2"),
+            (0x011CDA28, "OpenSSLInterface::generateKeyPair.after-keygen2"),
+            (0x011CDB34, "OpenSSLInterface::generateKeyPair.fail-keygen2"),
+            (0x011CDB48, "OpenSSLInterface::generateKeyPair.return"),
+            (0x006B0F28, "PrivateKeyManager::ctor.generate-return"),
+        ],
+        "mem32": [
+            (0x011CD458, "r0+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x011CD45E, "r0+0,+0x4,+0x8,+0xc,+0x10"),
+        ],
+        "cxx_string": [
+            (0x006B0F28, "r4+0x4,128"),
+            (0x006B0F28, "r4+0xc,128"),
+        ],
+        "event_limit": 200,
+    },
 }
 
 OBJECT_RE = re.compile(
@@ -255,6 +283,12 @@ def parse_run_log(run_log: str):
         "native_run_failed": "native run failed:" in run_log,
         "crash": crash,
         "recent_guest_pcs": recent,
+        "hle_trace_count": sum(
+            1 for line in run_log.splitlines() if line.startswith("HLE function=")
+        ),
+        "hle_file_trace_count": sum(
+            1 for line in run_log.splitlines() if line.startswith("HLE file ")
+        ),
     }
 
 
@@ -396,6 +430,11 @@ def validate_expectations(args, summary):
         for expected in args.expect_native_event:
             if not any(native_event_matches(row, expected) for row in native_events):
                 errors.append(f"expected native event matching {expected!r}")
+    if args.expect_run_log_contains:
+        run_log = pathlib.Path(summary["run_log"]).read_text(encoding="utf-8", errors="replace")
+        for expected in args.expect_run_log_contains:
+            if expected not in run_log:
+                errors.append(f"expected run log to contain {expected!r}")
     return errors
 
 
@@ -437,6 +476,15 @@ def print_summary(summary, expectation_errors):
             "native_trace: "
             f"presets={presets} events={len(native_trace.get('events', []))} "
             f"limit={native_trace.get('event_limit')}"
+        )
+    hle_trace = summary.get("hle_trace") or {}
+    if hle_trace.get("filter") or hle_trace.get("file_trace"):
+        print(
+            "hle_trace: "
+            f"filter={hle_trace.get('filter')} "
+            f"limit={hle_trace.get('limit')} "
+            f"calls={summary['run'].get('hle_trace_count', 0)} "
+            f"file_lines={summary['run'].get('hle_file_trace_count', 0)}"
         )
     artifacts = summary["artifacts"]
     print(
@@ -498,6 +546,16 @@ def build_arg_parser():
         help="append raw AEMU_TRACE_NATIVE_EVENT_CXX_STRING spec",
     )
     parser.add_argument("--native-event-limit", type=int)
+    parser.add_argument(
+        "--trace-hle",
+        help="set AEMU_TRACE_HLE filter, e.g. '*' or '=open,=read,=fopen,=fread'",
+    )
+    parser.add_argument("--trace-hle-limit", type=int)
+    parser.add_argument(
+        "--trace-hle-file",
+        action="store_true",
+        help="enable AEMU_TRACE_HLE_FILE file/random/stdio diagnostics in run.log",
+    )
     parser.add_argument("--expect-crash-pc")
     parser.add_argument("--expect-fault-address")
     parser.add_argument("--expect-stage", choices=[stage for stage, _marker in STAGE_MARKERS])
@@ -506,6 +564,11 @@ def build_arg_parser():
         "--expect-native-event",
         action="append",
         help="require at least one structured native event whose name or PC contains this text",
+    )
+    parser.add_argument(
+        "--expect-run-log-contains",
+        action="append",
+        help="require run.log to contain this exact substring",
     )
     parser.add_argument("--echo-log", action="store_true")
     return parser
@@ -552,6 +615,12 @@ def main(argv=None):
     env["AEMU_DUMP_SDL_DRAW_CHANGES_DIR"] = str(trace_dir / "sdl-draw")
     env["AEMU_DUMP_SDL_DRAW_CHANGES_MATCH"] = "all"
     env["AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT"] = str(args.draw_dump_limit)
+    if args.trace_hle:
+        env["AEMU_TRACE_HLE"] = args.trace_hle
+    if args.trace_hle_limit is not None:
+        env["AEMU_TRACE_HLE_LIMIT"] = str(args.trace_hle_limit)
+    if args.trace_hle_file:
+        env["AEMU_TRACE_HLE_FILE"] = "1"
     apply_native_trace_env(env, trace_dir, native_trace_config)
 
     cmd = [
@@ -596,6 +665,11 @@ def main(argv=None):
             "elapsed_seconds": run["elapsed_seconds"],
         },
         "native_trace": native_trace_config,
+        "hle_trace": {
+            "filter": args.trace_hle,
+            "limit": args.trace_hle_limit,
+            "file_trace": args.trace_hle_file,
+        },
         "run": parsed_run,
         "artifacts": collect_artifacts(trace_dir),
     }

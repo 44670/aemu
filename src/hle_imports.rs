@@ -18,6 +18,10 @@ pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 const FAKE_FILE_SIZE: u32 = 0x40;
 const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
 const FIRST_FAKE_FD: u32 = 3;
+const ANDROID_ARM_STAT_SIZE: u32 = 96;
+const ANDROID_S_IFREG: u32 = 0o100000;
+const ANDROID_S_IFDIR: u32 = 0o040000;
+const ANDROID_S_IFCHR: u32 = 0o020000;
 const AT_HWCAP: u32 = 16;
 const AT_HWCAP2: u32 = 26;
 const SC_ARG_MAX: u32 = 0;
@@ -943,6 +947,20 @@ struct VirtualFile {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+struct AndroidArmStat {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    rdev: u64,
+    size: u64,
+    blksize: u32,
+    blocks: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PthreadSpecific {
     thread: u32,
@@ -1268,7 +1286,10 @@ impl HleRuntime {
             "fclose" => self.fclose_call(cpu, memory),
             "close" => self.close_call(cpu),
             "open" => self.open_call(cpu, memory),
+            "fstat" => self.fstat_call(cpu, memory),
+            "stat" | "lstat" => self.stat_call(cpu, memory),
             "pipe" => self.pipe_call(cpu, memory),
+            "poll" => self.poll_call(cpu, memory),
             "read" => self.read_call(cpu, memory),
             "fread" => self.fread_call(cpu, memory),
             "write" => self.write_call(cpu, memory),
@@ -2399,6 +2420,57 @@ impl HleRuntime {
         Ok(self.return32(cpu, u32::MAX))
     }
 
+    fn fstat_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let stat_buf = cpu.reg(1);
+        if stat_buf == 0 {
+            self.set_errno(memory, 14)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, 9)?;
+            trace_hle_file(format_args!("fstat fd={fd} -> -1"));
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let stat = self.fake_file_stat(file_idx);
+        write_android_arm_stat(memory, stat_buf, &stat)?;
+        trace_hle_file(format_args!(
+            "fstat fd={fd} -> mode={:#o} size={}",
+            stat.mode, stat.size
+        ));
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn stat_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 256)?;
+        let stat_buf = cpu.reg(1);
+        if stat_buf == 0 {
+            self.set_errno(memory, 14)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let stat = if is_random_device_path(&path) {
+            Some(fake_character_device_stat(fake_ino_from_path(&path)))
+        } else if let Some(file_idx) = self.virtual_file_index(&path) {
+            let size = self.virtual_files[file_idx].data.len() as u64;
+            Some(fake_regular_file_stat(fake_ino_from_path(&path), size))
+        } else if self.virtual_dir_exists(&path) {
+            Some(fake_directory_stat(fake_ino_from_path(&path)))
+        } else {
+            None
+        };
+        let Some(stat) = stat else {
+            self.set_errno(memory, 2)?;
+            trace_hle_file(format_args!("stat path={path:?} -> -1"));
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        write_android_arm_stat(memory, stat_buf, &stat)?;
+        trace_hle_file(format_args!(
+            "stat path={path:?} -> mode={:#o} size={}",
+            stat.mode, stat.size
+        ));
+        Ok(self.return32(cpu, 0))
+    }
+
     fn pipe_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fds = cpu.reg(0);
         if fds == 0 {
@@ -2410,6 +2482,46 @@ impl HleRuntime {
         store32(memory, fds, read_fd)?;
         store32(memory, fds.wrapping_add(4), write_fd)?;
         Ok(self.return32(cpu, 0))
+    }
+
+    fn poll_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        const POLLIN: u16 = 0x0001;
+        const POLLNVAL: u16 = 0x0020;
+        const POLLFD_SIZE: u32 = 8;
+
+        let fds = cpu.reg(0);
+        let nfds = cpu.reg(1);
+        let timeout = cpu.reg(2) as i32;
+        if fds == 0 {
+            self.set_errno(memory, 14)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if nfds > 1024 {
+            self.set_errno(memory, 22)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+
+        let mut ready = 0u32;
+        for idx in 0..nfds {
+            let entry = fds.wrapping_add(idx.wrapping_mul(POLLFD_SIZE));
+            let fd = load32(memory, entry)? as i32;
+            let events = load16(memory, entry.wrapping_add(4))?;
+            let revents = if fd < 0 {
+                0
+            } else if self.fake_fd_readable(fd as u32) {
+                events & POLLIN
+            } else {
+                POLLNVAL
+            };
+            store16(memory, entry.wrapping_add(6), revents)?;
+            if revents != 0 && revents != POLLNVAL {
+                ready = ready.saturating_add(1);
+            }
+        }
+        trace_hle_file(format_args!(
+            "poll nfds={nfds} timeout={timeout} -> {ready}"
+        ));
+        Ok(self.return32(cpu, ready))
     }
 
     fn pthread_create<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2770,8 +2882,40 @@ impl HleRuntime {
         self.files.iter().position(|file| file.fd == fd)
     }
 
+    fn fake_fd_readable(&self, fd: u32) -> bool {
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return false;
+        };
+        match &self.files[file_idx].kind {
+            FakeFileKind::Random => true,
+            FakeFileKind::Virtual { path } => self.virtual_file_index(path).is_some_and(|idx| {
+                self.files[file_idx].offset < self.virtual_files[idx].data.len() as u32
+            }),
+        }
+    }
+
     fn virtual_file_index(&self, path: &str) -> Option<usize> {
         self.virtual_files.iter().position(|file| file.path == path)
+    }
+
+    fn virtual_dir_exists(&self, path: &str) -> bool {
+        let path = path.trim_end_matches('/');
+        if matches!(
+            path,
+            "/sdcard"
+                | "/sdcard/games"
+                | "/sdcard/games/com.mojang"
+                | "/sdcard/games/com.mojang/minecraftpe"
+        ) {
+            return true;
+        }
+        if !is_virtual_storage_path(path) {
+            return false;
+        }
+        let prefix = format!("{path}/");
+        self.virtual_files
+            .iter()
+            .any(|file| file.path.starts_with(&prefix))
     }
 
     fn create_virtual_file(&mut self, path: &str, append: bool) {
@@ -2784,6 +2928,20 @@ impl HleRuntime {
                 path: path.to_string(),
                 data: Vec::new(),
             });
+        }
+    }
+
+    fn fake_file_stat(&self, file_idx: usize) -> AndroidArmStat {
+        let file = &self.files[file_idx];
+        match &file.kind {
+            FakeFileKind::Random => fake_character_device_stat(0x1000 + u64::from(file.fd)),
+            FakeFileKind::Virtual { path } => {
+                let size = self
+                    .virtual_file_index(path)
+                    .map(|idx| self.virtual_files[idx].data.len() as u64)
+                    .unwrap_or(0);
+                fake_regular_file_stat(fake_ino_from_path(path), size)
+            }
         }
     }
 
@@ -6256,7 +6414,11 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "fclose"
                 | "open"
                 | "close"
+                | "fstat"
+                | "stat"
+                | "lstat"
                 | "pipe"
+                | "poll"
                 | "read"
                 | "fread"
                 | "write"
@@ -8774,6 +8936,86 @@ fn is_random_device_path(path: &str) -> bool {
 
 fn is_virtual_storage_path(path: &str) -> bool {
     path.starts_with("/sdcard/") || path.starts_with("/storage/") || path.starts_with("/data/data/")
+}
+
+fn fake_regular_file_stat(ino: u64, size: u64) -> AndroidArmStat {
+    AndroidArmStat {
+        dev: 1,
+        ino,
+        mode: ANDROID_S_IFREG | 0o666,
+        nlink: 1,
+        uid: 10000,
+        gid: 10000,
+        rdev: 0,
+        size,
+        blksize: 4096,
+        blocks: size.div_ceil(512),
+    }
+}
+
+fn fake_directory_stat(ino: u64) -> AndroidArmStat {
+    AndroidArmStat {
+        dev: 1,
+        ino,
+        mode: ANDROID_S_IFDIR | 0o755,
+        nlink: 2,
+        uid: 10000,
+        gid: 10000,
+        rdev: 0,
+        size: 0,
+        blksize: 4096,
+        blocks: 0,
+    }
+}
+
+fn fake_character_device_stat(ino: u64) -> AndroidArmStat {
+    AndroidArmStat {
+        dev: 1,
+        ino,
+        mode: ANDROID_S_IFCHR | 0o666,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        rdev: 0x0109,
+        size: 0,
+        blksize: 4096,
+        blocks: 0,
+    }
+}
+
+fn fake_ino_from_path(path: &str) -> u64 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in path.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    u64::from(hash.max(2))
+}
+
+fn write_android_arm_stat<M: Memory>(
+    memory: &mut M,
+    addr: u32,
+    stat: &AndroidArmStat,
+) -> Result<(), HleError> {
+    for offset in 0..ANDROID_ARM_STAT_SIZE {
+        store8(memory, addr.wrapping_add(offset), 0)?;
+    }
+
+    // Android 4.x bionic exposes the non-MIPS stat64 layout as struct stat.
+    store64(memory, addr, stat.dev)?;
+    store32(memory, addr.wrapping_add(12), stat.ino as u32)?;
+    store32(memory, addr.wrapping_add(16), stat.mode)?;
+    store32(memory, addr.wrapping_add(20), stat.nlink)?;
+    store32(memory, addr.wrapping_add(24), stat.uid)?;
+    store32(memory, addr.wrapping_add(28), stat.gid)?;
+    store64(memory, addr.wrapping_add(32), stat.rdev)?;
+    store64(memory, addr.wrapping_add(44), stat.size)?;
+    store32(memory, addr.wrapping_add(52), stat.blksize)?;
+    store64(memory, addr.wrapping_add(56), stat.blocks)?;
+    store32(memory, addr.wrapping_add(64), FAKE_TIME_BASE_SECS as u32)?;
+    store32(memory, addr.wrapping_add(72), FAKE_TIME_BASE_SECS as u32)?;
+    store32(memory, addr.wrapping_add(80), FAKE_TIME_BASE_SECS as u32)?;
+    store64(memory, addr.wrapping_add(88), stat.ino)
 }
 
 fn strcmp<M: Memory>(memory: &mut M, a: u32, b: u32, max_len: u32) -> Result<i32, HleError> {
@@ -12869,6 +13111,25 @@ mod tests {
         assert_eq!(fd, FIRST_FAKE_FD as u16);
 
         cpu.set_reg(0, u32::from(fd));
+        cpu.set_reg(1, 0x1240);
+        hle.dispatch("fstat", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(
+            memory.load32(0x1240 + 16).unwrap() & ANDROID_S_IFCHR,
+            ANDROID_S_IFCHR
+        );
+
+        store32(&mut memory, 0x1290, u32::from(fd)).unwrap();
+        store16(&mut memory, 0x1294, 1).unwrap();
+        store16(&mut memory, 0x1296, 0).unwrap();
+        cpu.set_reg(0, 0x1290);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 10);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load16(0x1296).unwrap(), 1);
+
+        cpu.set_reg(0, u32::from(fd));
         cpu.set_reg(1, 0x1200);
         cpu.set_reg(2, 4);
         hle.dispatch("read", &mut cpu, &mut memory).unwrap();
@@ -12906,9 +13167,32 @@ mod tests {
         hle.dispatch("fwrite", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 4);
 
+        let writable_fd = memory
+            .load16(writable.wrapping_add(FAKE_FILE_FD_OFFSET))
+            .unwrap();
+        cpu.set_reg(0, u32::from(writable_fd));
+        cpu.set_reg(1, 0x1260);
+        hle.dispatch("fstat", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(
+            memory.load32(0x1260 + 16).unwrap() & ANDROID_S_IFREG,
+            ANDROID_S_IFREG
+        );
+        assert_eq!(memory.load32(0x1260 + 44).unwrap(), 4);
+
         cpu.set_reg(0, writable);
         hle.dispatch("fclose", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 0x1280);
+        hle.dispatch("stat", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(
+            memory.load32(0x1280 + 16).unwrap() & ANDROID_S_IFREG,
+            ANDROID_S_IFREG
+        );
+        assert_eq!(memory.load32(0x1280 + 44).unwrap(), 4);
 
         cpu.set_reg(0, 0x1140);
         cpu.set_reg(1, 0x1188);

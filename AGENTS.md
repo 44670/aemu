@@ -115,6 +115,7 @@ Current reference checkouts:
 - `../aemu-refs/qemu` (`https://github.com/qemu/qemu`)
 - `../aemu-refs/unicorn`
 - `../aemu-refs/aosp-dalvik-4.4.4_r2`
+- `../aemu-refs/aosp-bionic-4.4.4_r2`
 
 Dynarmic notes:
 
@@ -218,6 +219,25 @@ tools/mcpe_smoke.py --native-trace-preset webtoken \
   --expect-native-event WebToken::createFromData.return-null
 tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 20
 ```
+
+To inspect the upstream OpenSSL key-generation path that feeds the WebToken
+certificate flow, use the `keygen` preset together with HLE import tracing:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset keygen \
+  --trace-hle =open,=read,=fopen,=fread,=gettimeofday,=clock_gettime,=time \
+  --trace-hle-limit 300 --trace-hle-file \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10 \
+  --expect-native-event OpenSSLInterface::generateKeyPair.fail-keygen2
+tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 40
+```
+
+`--trace-hle`, `--trace-hle-limit`, and `--trace-hle-file` write the existing
+HLE dispatcher/file diagnostics into `run.log` and summarize their counts in
+`summary.json`, so system-boundary failures can be checked without long ad hoc
+environment-variable command lines. Prefix an HLE filter token with `=` for an
+exact imported-symbol match; for example `=read` avoids matching `pthread_*`.
 
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.

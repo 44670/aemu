@@ -2555,18 +2555,49 @@ fn trace_bytes_match_env(name: &str, bytes: &[u8]) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum HleTraceMatcher {
+    Contains(String),
+    Exact(String),
+}
+
+impl HleTraceMatcher {
+    fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            None
+        } else if let Some(exact) = raw.strip_prefix('=') {
+            let exact = exact.trim();
+            if exact.is_empty() {
+                None
+            } else {
+                Some(Self::Exact(exact.to_string()))
+            }
+        } else {
+            Some(Self::Contains(raw.to_string()))
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::Contains(needle) => name.contains(needle),
+            Self::Exact(exact) => name == exact,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HleTraceFilter {
     All,
-    Contains(String),
-    Any(Vec<String>),
+    One(HleTraceMatcher),
+    Any(Vec<HleTraceMatcher>),
 }
 
 impl HleTraceFilter {
     fn matches(&self, name: &str) -> bool {
         match self {
             Self::All => true,
-            Self::Contains(needle) => name.contains(needle),
-            Self::Any(needles) => needles.iter().any(|needle| name.contains(needle)),
+            Self::One(matcher) => matcher.matches(name),
+            Self::Any(matchers) => matchers.iter().any(|matcher| matcher.matches(name)),
         }
     }
 }
@@ -2583,16 +2614,14 @@ fn parse_trace_hle_filter_raw(raw: &str) -> Option<HleTraceFilter> {
     } else if raw == "*" {
         Some(HleTraceFilter::All)
     } else {
-        let needles = raw
+        let matchers = raw
             .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .map(str::to_string)
+            .filter_map(HleTraceMatcher::parse)
             .collect::<Vec<_>>();
-        match needles.as_slice() {
+        match matchers.as_slice() {
             [] => None,
-            [needle] => Some(HleTraceFilter::Contains(needle.clone())),
-            _ => Some(HleTraceFilter::Any(needles)),
+            [matcher] => Some(HleTraceFilter::One(matcher.clone())),
+            _ => Some(HleTraceFilter::Any(matchers)),
         }
     }
 }
@@ -2786,6 +2815,15 @@ mod tests {
         assert!(filter.matches("glDrawElements"));
         assert!(filter.matches("eglSwapBuffers"));
         assert!(!filter.matches("glBindTexture"));
+    }
+
+    #[test]
+    fn parses_exact_hle_trace_filter() {
+        let filter = parse_trace_hle_filter_raw("=read, =open").unwrap();
+        assert!(filter.matches("read"));
+        assert!(filter.matches("open"));
+        assert!(!filter.matches("pthread_create"));
+        assert!(!filter.matches("fread"));
     }
 
     #[test]
