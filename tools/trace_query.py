@@ -992,6 +992,302 @@ def print_bn_div_check(args) -> int:
     return 1 if mismatches or incomplete else 0
 
 
+def row_reg(row: dict, reg: str) -> int | None:
+    value = row.get(reg)
+    if isinstance(value, int):
+        return value
+    regs = row.get("regs")
+    if not isinstance(regs, dict):
+        return None
+    value = regs.get(reg)
+    return value if isinstance(value, int) else None
+
+
+def u32(value: int) -> int:
+    return value & 0xffff_ffff
+
+
+def u64_words(lo: int, hi: int) -> int:
+    return u32(lo) | (u32(hi) << 32)
+
+
+def host_mul_words(src: bytes, words: int, mul: int) -> tuple[int, bytes] | None:
+    if words <= 0 or len(src) < words * 4:
+        return None
+    carry = 0
+    out = bytearray(words * 4)
+    for idx in range(words):
+        word = int.from_bytes(src[idx * 4 : idx * 4 + 4], "little")
+        product = word * u32(mul) + carry
+        out[idx * 4 : idx * 4 + 4] = u32(product).to_bytes(4, "little")
+        carry = product >> 32
+    return u32(carry), bytes(out)
+
+
+def host_sub_words(a: bytes, b: bytes, words: int) -> tuple[int, bytes] | None:
+    if words <= 0 or min(len(a), len(b)) < words * 4:
+        return None
+    borrow = 0
+    out = bytearray(words * 4)
+    for idx in range(words):
+        aw = int.from_bytes(a[idx * 4 : idx * 4 + 4], "little")
+        bw = int.from_bytes(b[idx * 4 : idx * 4 + 4], "little")
+        value = aw - bw - borrow
+        borrow = 1 if value < 0 else 0
+        out[idx * 4 : idx * 4 + 4] = u32(value).to_bytes(4, "little")
+    return borrow, bytes(out)
+
+
+def host_add_words(a: bytes, b: bytes, words: int) -> tuple[int, bytes] | None:
+    if words <= 0 or min(len(a), len(b)) < words * 4:
+        return None
+    carry = 0
+    out = bytearray(words * 4)
+    for idx in range(words):
+        aw = int.from_bytes(a[idx * 4 : idx * 4 + 4], "little")
+        bw = int.from_bytes(b[idx * 4 : idx * 4 + 4], "little")
+        value = aw + bw + carry
+        carry = value >> 32
+        out[idx * 4 : idx * 4 + 4] = u32(value).to_bytes(4, "little")
+    return u32(carry), bytes(out)
+
+
+def print_bn_div_loop_check(args) -> int:
+    events, path = load_native_events(args)
+    rows = [row for row in events if str(row.get("event", "")).startswith("BN_div.loop.")]
+    if not rows:
+        raise TraceQueryError(f"{path}: no BN_div.loop events found")
+
+    pending: dict[tuple[int | None, str], dict] = {}
+    counts = {
+        "uldiv": 0,
+        "mls": 0,
+        "umull": 0,
+        "mla": 0,
+        "mul_words": 0,
+        "sub_words": 0,
+        "add_words": 0,
+        "product_corrections": 0,
+    }
+    mismatches = []
+    incomplete = []
+    last_umull_by_thread: dict[int | None, dict] = {}
+
+    def record_mismatch(kind: str, row: dict, expected: str, actual: str, extra: str = "") -> None:
+        mismatches.append(
+            {
+                "kind": kind,
+                "step": row.get("step"),
+                "pc": row.get("pc"),
+                "expected": expected,
+                "actual": actual,
+                "extra": extra,
+            }
+        )
+
+    def record_incomplete(kind: str, row: dict, reason: str) -> None:
+        incomplete.append(
+            {
+                "kind": kind,
+                "step": row.get("step"),
+                "pc": row.get("pc"),
+                "reason": reason,
+            }
+        )
+
+    for row in rows:
+        event = row.get("event")
+        thread = row.get("thread") if isinstance(row.get("thread"), int) else None
+        if event == "BN_div.loop.uldiv-call":
+            pending[(thread, "uldiv")] = row
+        elif event == "BN_div.loop.uldiv-ret":
+            call = pending.pop((thread, "uldiv"), None)
+            if call is None:
+                record_incomplete("uldiv", row, "missing call row")
+                continue
+            call_regs = [row_reg(call, f"r{idx}") for idx in range(4)]
+            rets = [row_reg(row, f"r{idx}") for idx in range(4)]
+            if any(value is None for value in call_regs + rets):
+                record_incomplete("uldiv", row, "missing argument or return registers")
+                continue
+            numerator = u64_words(call_regs[0], call_regs[1])
+            denominator = u64_words(call_regs[2], call_regs[3])
+            if denominator == 0:
+                record_incomplete("uldiv", row, "zero denominator")
+                continue
+            quotient = numerator // denominator
+            remainder = numerator % denominator
+            actual_quotient = u64_words(rets[0], rets[1])
+            actual_remainder = u64_words(rets[2], rets[3])
+            counts["uldiv"] += 1
+            if quotient != actual_quotient or remainder != actual_remainder:
+                record_mismatch(
+                    "uldiv",
+                    row,
+                    f"q=0x{quotient:016x} r=0x{remainder:016x}",
+                    f"q=0x{actual_quotient:016x} r=0x{actual_remainder:016x}",
+                    f"num=0x{numerator:016x} den=0x{denominator:016x}",
+                )
+        elif event == "BN_div.loop.after-mls":
+            r8 = row_reg(row, "r8")
+            r2 = row_reg(row, "r2")
+            r6 = row_reg(row, "r6")
+            lr = row_reg(row, "lr")
+            if None in (r8, r2, r6, lr):
+                record_incomplete("mls", row, "missing registers")
+                continue
+            counts["mls"] += 1
+            expected = u32(r6 - u32(r8 * r2))
+            if expected != u32(lr):
+                record_mismatch("mls", row, f"lr=0x{expected:08x}", f"lr=0x{u32(lr):08x}")
+        elif event == "BN_div.loop.after-umull":
+            r4 = row_reg(row, "r4")
+            r10 = row_reg(row, "r10")
+            r0 = row_reg(row, "r0")
+            r1 = row_reg(row, "r1")
+            if None in (r4, r10, r0, r1):
+                record_incomplete("umull", row, "missing registers")
+                continue
+            counts["umull"] += 1
+            product = u32(r4) * u32(r10)
+            if u32(product) != u32(r0) or u32(product >> 32) != u32(r1):
+                record_mismatch(
+                    "umull",
+                    row,
+                    f"r1:r0=0x{product:016x}",
+                    f"r1:r0=0x{u64_words(r0, r1):016x}",
+                )
+            last_umull_by_thread[thread] = row
+        elif event == "BN_div.loop.after-mla":
+            prev = last_umull_by_thread.get(thread)
+            r11 = row_reg(row, "r11")
+            r5 = row_reg(row, "r5")
+            r1 = row_reg(row, "r1")
+            prev_hi = row_reg(prev or {}, "r1")
+            if None in (r11, r5, r1, prev_hi):
+                record_incomplete("mla", row, "missing registers or prior UMULL")
+                continue
+            counts["mla"] += 1
+            expected = u32(prev_hi + u32(r11 * r5))
+            if expected != u32(r1):
+                record_mismatch("mla", row, f"r1=0x{expected:08x}", f"r1=0x{u32(r1):08x}")
+        elif event == "BN_div.loop.pre-product-cmp":
+            r0 = row_reg(row, "r0")
+            r1 = row_reg(row, "r1")
+            r4 = row_reg(row, "r4")
+            r5 = row_reg(row, "r5")
+            if None not in (r0, r1, r4, r5) and u64_words(r4, r5) < u64_words(r0, r1):
+                counts["product_corrections"] += 1
+        elif event == "BN_div.loop.bn-mul-call":
+            pending[(thread, "mul_words")] = row
+        elif event == "BN_div.loop.bn-mul-ret":
+            call = pending.pop((thread, "mul_words"), None)
+            if call is None:
+                record_incomplete("mul_words", row, "missing call row")
+                continue
+            words = row_reg(call, "r2")
+            mul = row_reg(call, "r3")
+            src = byte_sample(call, "r1+0x0")
+            out = byte_sample(row, "*r5+0x0")
+            ret = row_reg(row, "r0")
+            if not isinstance(words, int) or not isinstance(mul, int) or src is None or out is None or ret is None:
+                record_incomplete("mul_words", row, "missing words, multiplier, samples, or return")
+                continue
+            expected = host_mul_words(src, words, mul)
+            if expected is None:
+                record_incomplete("mul_words", row, f"short samples for {words} words")
+                continue
+            expected_ret, expected_out = expected
+            counts["mul_words"] += 1
+            if expected_ret != u32(ret) or out[: words * 4] != expected_out:
+                record_mismatch(
+                    "mul_words",
+                    row,
+                    f"ret=0x{expected_ret:08x} out={expected_out.hex()}",
+                    f"ret=0x{u32(ret):08x} out={out[: words * 4].hex()}",
+                    f"words={words} mul=0x{u32(mul):08x}",
+                )
+        elif event == "BN_div.loop.bn-sub-call":
+            pending[(thread, "sub_words")] = row
+        elif event == "BN_div.loop.bn-sub-ret":
+            call = pending.pop((thread, "sub_words"), None)
+            if call is None:
+                record_incomplete("sub_words", row, "missing call row")
+                continue
+            words = row_reg(call, "r3")
+            a = byte_sample(call, "r1+0x0")
+            b = byte_sample(call, "r2+0x0")
+            out = byte_sample(row, "*sp+0x7c")
+            ret = row_reg(row, "r0")
+            if not isinstance(words, int) or a is None or b is None or out is None or ret is None:
+                record_incomplete("sub_words", row, "missing words, samples, or return")
+                continue
+            expected = host_sub_words(a, b, words)
+            if expected is None:
+                record_incomplete("sub_words", row, f"short samples for {words} words")
+                continue
+            expected_ret, expected_out = expected
+            counts["sub_words"] += 1
+            if expected_ret != u32(ret) or out[: words * 4] != expected_out:
+                record_mismatch(
+                    "sub_words",
+                    row,
+                    f"ret=0x{expected_ret:08x} out={expected_out.hex()}",
+                    f"ret=0x{u32(ret):08x} out={out[: words * 4].hex()}",
+                    f"words={words}",
+                )
+        elif event == "BN_div.loop.bn-add-call":
+            pending[(thread, "add_words")] = row
+        elif event == "BN_div.loop.bn-add-ret":
+            call = pending.pop((thread, "add_words"), None)
+            if call is None:
+                record_incomplete("add_words", row, "missing call row")
+                continue
+            words = row_reg(call, "r3")
+            a = byte_sample(call, "r1+0x0")
+            b = byte_sample(call, "r2+0x0")
+            out = byte_sample(row, "*sp+0x7c")
+            ret = row_reg(row, "r0")
+            if not isinstance(words, int) or a is None or b is None or out is None or ret is None:
+                record_incomplete("add_words", row, "missing words, samples, or return")
+                continue
+            expected = host_add_words(a, b, words)
+            if expected is None:
+                record_incomplete("add_words", row, f"short samples for {words} words")
+                continue
+            expected_ret, expected_out = expected
+            counts["add_words"] += 1
+            if expected_ret != u32(ret) or out[: words * 4] != expected_out:
+                record_mismatch(
+                    "add_words",
+                    row,
+                    f"ret=0x{expected_ret:08x} out={expected_out.hex()}",
+                    f"ret=0x{u32(ret):08x} out={out[: words * 4].hex()}",
+                    f"words={words}",
+                )
+
+    print(
+        f"bn-div-loop-check: path={path} rows={len(rows)} "
+        + " ".join(f"{key}={value}" for key, value in counts.items())
+        + f" mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"kind={detail['kind']} step={detail['step']} pc={fmt_u32(detail['pc'])} "
+            f"expected={detail['expected']} actual={detail['actual']}"
+        )
+        if detail.get("extra"):
+            print(f"  {detail['extra']}")
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"kind={detail['kind']} step={detail['step']} pc={fmt_u32(detail['pc'])} "
+            f"reason={detail['reason']}"
+        )
+    return 1 if mismatches or incomplete else 0
+
+
 P384_P = int(
     "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
     16,
@@ -1575,6 +1871,94 @@ def mcpe_text_texture_size_gates(args) -> tuple[tuple[int, int], tuple[int, int]
     return expect_texture_size, reject_texture_size
 
 
+def cxx_string_value(row: dict, base: str, offset: int) -> str | None:
+    for item in row.get("cxx_strings", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("base") == base and item.get("offset") == offset:
+            value = item.get("bytes")
+            return value if isinstance(value, str) else None
+    return None
+
+
+def expectation_matches(value: int | None, expectation: str) -> bool:
+    if expectation == "any":
+        return value is not None
+    if expectation == "null":
+        return value == 0
+    if expectation == "nonnull":
+        return value is not None and value != 0
+    raise TraceQueryError(f"unknown expectation {expectation!r}")
+
+
+def print_mcpe_font_pair_check(args) -> int:
+    events, path = load_native_events(args)
+    pending: dict[int | None, dict] = {}
+    rows = []
+    for row in events:
+        event = row.get("event")
+        thread = row.get("thread") if isinstance(row.get("thread"), int) else None
+        if event == "TextureGroup::getTexturePair.entry":
+            resource = cxx_string_value(row, "r1", 0)
+            package = cxx_string_value(row, "r1", 4)
+            pending[thread] = {
+                "step": row.get("step"),
+                "resource": resource,
+                "package": package,
+            }
+        elif event == "Font::init.after-getTexturePair":
+            call = pending.pop(thread, None)
+            if call is None:
+                continue
+            rows.append(
+                {
+                    "step": call["step"],
+                    "resource": call["resource"],
+                    "package": call["package"],
+                    "result": row_reg(row, "r0"),
+                }
+            )
+
+    if not rows:
+        raise TraceQueryError(f"{path}: no Font::init TextureGroup lookup rows found")
+
+    print(f"mcpe-font-pair-check: path={path} rows={len(rows)}")
+    for row in rows[: args.limit]:
+        result = row["result"]
+        result_text = "missing" if result is None else fmt_u32(result)
+        print(
+            f"step={row['step']} package={row['package']!r} "
+            f"resource={row['resource']!r} result={result_text}"
+        )
+
+    expectations = {
+        "font/default8.png": args.expect_default8,
+        "font/ascii_sga.png": args.expect_ascii_sga,
+    }
+    failures = []
+    for resource, expectation in expectations.items():
+        matches = [row for row in rows if row.get("resource") == resource]
+        if not matches:
+            failures.append(f"missing lookup for {resource}")
+            continue
+        if not any(expectation_matches(row.get("result"), expectation) for row in matches):
+            actual = ", ".join(
+                "missing" if row.get("result") is None else fmt_u32(row.get("result"))
+                for row in matches
+            )
+            failures.append(f"{resource} expected {expectation}, got {actual}")
+
+    if failures:
+        for failure in failures[: args.limit]:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        return 1
+    print(
+        "mcpe-font-pair ok: "
+        f"default8={args.expect_default8} ascii_sga={args.expect_ascii_sga}"
+    )
+    return 0
+
+
 def run_self_test() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = pathlib.Path(temp)
@@ -1726,6 +2110,85 @@ def run_self_test() -> None:
         assert "mem32=r0+0x24=0x00000145" in formatted
         assert "deref32=r0+0x4->0x60ff3414" in formatted
         assert "cxx[r2+0x4]='InAppPackageImages'" in formatted
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 30,
+                            "thread": 1,
+                            "pc": 0x716F045C,
+                            "event": "TextureGroup::getTexturePair.entry",
+                            "regs": {"r1": 0x1000},
+                            "cxx_strings": [
+                                {
+                                    "base": "r1",
+                                    "offset": 0,
+                                    "bytes": "font/default8.png",
+                                },
+                                {
+                                    "base": "r1",
+                                    "offset": 4,
+                                    "bytes": "InAppPackageImages",
+                                },
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 31,
+                            "thread": 1,
+                            "pc": 0x70C3CA88,
+                            "event": "Font::init.after-getTexturePair",
+                            "r0": 0x60DEF760,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 32,
+                            "thread": 1,
+                            "pc": 0x716F045C,
+                            "event": "TextureGroup::getTexturePair.entry",
+                            "regs": {"r1": 0x1000},
+                            "cxx_strings": [
+                                {
+                                    "base": "r1",
+                                    "offset": 0,
+                                    "bytes": "font/ascii_sga.png",
+                                },
+                                {
+                                    "base": "r1",
+                                    "offset": 4,
+                                    "bytes": "InAppPackageImages",
+                                },
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 33,
+                            "thread": 1,
+                            "pc": 0x70C3CA88,
+                            "event": "Font::init.after-getTexturePair",
+                            "r0": 0,
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        font_args = argparse.Namespace(
+            trace_dir=str(root),
+            native_events=None,
+            expect_default8="nonnull",
+            expect_ascii_sga="null",
+            limit=4,
+        )
+        assert print_mcpe_font_pair_check(font_args) == 0
         (root / "run.log").write_text(
             "HLE function=0x7128eef5 step=99 pc=0x6f000198 name=__aeabi_uldivmod "
             "r0=0x00000000 r1=0x00000001 r2=0x00000003 r3=0x00000000 "
@@ -2006,6 +2469,148 @@ def run_self_test() -> None:
                 [
                     json.dumps(
                         {
+                            "step": 41,
+                            "event": "BN_div.loop.uldiv-call",
+                            "thread": 1,
+                            "pc": 0x129954C,
+                            "regs": {"r0": 10, "r1": 0, "r2": 3, "r3": 0},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 42,
+                            "event": "BN_div.loop.uldiv-ret",
+                            "thread": 1,
+                            "pc": 0x1299550,
+                            "regs": {"r0": 3, "r1": 0, "r2": 1, "r3": 0},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 43,
+                            "event": "BN_div.loop.after-mls",
+                            "pc": 0x1299570,
+                            "lr": 5,
+                            "regs": {"r2": 3, "r6": 20, "r8": 5, "r14": 5},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 44,
+                            "event": "BN_div.loop.after-umull",
+                            "thread": 1,
+                            "pc": 0x1299584,
+                            "r0": 42,
+                            "r1": 0,
+                            "regs": {"r0": 42, "r1": 0, "r4": 7, "r10": 6},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 45,
+                            "event": "BN_div.loop.after-mla",
+                            "thread": 1,
+                            "pc": 0x12995A0,
+                            "r1": 10,
+                            "regs": {"r1": 10, "r5": 2, "r11": 5},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 46,
+                            "event": "BN_div.loop.bn-mul-call",
+                            "thread": 1,
+                            "pc": 0x1299614,
+                            "regs": {"r1": 0x2000, "r2": 2, "r3": 3},
+                            "byte_samples": [
+                                {"source": "r1+0x0", "hex": "0200000004000000"}
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 47,
+                            "event": "BN_div.loop.bn-mul-ret",
+                            "thread": 1,
+                            "pc": 0x1299618,
+                            "r0": 0,
+                            "byte_samples": [
+                                {"source": "*r5+0x0@0x3000", "hex": "060000000c000000"}
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 48,
+                            "event": "BN_div.loop.bn-sub-call",
+                            "thread": 1,
+                            "pc": 0x1299640,
+                            "regs": {"r1": 0x4000, "r2": 0x5000, "r3": 2},
+                            "byte_samples": [
+                                {"source": "r1+0x0", "hex": "0700000000000000"},
+                                {"source": "r2+0x0", "hex": "0500000000000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 49,
+                            "event": "BN_div.loop.bn-sub-ret",
+                            "thread": 1,
+                            "pc": 0x1299644,
+                            "r0": 0,
+                            "byte_samples": [
+                                {"source": "*sp+0x7c@0x4000", "hex": "0200000000000000"}
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 50,
+                            "event": "BN_div.loop.bn-add-call",
+                            "thread": 1,
+                            "pc": 0x1299758,
+                            "regs": {"r1": 0x6000, "r2": 0x7000, "r3": 1},
+                            "byte_samples": [
+                                {"source": "r1+0x0", "hex": "ffffffff"},
+                                {"source": "r2+0x0", "hex": "01000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 51,
+                            "event": "BN_div.loop.bn-add-ret",
+                            "thread": 1,
+                            "pc": 0x1299760,
+                            "r0": 1,
+                            "byte_samples": [
+                                {"source": "*sp+0x7c@0x6000", "hex": "00000000"}
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        bn_div_loop_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_bn_div_loop_check(bn_div_loop_args) == 0
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
                             "step": 30,
                             "event": "ec_GFp_simple_dbl.entry",
                             "mem32": [
@@ -2142,6 +2747,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bn_div.add_argument("--limit", type=int, default=10)
 
+    bn_div_loop = subparsers.add_parser(
+        "bn-div-loop-check",
+        help="check BN_div loop helper and arithmetic trace rows against host oracles",
+    )
+    bn_div_loop.add_argument("--limit", type=int, default=10)
+
     ec_point = subparsers.add_parser(
         "ec-point-check",
         help="check ec_GFp_simple add/double traces against P-384 affine arithmetic",
@@ -2174,6 +2785,14 @@ def build_parser() -> argparse.ArgumentParser:
     texture_data.add_argument("--empty-only", action="store_true", default=True)
     texture_data.add_argument("--all", action="store_false", dest="empty_only")
     texture_data.add_argument("--limit", type=int, default=40)
+
+    font_pair = subparsers.add_parser(
+        "mcpe-font-pair-check",
+        help="check native Font::init TextureGroup atlas lookups",
+    )
+    font_pair.add_argument("--expect-default8", choices=("null", "nonnull", "any"), default="nonnull")
+    font_pair.add_argument("--expect-ascii-sga", choices=("null", "nonnull", "any"), default="null")
+    font_pair.add_argument("--limit", type=int, default=20)
 
     hle_uldivmod = subparsers.add_parser(
         "hle-uldivmod-check",
@@ -2209,6 +2828,8 @@ def main(argv=None) -> int:
         return print_bn_div_words_check(args)
     if args.command == "bn-div-check":
         return print_bn_div_check(args)
+    if args.command == "bn-div-loop-check":
+        return print_bn_div_loop_check(args)
     if args.command == "ec-point-check":
         return print_ec_point_check(args)
     if args.command == "program":
@@ -2217,6 +2838,8 @@ def main(argv=None) -> int:
         return print_mcpe_text(args)
     if args.command == "mcpe-texturedata":
         return print_mcpe_texturedata(args)
+    if args.command == "mcpe-font-pair-check":
+        return print_mcpe_font_pair_check(args)
     if args.command == "hle-uldivmod-check":
         return print_hle_uldivmod_check(args)
     raise SystemExit("command is required unless --self-test is used")

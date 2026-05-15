@@ -172,6 +172,10 @@ fn arm_multiply_instr(
         | rm as u32
 }
 
+fn arm_mls_instr(rd: usize, ra: usize, rm: usize, rn: usize) -> u32 {
+    0xe060_0090 | ((rd as u32) << 16) | ((ra as u32) << 12) | ((rm as u32) << 8) | rn as u32
+}
+
 fn arm_long_multiply_instr(
     signed: bool,
     accumulate: bool,
@@ -1385,6 +1389,31 @@ fn qemu_oracle_arm_multiply_matrix_matches_interpreter() {
     }
     cpu.set_reg(0, folded);
 
+    assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
+}
+
+#[test]
+fn qemu_oracle_arm_mls_matches_interpreter() {
+    let asm = oracle_program(
+        ".arch armv7-a\n\
+         ldr r1, =0xfffffff0\n\
+         mov r2, #3\n\
+         mov r3, #0x20\n\
+         mls r0, r1, r2, r3",
+    );
+    let Some(qemu_exit) = run_arm_linux_exit_with_clang_args(&asm, &["-march=armv7-a"]) else {
+        return;
+    };
+
+    let mut cpu = Cpu::new();
+    let mut mem = VecMemory::new(0, 4);
+    cpu.set_reg(1, 0xffff_fff0);
+    cpu.set_reg(2, 3);
+    cpu.set_reg(3, 0x20);
+    cpu.execute_arm(arm_mls_instr(0, 3, 2, 1), 0, &mut mem)
+        .unwrap();
+
+    assert_eq!(cpu.reg(0), 0x50);
     assert_eq!(qemu_exit as u32, cpu.reg(0) & 0xff);
 }
 

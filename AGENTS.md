@@ -332,6 +332,32 @@ tools/mcpe_smoke.py --native-trace-preset bn-div \
 tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-check
 ```
 
+If `bn-div-check` shows a bad remainder before denormalization, narrow the
+fault inside the OpenSSL long-division loop with `bn-div-loop`. This verifies
+the local quotient-estimate call, `MLS`/`UMULL`/`MLA` arithmetic, and the
+`bn_mul_words`/`bn_sub_words`/`bn_add_words` helper inputs and outputs without
+HLE-ing OpenSSL or MCPE game methods:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset bn-div-loop \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-loop-check
+```
+
+After the OpenSSL division path checks out, `font-texture-pair` narrows the
+current native `Font::init` crash. It traces the `TextureGroup::getTexturePair`
+lookups for `font/default8.png` and `font/ascii_sga.png`; the known blocker is
+that `default8.png` returns a native pair but `ascii_sga.png` currently returns
+null and `Font::init` dereferences it at `0x70c3cad4`:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset font-texture-pair \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x70c3cad4 --expect-fault-address 0x40
+tools/trace_query.py target/mcpe-smoke-<stamp> mcpe-font-pair-check
+```
+
 The static OpenSSL `bn_div_words` wrapper is available as an extra check, but
 the current MCPE `BN_div` hot path may call `__aeabi_uldivmod` through PLT
 directly and record no `bn_div_words` events:

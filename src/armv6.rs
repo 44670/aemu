@@ -3740,6 +3740,21 @@ impl Cpu {
             return Ok(true);
         }
 
+        if (instr & 0x0ff0_00f0) == 0x0060_0090 {
+            let rd = ((instr >> 16) & 0xf) as usize;
+            let ra = ((instr >> 12) & 0xf) as usize;
+            let rm = ((instr >> 8) & 0xf) as usize;
+            let rn = (instr & 0xf) as usize;
+            if [rd, ra, rm, rn].contains(&15) {
+                return Err(Trap::Unpredictable("multiply with PC register"));
+            }
+            let result = self
+                .arm_read_reg(ra, pc)
+                .wrapping_sub(self.arm_read_reg(rn, pc).wrapping_mul(self.arm_read_reg(rm, pc)));
+            self.write_reg_arm(rd, result);
+            return Ok(true);
+        }
+
         let dual_key = instr & 0x0ff0_00d0;
         if matches!(
             dual_key,
@@ -11693,6 +11708,12 @@ mod tests {
         cpu.execute_arm(0xe120_3281, 0, &mut mem).unwrap(); // smlawb r0, r1, r2, r3
         assert_eq!(cpu.reg(0), 32770);
 
+        cpu.set_reg(8, 0xffff_fff0);
+        cpu.set_reg(2, 3);
+        cpu.set_reg(6, 0x20);
+        cpu.execute_arm(0xe06e_6298, 0, &mut mem).unwrap(); // mls lr, r8, r2, r6
+        assert_eq!(cpu.reg(14), 0x50);
+
         cpu.set_reg(5, 0x0003_0000);
         cpu.set_reg(6, 0x4000_0000);
         cpu.execute_arm(0xe124_06e5, 0, &mut mem).unwrap(); // smulwt r4, r5, r6
@@ -11712,6 +11733,11 @@ mod tests {
             Trap::Unpredictable("multiply with PC register")
         ));
         let err = cpu.execute_arm(0xe020_f291, 0, &mut mem).unwrap_err(); // mla r0, r1, r2, pc
+        assert!(matches!(
+            err,
+            Trap::Unpredictable("multiply with PC register")
+        ));
+        let err = cpu.execute_arm(0xe060_f291, 0, &mut mem).unwrap_err(); // mls r0, r1, r2, pc
         assert!(matches!(
             err,
             Trap::Unpredictable("multiply with PC register")
