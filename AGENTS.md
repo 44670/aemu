@@ -322,6 +322,16 @@ tools/mcpe_smoke.py --trace-hle =__aeabi_uldivmod --trace-hle-limit 80 \
 tools/trace_query.py target/mcpe-smoke-<stamp> hle-uldivmod-check
 ```
 
+Then use `bn-div` to check `BN_div` directly, including the final normalized
+remainder before and after the right-shift denormalization step:
+
+```sh
+tools/mcpe_smoke.py --native-trace-preset bn-div \
+  --expect-stage android_main --expect-exit nonzero \
+  --expect-crash-pc 0x71673170 --expect-fault-address 0x10
+tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-check
+```
+
 The static OpenSSL `bn_div_words` wrapper is available as an extra check, but
 the current MCPE `BN_div` hot path may call `__aeabi_uldivmod` through PLT
 directly and record no `bn_div_words` events:

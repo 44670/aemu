@@ -242,6 +242,29 @@ MCPE_NATIVE_TRACE_PRESETS = {
         ],
         "event_limit": 1000,
     },
+    "bn-div": {
+        "description": "trace OpenSSL BN_div inputs and final remainder normalization",
+        "events": [
+            (0x012991A0, "BN_div.entry"),
+            (0x012996C4, "BN_div.before-rem-rshift"),
+            (0x012996E4, "BN_div.after-rem-rshift"),
+        ],
+        "mem32": [
+            (0x012991A0, "r1+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012991A0, "r2+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012991A0, "r3+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012996C4, "sp+0x28"),
+            (0x012996C4, "r7+0,+0x4,+0x8,+0xc,+0x10"),
+            (0x012996E4, "r6+0,+0x4,+0x8,+0xc,+0x10"),
+        ],
+        "bytes": [
+            (0x012991A0, "*r2+0,192"),
+            (0x012991A0, "*r3+0,192"),
+            (0x012996C4, "*r7+0,192"),
+            (0x012996E4, "*r6+0,192"),
+        ],
+        "event_limit": 360,
+    },
     "ec-point-ops": {
         "description": "trace OpenSSL EC point add/double/make-affine input and output coordinates",
         "events": [

@@ -867,6 +867,131 @@ def print_bn_div_words_check(args) -> int:
     return 1 if mismatches or incomplete else 0
 
 
+def bn_div_sequences(events: list[dict]) -> list[dict]:
+    sequences = []
+    pending_by_thread: dict[int | None, list[dict]] = {}
+    for row in events:
+        event = row.get("event")
+        thread = row.get("thread") if isinstance(row.get("thread"), int) else None
+        if event == "BN_div.entry":
+            pending_by_thread.setdefault(thread, []).append(
+                {"entry": row, "track_remainder": row_int(row, "r1") not in (None, 0)}
+            )
+        elif event == "BN_div.before-rem-rshift":
+            pending = pending_by_thread.get(thread)
+            if pending and pending[-1].get("track_remainder"):
+                pending[-1]["before_rshift"] = row
+        elif event == "BN_div.after-rem-rshift":
+            pending = pending_by_thread.get(thread)
+            if pending:
+                seq = pending.pop()
+                if seq.get("track_remainder"):
+                    seq["after_rshift"] = row
+                    sequences.append(seq)
+    return sequences
+
+
+def check_bn_div_sequence(seq: dict) -> tuple[bool, dict]:
+    entry = seq["entry"]
+    after = seq["after_rshift"]
+    value, value_top, value_hex, value_err = bignum_value(entry, "r2", "*r2+0", "dividend")
+    divisor, divisor_top, divisor_hex, divisor_err = bignum_value(
+        entry, "r3", "*r3+0", "divisor"
+    )
+    output, output_top, output_hex, output_err = bignum_value(after, "r6", "*r6+0", "remainder")
+    value_neg = mem32_field_value(entry, "r2", "r2+0xc") == 1
+    output_neg = mem32_field_value(after, "r6", "r6+0xc") == 1
+    detail = {
+        "entry_step": entry.get("step"),
+        "after_step": after.get("step"),
+        "dividend_top": value_top,
+        "divisor_top": divisor_top,
+        "output_top": output_top,
+        "dividend_neg": value_neg,
+        "output_neg": output_neg,
+    }
+    errors = [err for err in (value_err, divisor_err, output_err) if err]
+    if errors:
+        detail["error"] = "; ".join(errors)
+        return False, detail
+    if divisor is None or divisor <= 0:
+        detail["error"] = f"invalid divisor 0x{divisor or 0:x}"
+        return False, detail
+    assert value is not None
+    assert output is not None
+    assert divisor_top is not None
+    expected_signed = -(value % divisor) if value_neg else value % divisor
+    signed_output = -output if output_neg else output
+    compare_words = max(output_top or 0, divisor_top, 1)
+    detail["actual"] = little_hex(output, compare_words)
+    detail["expected"] = little_hex(abs(expected_signed), compare_words)
+    detail["expected_neg"] = expected_signed < 0
+    detail["dividend"] = value_hex
+    detail["divisor"] = divisor_hex
+
+    before = seq.get("before_rshift")
+    if isinstance(before, dict):
+        pre, pre_top, _pre_hex, pre_err = bignum_value(before, "r7", "*r7+0", "pre-rshift")
+        shift = mem32_field_value(before, "sp", "sp+0x28")
+        detail["before_step"] = before.get("step")
+        detail["before_top"] = pre_top
+        detail["rshift"] = shift
+        if pre_err:
+            detail["before_error"] = pre_err
+        elif pre is not None and isinstance(shift, int):
+            shifted = pre >> shift
+            detail["before_shifted"] = little_hex(shifted, compare_words)
+            detail["before_shifted_ok"] = shifted == abs(expected_signed)
+    return signed_output == expected_signed and detail.get("before_shifted_ok", True), detail
+
+
+def print_bn_div_check(args) -> int:
+    events, path = load_native_events(args)
+    sequences = bn_div_sequences(events)
+    if not sequences:
+        raise TraceQueryError(f"{path}: no BN_div.entry -> BN_div.after-rem-rshift pairs found")
+    checked = 0
+    mismatches = []
+    incomplete = []
+    for seq in sequences:
+        ok, detail = check_bn_div_sequence(seq)
+        if "error" in detail:
+            incomplete.append(detail)
+            continue
+        checked += 1
+        if not ok:
+            mismatches.append(detail)
+    print(
+        f"bn-div-check: path={path} pairs={len(sequences)} "
+        f"checked={checked} mismatches={len(mismatches)} incomplete={len(incomplete)}"
+    )
+    for detail in mismatches[: args.limit]:
+        print(
+            "mismatch "
+            f"entry_step={detail.get('entry_step')} after_step={detail.get('after_step')} "
+            f"dividend_top={detail.get('dividend_top')} divisor_top={detail.get('divisor_top')} "
+            f"output_top={detail.get('output_top')} rshift={detail.get('rshift')} "
+            f"expected_neg={detail.get('expected_neg')} output_neg={detail.get('output_neg')}"
+        )
+        print(f"  actual  ={detail.get('actual')}")
+        print(f"  expected={detail.get('expected')}")
+        if "before_shifted_ok" in detail:
+            print(
+                f"  before_shifted_ok={detail.get('before_shifted_ok')} "
+                f"before_step={detail.get('before_step')} before_top={detail.get('before_top')}"
+            )
+            print(f"  before_shifted={detail.get('before_shifted')}")
+        print(f"  dividend={detail.get('dividend')}")
+        print(f"  divisor ={detail.get('divisor')}")
+    for detail in incomplete[: args.limit]:
+        print(
+            "incomplete "
+            f"entry_step={detail.get('entry_step')} after_step={detail.get('after_step')} "
+            f"error={detail.get('error')}"
+        )
+    return 1 if mismatches or incomplete else 0
+
+
 P384_P = int(
     "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
     16,
@@ -1802,6 +1927,85 @@ def run_self_test() -> None:
                 [
                     json.dumps(
                         {
+                            "step": 31,
+                            "event": "BN_div.entry",
+                            "r1": 0x1A00,
+                            "mem32": [
+                                {
+                                    "base": "r2",
+                                    "fields": [
+                                        {"label": "r2+0x4", "value": 1},
+                                        {"label": "r2+0xc", "value": 0},
+                                    ],
+                                },
+                                {
+                                    "base": "r3",
+                                    "fields": [
+                                        {"label": "r3+0x4", "value": 1},
+                                    ],
+                                },
+                            ],
+                            "byte_samples": [
+                                {"source": "*r2+0@0x1700", "hex": "19000000"},
+                                {"source": "*r3+0@0x1800", "hex": "0d000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 32,
+                            "event": "BN_div.before-rem-rshift",
+                            "mem32": [
+                                {
+                                    "base": "sp",
+                                    "fields": [
+                                        {"label": "sp+0x28", "value": 1},
+                                    ],
+                                },
+                                {
+                                    "base": "r7",
+                                    "fields": [
+                                        {"label": "r7+0x4", "value": 1},
+                                    ],
+                                },
+                            ],
+                            "byte_samples": [
+                                {"source": "*r7+0@0x1900", "hex": "18000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 33,
+                            "event": "BN_div.after-rem-rshift",
+                            "mem32": [
+                                {
+                                    "base": "r6",
+                                    "fields": [
+                                        {"label": "r6+0x4", "value": 1},
+                                        {"label": "r6+0xc", "value": 0},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {"source": "*r6+0@0x1a00", "hex": "0c000000"},
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        bn_div_args = argparse.Namespace(trace_dir=str(root), native_events=None, limit=4)
+        assert print_bn_div_check(bn_div_args) == 0
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
                             "step": 30,
                             "event": "ec_GFp_simple_dbl.entry",
                             "mem32": [
@@ -1932,6 +2136,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bn_div_words.add_argument("--limit", type=int, default=10)
 
+    bn_div = subparsers.add_parser(
+        "bn-div-check",
+        help="check BN_div native trace rows against a host remainder oracle",
+    )
+    bn_div.add_argument("--limit", type=int, default=10)
+
     ec_point = subparsers.add_parser(
         "ec-point-check",
         help="check ec_GFp_simple add/double traces against P-384 affine arithmetic",
@@ -1997,6 +2207,8 @@ def main(argv=None) -> int:
         return print_bn_nnmod_check(args)
     if args.command == "bn-div-words-check":
         return print_bn_div_words_check(args)
+    if args.command == "bn-div-check":
+        return print_bn_div_check(args)
     if args.command == "ec-point-check":
         return print_ec_point_check(args)
     if args.command == "program":
