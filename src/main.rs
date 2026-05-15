@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use aemu::armv6::Memory;
+use aemu::armv6::{Cpu, Isa, Memory, Trap, VecMemory};
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -119,6 +119,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("cpu-compare-smoke") => {
+            if let Err(err) = run_cpu_compare_smoke() {
+                eprintln!("cpu compare smoke failed: {err}");
+                std::process::exit(1);
+            }
+        }
         Some("sdl2-shell") => run_sdl2_shell(args.collect()),
         _ => {
             eprintln!("usage:");
@@ -132,6 +138,7 @@ fn main() {
                 "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|qemu-armv7a-tcg] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
             );
             eprintln!("  aemu qemu-tcg-smoke");
+            eprintln!("  aemu cpu-compare-smoke");
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
     }
@@ -139,13 +146,7 @@ fn main() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_qemu_tcg_smoke() -> Result<(), String> {
-    let runner = aemu::qemu_tcg::QemuArmTcgRunner::probe().map_err(|err| err.to_string())?;
-    let exit = runner
-        .run_linux_exit_asm(
-            aemu::qemu_tcg::QemuTcgArch::Armv7a,
-            aemu::qemu_tcg::armv7a_smoke_program(),
-        )
-        .map_err(|err| err.to_string())?;
+    let exit = run_qemu_tcg_smoke_exit()?;
     println!("qemu-armv7a-tcg smoke exit: {}", exit.status_text);
     if exit.code != Some(42) {
         return Err(format!("expected exit code 42, got {:?}", exit.code));
@@ -153,9 +154,58 @@ fn run_qemu_tcg_smoke() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn run_qemu_tcg_smoke_exit() -> Result<aemu::qemu_tcg::QemuTcgExit, String> {
+    let runner = aemu::qemu_tcg::QemuArmTcgRunner::probe().map_err(|err| err.to_string())?;
+    runner
+        .run_linux_exit_asm(
+            aemu::qemu_tcg::QemuTcgArch::Armv7a,
+            aemu::qemu_tcg::armv7a_smoke_program(),
+        )
+        .map_err(|err| err.to_string())
+}
+
 #[cfg(target_arch = "wasm32")]
 fn run_qemu_tcg_smoke() -> Result<(), String> {
     Err("qemu-tcg-smoke is only available on native hosts".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_cpu_compare_smoke() -> Result<(), String> {
+    let qemu_exit = run_qemu_tcg_smoke_exit()?
+        .code
+        .ok_or_else(|| "qemu-arm exited without a numeric code".to_string())?;
+    let aemu_exit = run_aemu_interpreter_smoke_exit()?;
+    println!("cpu compare smoke: qemu={qemu_exit} aemu={aemu_exit}");
+    if qemu_exit != aemu_exit {
+        return Err(format!(
+            "backend mismatch for ARMv7-A smoke program: qemu={qemu_exit} aemu={aemu_exit}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_cpu_compare_smoke() -> Result<(), String> {
+    Err("cpu-compare-smoke is only available on native hosts".to_string())
+}
+
+fn run_aemu_interpreter_smoke_exit() -> Result<i32, String> {
+    let mut cpu = Cpu::new();
+    let mut memory = VecMemory::new(0x1000, 0x1000);
+    memory
+        .load_arm_words(0x1000, &[0xe3a0_002a, 0xe3a0_7001, 0xef00_0000])
+        .map_err(|err| err.to_string())?;
+    cpu.set_isa(Isa::Arm);
+    cpu.branch_exchange(0x1000);
+    for _ in 0..8 {
+        match cpu.step(&mut memory) {
+            Ok(()) => {}
+            Err(Trap::SoftwareInterrupt { .. }) => return Ok((cpu.reg(0) & 0xff) as i32),
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Err("AEMU interpreter smoke did not reach SVC".to_string())
 }
 
 fn print_probe(probe: &aemu::elf_probe::ElfProbe) {
