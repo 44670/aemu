@@ -11,8 +11,6 @@ pub mod host;
 pub mod native_loader;
 pub mod native_runtime;
 pub mod png_util;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod qemu_tcg;
 #[cfg(feature = "sdl2")]
 pub mod sdl_shell;
 #[cfg(all(feature = "webgl", target_arch = "wasm32"))]

@@ -26,25 +26,17 @@ test with functions
 - Interpreter implementation: `src/armv6.rs`
 - ELF probe, APK ZIP extraction, APK run planning, and Minecraft APK probe
   tests: `src/elf_probe.rs`, `src/zip_probe.rs`, `src/apk_plan.rs`
-- QEMU oracle tests: `tests/qemu_oracle.rs`
 - Coverage tracker: `docs/armv6_status.md`
 - Local Minecraft probe: `docs/minecraft_pe_probe.md`
 
 Latest verified test command:
 
 ```sh
-cargo test
+cargo test --lib
 ```
 
-Result: passing, with 51 unit tests, 95 QEMU oracle tests, and doc tests.
-
-Additional oracle verification:
-
-```sh
-cargo test --test qemu_oracle -- --nocapture
-```
-
-Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
+Result: passing for the current in-crate unit test suite. The old external
+process oracle integration tests were removed with the qemu backend.
 
 ## Prompt-To-Artifact Checklist
 
@@ -55,7 +47,7 @@ Result: passing, with 95 QEMU oracle tests and no skip diagnostics.
 | Handle privileged or unsupported instructions safely | `CPS`, `RFE`, `SRS`, Thumb `CPS`, SPSR access, CPSR control writes, invalid VFP `PC` core-register forms, and invalid CP15 TLS/barrier `PC` forms trap explicitly. General unsupported instructions return undefined traps. | Partially complete; broad privileged CP15/system behavior is not modeled. |
 | Provide VFP support | `src/armv6.rs` implements VFPv2 move, arithmetic, compare, conversion, `VCVTR` FPSCR-rounded conversion, FPSCR short-vector arithmetic/unary handling, basic `IOC`/`DZC`/`IXC`/`OFC`/`UFC` FPSCR exception flags including compare-NaN, selected single-precision arithmetic, selected double invalid arithmetic, and conversion cases, and load/store subsets. | Partially complete; broader FPSCR exception flags and uncommon edge cases remain simplified or missing. VFPv3-only fixed-point conversions are outside the ARMv6/VFPv2 baseline. |
 | Verify with Minecraft PE `.so` | `cargo run -- probe-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk` probes the local APK through pure-Rust ZIP entry extraction and `docs/minecraft_pe_probe.md` records the result. | Blocked; local `libminecraftpe.so` is `armeabi-v7a`, ARMv7/Thumb-2/VFPv3/NEON, not ARMv6 `armeabi`. |
-| Test with functions | Unit tests in `src/armv6.rs`, probe tests in `src/elf_probe.rs` and `src/zip_probe.rs`, plus QEMU oracle tests in `tests/qemu_oracle.rs`. | Partially complete; current tests pass but are representative rather than exhaustive/randomized. |
+| Test with functions | Unit tests in `src/armv6.rs`, probe tests in `src/elf_probe.rs` and `src/zip_probe.rs`, plus native-runtime smoke tests. | Partially complete; current tests pass but are representative rather than exhaustive/randomized. |
 
 ## Implemented By Audit Category
 

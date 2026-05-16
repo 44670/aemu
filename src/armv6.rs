@@ -217,6 +217,39 @@ impl Cpu {
         self.set_dreg_bits(idx, value);
     }
 
+    pub fn emulate_cp15_timer_mrrc(&mut self, instr: u32, pc: u32) -> Result<bool> {
+        if (instr & 0x0ff0_0000) != 0x0c50_0000 && (instr & 0x0ff0_0000) != 0x0c40_0000 {
+            return Ok(false);
+        }
+
+        let load = instr & (1 << 20) != 0;
+        let rt2 = ((instr >> 16) & 0xf) as usize;
+        let rt = ((instr >> 12) & 0xf) as usize;
+        let coproc = (instr >> 8) & 0xf;
+        let opc1 = (instr >> 4) & 0xf;
+        let crm = instr & 0xf;
+        if coproc != 15 || opc1 != 1 || crm != 14 {
+            return Ok(false);
+        }
+
+        if rt == 15 || rt2 == 15 || (load && rt == rt2) {
+            return Err(Trap::Unpredictable("CP15 MRRC/MCRR invalid core registers"));
+        }
+        if !load {
+            return Err(Trap::Privileged {
+                pc,
+                instr,
+                operation: "MCRR CP15 timer",
+            });
+        }
+
+        let value = self.cp15_virtual_counter;
+        self.cp15_virtual_counter = self.cp15_virtual_counter.wrapping_add(1_000);
+        self.write_reg_arm(rt, value as u32);
+        self.write_reg_arm(rt2, (value >> 32) as u32);
+        Ok(true)
+    }
+
     pub fn pc(&self) -> u32 {
         self.regs[15]
     }
@@ -3094,29 +3127,7 @@ impl Cpu {
 
     fn exec_arm_coprocessor(&mut self, instr: u32, pc: u32) -> Result<bool> {
         if (instr & 0x0ff0_0000) == 0x0c50_0000 || (instr & 0x0ff0_0000) == 0x0c40_0000 {
-            let load = instr & (1 << 20) != 0;
-            let rt2 = ((instr >> 16) & 0xf) as usize;
-            let rt = ((instr >> 12) & 0xf) as usize;
-            let coproc = (instr >> 8) & 0xf;
-            let opc1 = (instr >> 4) & 0xf;
-            let crm = instr & 0xf;
-
-            if coproc == 15 && opc1 == 1 && crm == 14 {
-                if rt == 15 || rt2 == 15 || (load && rt == rt2) {
-                    return Err(Trap::Unpredictable("CP15 MRRC/MCRR invalid core registers"));
-                }
-                if !load {
-                    return Err(Trap::Privileged {
-                        pc,
-                        instr,
-                        operation: "MCRR CP15 timer",
-                    });
-                }
-
-                let value = self.cp15_virtual_counter;
-                self.cp15_virtual_counter = self.cp15_virtual_counter.wrapping_add(1_000);
-                self.write_reg_arm(rt, value as u32);
-                self.write_reg_arm(rt2, (value >> 32) as u32);
+            if self.emulate_cp15_timer_mrrc(instr, pc)? {
                 return Ok(true);
             }
 
@@ -3748,9 +3759,10 @@ impl Cpu {
             if [rd, ra, rm, rn].contains(&15) {
                 return Err(Trap::Unpredictable("multiply with PC register"));
             }
-            let result = self
-                .arm_read_reg(ra, pc)
-                .wrapping_sub(self.arm_read_reg(rn, pc).wrapping_mul(self.arm_read_reg(rm, pc)));
+            let result = self.arm_read_reg(ra, pc).wrapping_sub(
+                self.arm_read_reg(rn, pc)
+                    .wrapping_mul(self.arm_read_reg(rm, pc)),
+            );
             self.write_reg_arm(rd, result);
             return Ok(true);
         }

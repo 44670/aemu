@@ -93,14 +93,12 @@ impl Default for NativeRuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCpuBackendKind {
     AemuInterpreter,
-    QemuArmv7aTcg,
 }
 
 impl NativeCpuBackendKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "aemu" | "aemu-interpreter" => Some(Self::AemuInterpreter),
-            "qemu-armv7a-tcg" | "qemu-tcg" => Some(Self::QemuArmv7aTcg),
             _ => None,
         }
     }
@@ -108,7 +106,6 @@ impl NativeCpuBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AemuInterpreter => "aemu",
-            Self::QemuArmv7aTcg => "qemu-armv7a-tcg",
         }
     }
 }
@@ -444,7 +441,6 @@ impl NativeRuntime {
             Err(_) => hle.set_apk_path(link.apk_path.clone()),
         }
         hle.set_unwind_tables(collect_unwind_tables(&link));
-
         let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
         let minecraft_resource_bridge = if minecraft_resource_bridge_enabled() {
             build_minecraft_resource_bridge(&link)
@@ -477,6 +473,12 @@ impl NativeRuntime {
     }
 
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        match self.cpu_backend {
+            NativeCpuBackendKind::AemuInterpreter => self.step_aemu_interpreter(),
+        }
+    }
+
+    fn step_aemu_interpreter(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
         let pc_before = self.cpu.pc();
         let isa_before = self.cpu.isa();
         let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
@@ -1554,15 +1556,64 @@ impl NativeRuntime {
         self.cpu.branch_exchange(init_routine);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
 
-        for _ in 0..PTHREAD_ONCE_INIT_STEPS {
+        let max_steps =
+            parse_trace_limit("AEMU_PTHREAD_ONCE_INIT_STEPS").unwrap_or(PTHREAD_ONCE_INIT_STEPS);
+        let trace = std::env::var_os("AEMU_TRACE_PTHREAD_ONCE").is_some();
+        let trace_interval = parse_trace_limit("AEMU_TRACE_PTHREAD_ONCE_STEPS").unwrap_or(1);
+        let trace_limit = parse_trace_limit("AEMU_TRACE_PTHREAD_ONCE_LIMIT");
+        let mut trace_count = 0usize;
+        if trace {
+            eprintln!(
+                "PTHREAD_ONCE start thread={thread_id} once={once_control:#010x} init={init_routine:#010x} state={state:#010x} max_steps={max_steps}"
+            );
+        }
+
+        for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
+                if trace {
+                    eprintln!(
+                        "PTHREAD_ONCE return thread={thread_id} once={once_control:#010x} init={init_routine:#010x} steps={step_idx}"
+                    );
+                }
                 self.cpu = continuation;
                 self.cpu.set_reg(0, 0);
                 return Ok(());
             }
+            if trace
+                && step_idx % trace_interval == 0
+                && trace_limit.map_or(true, |limit| trace_count < limit)
+            {
+                trace_count += 1;
+                let pc = self.cpu.pc();
+                eprintln!(
+                    "PTHREAD_ONCE step thread={thread_id} step={step_idx}/{max_steps} {:?} pc={pc:#010x} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} sp={:#010x} lr={:#010x}",
+                    self.cpu.isa(),
+                    self.cpu.reg(0),
+                    self.cpu.reg(1),
+                    self.cpu.reg(2),
+                    self.cpu.reg(3),
+                    self.cpu.reg(13),
+                    self.cpu.reg(14),
+                );
+            }
             match self.step()? {
                 NativeRuntimeStep::GuestInstruction => {}
-                NativeRuntimeStep::HleCall { name, args, .. } => {
+                NativeRuntimeStep::HleCall {
+                    name,
+                    address,
+                    args,
+                } => {
+                    if trace && trace_limit.map_or(true, |limit| trace_count < limit) {
+                        trace_count += 1;
+                        eprintln!(
+                            "PTHREAD_ONCE hle thread={thread_id} step={step_idx}/{max_steps} pc={address:#010x} name={name} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} ret0={:#010x}",
+                            args[0],
+                            args[1],
+                            args[2],
+                            args[3],
+                            self.cpu.reg(0),
+                        );
+                    }
                     self.handle_thread_sync_hle(thread_id, &name, args)?;
                     if thread_id == 1 {
                         self.wait_main_after_hle(&name, args)?;
@@ -1576,7 +1627,7 @@ impl NativeRuntime {
         }
 
         Err(NativeRuntimeError::Memory(format!(
-            "pthread_once init routine at {init_routine:#010x} exceeded step limit"
+            "pthread_once init routine at {init_routine:#010x} exceeded step limit {max_steps}"
         )))
     }
 
@@ -1768,6 +1819,27 @@ impl NativeRuntime {
             self.run_function(constructor.address, max_steps_per_constructor)?;
         }
         Ok(())
+    }
+
+    pub fn run_constructor_batch(
+        &mut self,
+        constructors: &[NativeConstructor],
+        max_steps: usize,
+    ) -> Result<(), NativeRuntimeError> {
+        if constructors.is_empty() {
+            return Ok(());
+        }
+        let mut words = Vec::with_capacity(constructors.len() * 4 + 2);
+        words.push(0xe92d_4010); // push {r4, lr}
+        for constructor in constructors {
+            words.push(0xe59f_c004); // ldr ip, [pc, #4]
+            words.push(0xe12f_ff3c); // blx ip
+            words.push(0xea00_0000); // b after_literal
+            words.push(constructor.address);
+        }
+        words.push(0xe8bd_8010); // pop {r4, pc}
+        let trampoline = self.write_guest_words(&words)?;
+        self.run_function(trampoline, max_steps)
     }
 
     fn store_runtime32(&mut self, addr: u32, value: u32) -> Result<(), NativeRuntimeError> {
@@ -3196,47 +3268,7 @@ mod tests {
             NativeCpuBackendKind::parse("aemu"),
             Some(NativeCpuBackendKind::AemuInterpreter)
         );
-        assert_eq!(
-            NativeCpuBackendKind::parse("qemu-armv7a-tcg"),
-            Some(NativeCpuBackendKind::QemuArmv7aTcg)
-        );
-        assert_eq!(NativeCpuBackendKind::parse("qemu"), None);
-    }
-
-    #[test]
-    fn rejects_unwired_qemu_cpu_backend_without_fallback() {
-        let report = NativeLinkReport {
-            apk_path: PathBuf::from("test.apk"),
-            abi: "armeabi-v7a".to_string(),
-            memory: MappedMemory::new(),
-            objects: Vec::new(),
-            global_symbols: Vec::new(),
-            hle_symbols: Vec::new(),
-            resolved_imports: Vec::new(),
-            unresolved_imports: Vec::new(),
-            relocation_errors: Vec::new(),
-        };
-        let config = NativeRuntimeConfig {
-            stack_base: 0x5000_1000,
-            stack_size: 0x1000,
-            tls_base: 0x5000_2000,
-            tls_size: 0x1000,
-            heap_base: 0x5000_3000,
-            heap_size: 0x1000,
-        };
-
-        let err = match NativeRuntime::new_with_cpu_backend(
-            report,
-            config,
-            NativeCpuBackendKind::QemuArmv7aTcg,
-        ) {
-            Ok(_) => panic!("qemu backend should not silently fall back to the AEMU interpreter"),
-            Err(err) => err,
-        };
-        assert_eq!(
-            err,
-            NativeRuntimeError::UnsupportedCpuBackend(NativeCpuBackendKind::QemuArmv7aTcg)
-        );
+        assert_eq!(NativeCpuBackendKind::parse("unknown"), None);
     }
 
     #[test]

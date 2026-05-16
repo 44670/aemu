@@ -14,6 +14,7 @@ use crate::png_util::encode_rgb_png;
 use crate::zip_probe::{extract_zip_entry, read_zip_entry};
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
+const NATIVE_MALLOC_BUMP_SYMBOL_SIZE: u32 = 0x4084;
 
 const FAKE_FILE_SIZE: u32 = 0x40;
 const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
@@ -275,13 +276,29 @@ pub struct HleImportDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HleSymbolShape {
     Function,
+    FunctionCode { size: u32, code: HleFunctionCode },
     Data { size: u32, init: HleDataInit },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HleFunctionCode {
+    Btowc,
+    MallocBump,
+    Memcpy,
+    Memset,
+    ReturnNull,
+    Strcmp,
+    Strlen,
+    Strncmp,
+    Uidivmod,
+    Wctob,
 }
 
 impl HleSymbolShape {
     pub fn size(self) -> u32 {
         match self {
             Self::Function => 4,
+            Self::FunctionCode { size, .. } => size,
             Self::Data { size, .. } => size,
         }
     }
@@ -291,6 +308,7 @@ impl fmt::Display for HleSymbolShape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Function => write!(f, "fn"),
+            Self::FunctionCode { size, code } => write!(f, "fn:{code:?}:{size:#x}"),
             Self::Data { size, .. } => write!(f, "data:{size:#x}"),
         }
     }
@@ -1212,7 +1230,7 @@ impl HleRuntime {
     ) -> Result<(), HleError> {
         let descriptor =
             describe_hle_import(name).ok_or_else(|| HleError::UnknownSymbol(name.to_string()))?;
-        if descriptor.shape != HleSymbolShape::Function {
+        if matches!(descriptor.shape, HleSymbolShape::Data { .. }) {
             return Err(HleError::UnknownSymbol(name.to_string()));
         }
 
@@ -6209,6 +6227,46 @@ pub fn initialize_hle_symbol<M: Memory>(
 ) -> Result<(), HleError> {
     match descriptor.shape {
         HleSymbolShape::Function => store32(memory, address, HLE_TRAP_ARM_INSTR),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Btowc,
+            ..
+        } => write_btowc_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::MallocBump,
+            ..
+        } => store32(memory, address, HLE_TRAP_ARM_INSTR),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Memcpy,
+            ..
+        } => write_memcpy_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Memset,
+            ..
+        } => write_memset_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::ReturnNull,
+            ..
+        } => write_return_null_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Strcmp,
+            ..
+        } => write_strcmp_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Strlen,
+            ..
+        } => write_strlen_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Strncmp,
+            ..
+        } => write_strncmp_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Uidivmod,
+            ..
+        } => write_uidivmod_helper(memory, address),
+        HleSymbolShape::FunctionCode {
+            code: HleFunctionCode::Wctob,
+            ..
+        } => write_wctob_helper(memory, address),
         HleSymbolShape::Data { size, init } => {
             for idx in 0..size {
                 store8(memory, address.wrapping_add(idx), 0)?;
@@ -6226,6 +6284,158 @@ pub fn initialize_hle_symbol<M: Memory>(
             Ok(())
         }
     }
+}
+
+fn write_btowc_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe370_0001, // cmn r0, #1
+        0x012f_ff1e, // bxeq lr
+        0xe6ef_0070, // uxtb r0, r0
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_memcpy_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe1a0_3000, // mov r3, r0
+        0xe352_0000, // cmp r2, #0
+        0x012f_ff1e, // bxeq lr
+        0xe4d1_c001, // ldrb r12, [r1], #1
+        0xe4c3_c001, // strb r12, [r3], #1
+        0xe252_2001, // subs r2, r2, #1
+        0x1aff_fffb, // bne loop
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_memset_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe1a0_3000, // mov r3, r0
+        0xe352_0000, // cmp r2, #0
+        0x012f_ff1e, // bxeq lr
+        0xe4c3_1001, // strb r1, [r3], #1
+        0xe252_2001, // subs r2, r2, #1
+        0x1aff_fffc, // bne loop
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_return_null_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe3a0_0000, // mov r0, #0
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_strcmp_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe4d0_2001, // ldrb r2, [r0], #1
+        0xe4d1_3001, // ldrb r3, [r1], #1
+        0xe152_0003, // cmp r2, r3
+        0x1042_0003, // subne r0, r2, r3
+        0x112f_ff1e, // bxne lr
+        0xe352_0000, // cmp r2, #0
+        0x1aff_fff8, // bne loop
+        0xe3a0_0000, // mov r0, #0
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_strlen_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe1a0_1000, // mov r1, r0
+        0xe4d1_2001, // ldrb r2, [r1], #1
+        0xe352_0000, // cmp r2, #0
+        0x1aff_fffc, // bne loop
+        0xe041_0000, // sub r0, r1, r0
+        0xe240_0001, // sub r0, r0, #1
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_strncmp_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe352_0000, // cmp r2, #0
+        0x03a0_0000, // moveq r0, #0
+        0x012f_ff1e, // bxeq lr
+        0xe4d0_3001, // ldrb r3, [r0], #1
+        0xe4d1_c001, // ldrb r12, [r1], #1
+        0xe252_2001, // subs r2, r2, #1
+        0xe153_000c, // cmp r3, r12
+        0x1043_000c, // subne r0, r3, r12
+        0x112f_ff1e, // bxne lr
+        0xe353_0000, // cmp r3, #0
+        0x1aff_fff7, // bne loop
+        0xe3a0_0000, // mov r0, #0
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_uidivmod_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe351_0000, // cmp r1, #0
+        0x03a0_0000, // moveq r0, #0
+        0x03a0_1000, // moveq r1, #0
+        0x012f_ff1e, // bxeq lr
+        0xe3a0_2000, // mov r2, #0
+        0xe3a0_3000, // mov r3, #0
+        0xe3a0_c020, // mov r12, #32
+        0xe1a0_3083, // lsl r3, r3, #1
+        0xe183_3fa0, // orr r3, r3, r0, lsr #31
+        0xe1a0_0080, // lsl r0, r0, #1
+        0xe153_0001, // cmp r3, r1
+        0x2043_3001, // subhs r3, r3, r1
+        0xe0a2_2002, // adc r2, r2, r2
+        0xe25c_c001, // subs r12, r12, #1
+        0x1aff_fff7, // bne loop
+        0xe1a0_0002, // mov r0, r2
+        0xe1a0_1003, // mov r1, r3
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
+}
+
+fn write_wctob_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    const WORDS: &[u32] = &[
+        0xe350_00ff, // cmp r0, #255
+        0x83e0_0000, // mvnhi r0, #0
+        0xe12f_ff1e, // bx lr
+    ];
+    for (idx, word) in WORDS.iter().enumerate() {
+        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn should_link_hle_symbol(name: &str) -> bool {
@@ -6282,6 +6492,46 @@ fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
 
 fn hle_shape(name: &str) -> HleSymbolShape {
     match name {
+        "btowc" => HleSymbolShape::FunctionCode {
+            size: 0x10,
+            code: HleFunctionCode::Btowc,
+        },
+        "malloc" => HleSymbolShape::FunctionCode {
+            size: NATIVE_MALLOC_BUMP_SYMBOL_SIZE,
+            code: HleFunctionCode::MallocBump,
+        },
+        "memcpy" => HleSymbolShape::FunctionCode {
+            size: 0x20,
+            code: HleFunctionCode::Memcpy,
+        },
+        "memset" => HleSymbolShape::FunctionCode {
+            size: 0x1c,
+            code: HleFunctionCode::Memset,
+        },
+        "strerror" => HleSymbolShape::FunctionCode {
+            size: 0x08,
+            code: HleFunctionCode::ReturnNull,
+        },
+        "strcmp" => HleSymbolShape::FunctionCode {
+            size: 0x24,
+            code: HleFunctionCode::Strcmp,
+        },
+        "strlen" => HleSymbolShape::FunctionCode {
+            size: 0x1c,
+            code: HleFunctionCode::Strlen,
+        },
+        "strncmp" => HleSymbolShape::FunctionCode {
+            size: 0x34,
+            code: HleFunctionCode::Strncmp,
+        },
+        "__aeabi_uidiv" | "__aeabi_uidivmod" => HleSymbolShape::FunctionCode {
+            size: 0x48,
+            code: HleFunctionCode::Uidivmod,
+        },
+        "wctob" => HleSymbolShape::FunctionCode {
+            size: 0x0c,
+            code: HleFunctionCode::Wctob,
+        },
         "__stack_chk_guard" => HleSymbolShape::Data {
             size: 4,
             init: HleDataInit::StackGuard,
@@ -6319,7 +6569,7 @@ fn hle_shape(name: &str) -> HleSymbolShape {
 }
 
 fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
-    if hle_shape(name) != HleSymbolShape::Function {
+    if matches!(hle_shape(name), HleSymbolShape::Data { .. }) {
         return HleCallBehavior::ReturnZero;
     }
     if matches!(name, "abort" | "exit" | "__stack_chk_fail" | "__assert2") {
@@ -10094,9 +10344,128 @@ mod tests {
         initialize_hle_symbol(&mut memory, gl, 0x1000).unwrap();
         assert_eq!(memory.load32(0x1000).unwrap(), HLE_TRAP_ARM_INSTR);
 
+        let uidivmod = describe_hle_import("__aeabi_uidivmod").unwrap();
+        assert_eq!(
+            uidivmod.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x48,
+                code: HleFunctionCode::Uidivmod,
+            }
+        );
+        initialize_hle_symbol(&mut memory, uidivmod, 0x1040).unwrap();
+        assert_eq!(memory.load32(0x1040).unwrap(), 0xe351_0000);
+        assert_eq!(memory.load32(0x1084).unwrap(), 0xe12f_ff1e);
+
+        let wctob = describe_hle_import("wctob").unwrap();
+        assert_eq!(
+            wctob.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x0c,
+                code: HleFunctionCode::Wctob,
+            }
+        );
+        initialize_hle_symbol(&mut memory, wctob, 0x1090).unwrap();
+        assert_eq!(memory.load32(0x1090).unwrap(), 0xe350_00ff);
+        assert_eq!(memory.load32(0x1098).unwrap(), 0xe12f_ff1e);
+
+        let btowc = describe_hle_import("btowc").unwrap();
+        assert_eq!(
+            btowc.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x10,
+                code: HleFunctionCode::Btowc,
+            }
+        );
+        initialize_hle_symbol(&mut memory, btowc, 0x10a0).unwrap();
+        assert_eq!(memory.load32(0x10a0).unwrap(), 0xe370_0001);
+        assert_eq!(memory.load32(0x10ac).unwrap(), 0xe12f_ff1e);
+
+        let malloc = describe_hle_import("malloc").unwrap();
+        assert_eq!(
+            malloc.shape,
+            HleSymbolShape::FunctionCode {
+                size: NATIVE_MALLOC_BUMP_SYMBOL_SIZE,
+                code: HleFunctionCode::MallocBump,
+            }
+        );
+        initialize_hle_symbol(&mut memory, malloc, 0x10c0).unwrap();
+        assert_eq!(memory.load32(0x10c0).unwrap(), HLE_TRAP_ARM_INSTR);
+
+        let strerror = describe_hle_import("strerror").unwrap();
+        assert_eq!(
+            strerror.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x08,
+                code: HleFunctionCode::ReturnNull,
+            }
+        );
+        initialize_hle_symbol(&mut memory, strerror, 0x10d0).unwrap();
+        assert_eq!(memory.load32(0x10d0).unwrap(), 0xe3a0_0000);
+        assert_eq!(memory.load32(0x10d4).unwrap(), 0xe12f_ff1e);
+
+        let strlen = describe_hle_import("strlen").unwrap();
+        assert_eq!(
+            strlen.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x1c,
+                code: HleFunctionCode::Strlen,
+            }
+        );
+        initialize_hle_symbol(&mut memory, strlen, 0x10e0).unwrap();
+        assert_eq!(memory.load32(0x10e0).unwrap(), 0xe1a0_1000);
+        assert_eq!(memory.load32(0x10f8).unwrap(), 0xe12f_ff1e);
+
+        let strcmp = describe_hle_import("strcmp").unwrap();
+        assert_eq!(
+            strcmp.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x24,
+                code: HleFunctionCode::Strcmp,
+            }
+        );
+        initialize_hle_symbol(&mut memory, strcmp, 0x1100).unwrap();
+        assert_eq!(memory.load32(0x1100).unwrap(), 0xe4d0_2001);
+        assert_eq!(memory.load32(0x1120).unwrap(), 0xe12f_ff1e);
+
+        let strncmp = describe_hle_import("strncmp").unwrap();
+        assert_eq!(
+            strncmp.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x34,
+                code: HleFunctionCode::Strncmp,
+            }
+        );
+        initialize_hle_symbol(&mut memory, strncmp, 0x1130).unwrap();
+        assert_eq!(memory.load32(0x1130).unwrap(), 0xe352_0000);
+        assert_eq!(memory.load32(0x1160).unwrap(), 0xe12f_ff1e);
+
+        let memset = describe_hle_import("memset").unwrap();
+        assert_eq!(
+            memset.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x1c,
+                code: HleFunctionCode::Memset,
+            }
+        );
+        initialize_hle_symbol(&mut memory, memset, 0x1170).unwrap();
+        assert_eq!(memory.load32(0x1170).unwrap(), 0xe1a0_3000);
+        assert_eq!(memory.load32(0x1188).unwrap(), 0xe12f_ff1e);
+
+        let memcpy = describe_hle_import("memcpy").unwrap();
+        assert_eq!(
+            memcpy.shape,
+            HleSymbolShape::FunctionCode {
+                size: 0x20,
+                code: HleFunctionCode::Memcpy,
+            }
+        );
+        initialize_hle_symbol(&mut memory, memcpy, 0x1190).unwrap();
+        assert_eq!(memory.load32(0x1190).unwrap(), 0xe1a0_3000);
+        assert_eq!(memory.load32(0x11ac).unwrap(), 0xe12f_ff1e);
+
         let guard = describe_hle_import("__stack_chk_guard").unwrap();
-        initialize_hle_symbol(&mut memory, guard, 0x1100).unwrap();
-        assert_eq!(memory.load32(0x1100).unwrap(), 0x00c0_ffee);
+        initialize_hle_symbol(&mut memory, guard, 0x11c0).unwrap();
+        assert_eq!(memory.load32(0x11c0).unwrap(), 0x00c0_ffee);
 
         let empty_rep = describe_hle_import("_ZNSs4_Rep20_S_empty_rep_storageE").unwrap();
         initialize_hle_symbol(&mut memory, empty_rep, 0x1200).unwrap();

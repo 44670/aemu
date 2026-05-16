@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::armv6::{Memory, Result, Trap};
@@ -5,6 +6,13 @@ use crate::armv6::{Memory, Result, Trap};
 #[derive(Debug, Clone)]
 pub struct MappedMemory {
     regions: Vec<MemoryRegion>,
+    dirty_pages: BTreeSet<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappedMemoryRegionSnapshot {
+    pub base: u32,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +57,7 @@ impl MappedMemory {
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
+            dirty_pages: BTreeSet::new(),
         }
     }
 
@@ -73,6 +82,7 @@ impl MappedMemory {
             data: vec![0; size],
         });
         self.regions.sort_by_key(|region| region.base);
+        self.mark_dirty_range(base, size);
         Ok(())
     }
 
@@ -87,6 +97,45 @@ impl MappedMemory {
         self.regions.len()
     }
 
+    pub fn snapshot_regions(&self) -> Vec<MappedMemoryRegionSnapshot> {
+        self.regions
+            .iter()
+            .map(|region| MappedMemoryRegionSnapshot {
+                base: region.base,
+                bytes: region.data.clone(),
+            })
+            .collect()
+    }
+
+    pub fn clear_dirty_pages(&mut self) {
+        self.dirty_pages.clear();
+    }
+
+    pub fn take_dirty_region_snapshots(&mut self) -> Vec<MappedMemoryRegionSnapshot> {
+        let pages = std::mem::take(&mut self.dirty_pages);
+        self.snapshots_for_pages(pages)
+    }
+
+    pub fn write_clean_bytes(&mut self, addr: u32, bytes: &[u8]) -> Result<()> {
+        for (idx, byte) in bytes.iter().copied().enumerate() {
+            let (region, off) = self.offset(addr.wrapping_add(idx as u32))?;
+            self.regions[region].data[off] = byte;
+        }
+        Ok(())
+    }
+
+    pub fn mapped_span_for_page(&self, page_base: u32, page_size: u32) -> Option<(u32, usize)> {
+        let page_end = page_base.checked_add(page_size)?;
+        for region in &self.regions {
+            let start = page_base.max(region.base);
+            let end = page_end.min(region.end());
+            if start < end {
+                return Some((start, (end - start) as usize));
+            }
+        }
+        None
+    }
+
     fn offset(&self, addr: u32) -> Result<(usize, usize)> {
         for (idx, region) in self.regions.iter().enumerate() {
             if addr >= region.base && addr < region.end() {
@@ -96,6 +145,37 @@ impl MappedMemory {
         Err(Trap::Memory(format!(
             "address {addr:#010x} is not mapped in guest memory"
         )))
+    }
+
+    fn mark_dirty_range(&mut self, base: u32, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let start = base & !0xfff;
+        let end = u64::from(base).saturating_add(size as u64);
+        let mut page = start;
+        while u64::from(page) < end {
+            self.dirty_pages.insert(page);
+            match page.checked_add(0x1000) {
+                Some(next) => page = next,
+                None => break,
+            }
+        }
+    }
+
+    fn snapshots_for_pages(&self, pages: BTreeSet<u32>) -> Vec<MappedMemoryRegionSnapshot> {
+        let mut snapshots = Vec::new();
+        for page in pages {
+            if let Some((base, len)) = self.mapped_span_for_page(page, 0x1000) {
+                if let Ok((region_idx, off)) = self.offset(base) {
+                    snapshots.push(MappedMemoryRegionSnapshot {
+                        base,
+                        bytes: self.regions[region_idx].data[off..off + len].to_vec(),
+                    });
+                }
+            }
+        }
+        snapshots
     }
 }
 
@@ -108,6 +188,7 @@ impl Memory for MappedMemory {
     fn store8(&mut self, addr: u32, value: u8) -> Result<()> {
         let (region, off) = self.offset(addr)?;
         self.regions[region].data[off] = value;
+        self.dirty_pages.insert(addr & !0xfff);
         Ok(())
     }
 }
@@ -147,6 +228,16 @@ mod tests {
         assert_eq!(memory.region_count(), 2);
         assert_eq!(memory.load32(0x100c).unwrap(), 0x1122_3344);
         assert_eq!(memory.load16(0x3002).unwrap(), 0x5566);
+
+        let snapshots = memory.snapshot_regions();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].base, 0x1000);
+        assert_eq!(
+            &snapshots[0].bytes[0x0c..0x10],
+            &0x1122_3344u32.to_le_bytes()
+        );
+        assert_eq!(snapshots[1].base, 0x3000);
+        assert_eq!(&snapshots[1].bytes[0x02..0x04], &0x5566u16.to_le_bytes());
     }
 
     #[test]

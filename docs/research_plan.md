@@ -11,9 +11,9 @@ wasm/WebGL for browser execution.
 2. Treat the APK as an input container: inspect ZIP metadata, parse the
    manifest/resources/assets as needed, extract or stream files, and load
    `lib/armeabi/*.so` through our own ELF/linker path.
-3. Run native game code with a custom ARMv6 ARM/Thumb interpreter. Use QEMU,
-   Dynarmic, and Unicorn as references and test oracles, not as embedded
-   runtime cores.
+3. Run native game code with a custom ARM interpreter. Use QEMU user-mode as
+   an offline instruction oracle and Dynarmic as a decoder/semantics reference;
+   do not embed external CPU emulators as runtime cores.
 4. HLE Android and Bionic APIs on demand: libc, pthreads, time, file paths,
    APK assets, JNI/native-activity entrypoints, EGL, GLES, input, audio, and
    save data.
