@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use js_sys::{Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 
-use crate::armv6::Memory;
+use crate::armv7a::Memory;
 use crate::host::{GraphicsApi, HostBackend};
 use crate::native_loader::{NativeLoadConfig, load_apk_native_libraries_bytes};
 use crate::native_runtime::{NativeRuntime, NativeRuntimeConfig, NativeRuntimeFunctionExit};

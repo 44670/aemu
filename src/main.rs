@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use aemu::armv6::Memory;
+use aemu::armv7a::Memory;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -191,7 +191,7 @@ fn probe_apk(path: &Path) -> Result<(), String> {
 
 fn print_apk_plan(plan: &aemu::apk_plan::ApkRunPlan) {
     println!("apk: {}", plan.path.display());
-    println!("runtime target: Android 4.x ARMv6 / armeabi");
+    println!("runtime target: Android 4.x ARMv7-A / armeabi-v7a");
     println!("native libraries: {}", plan.native_libraries.len());
 
     let abi_counts = plan.abi_counts();
@@ -207,17 +207,17 @@ fn print_apk_plan(plan: &aemu::apk_plan::ApkRunPlan) {
     println!(
         "selected ABI: {}",
         if plan.has_target_abi() {
-            aemu::apk_plan::ARMV6_TARGET_ABI
+            aemu::apk_plan::ARMV7A_TARGET_ABI
         } else {
             "<none>"
         }
     );
     println!(
         "result: {}",
-        if plan.is_armv6_runnable() {
-            "ready for ARMv6 ELF loader"
+        if plan.is_armv7a_runnable() {
+            "ready for ARMv7-A ELF loader"
         } else {
-            "blocked for ARMv6 interpreter"
+            "blocked for ARMv7-A interpreter"
         }
     );
 
@@ -232,7 +232,7 @@ fn print_apk_plan(plan: &aemu::apk_plan::ApkRunPlan) {
     if !plan.native_libraries.is_empty() {
         println!("libraries:");
         for library in &plan.native_libraries {
-            let status = if library.armv6_blockers.is_empty() {
+            let status = if library.armv7a_blockers.is_empty() {
                 "compatible"
             } else {
                 "blocked"

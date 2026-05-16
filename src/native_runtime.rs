@@ -3,7 +3,7 @@ use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::armv6::{Cpu, Isa, Memory, Trap};
+use crate::armv7a::{Cpu, Isa, Memory, Trap};
 use crate::guest_memory::MappedMemoryError;
 use crate::hle_imports::{
     CreatedPthread, HLE_TRAP_ARM_INSTR, HleError, HleRuntime, HleUnwindTable,
@@ -3136,7 +3136,7 @@ fn append_trace_jsonl(path: &Path, row: &serde_json::Value) -> std::io::Result<(
 mod tests {
     use std::path::PathBuf;
 
-    use crate::armv6::Memory;
+    use crate::armv7a::Memory;
     use crate::guest_memory::MappedMemory;
     use crate::hle_imports::{HleCallBehavior, HleSymbolKind, HleSymbolShape};
     use crate::native_loader::{
@@ -3556,7 +3556,7 @@ mod tests {
             abi: "armeabi".to_string(),
             memory,
             objects: vec![LoadedNativeObject {
-                entry_name: "lib/armeabi/libgame.so".to_string(),
+                entry_name: "lib/armeabi-v7a/libgame.so".to_string(),
                 library_name: "libgame.so".to_string(),
                 load_bias: 0x7000_0000,
                 memory_base: 0x7000_0000,
@@ -4296,7 +4296,7 @@ mod tests {
     #[test]
     fn finds_duplicate_symbol_in_requested_library() {
         let object = |library_name: &str, address: u32| LoadedNativeObject {
-            entry_name: format!("lib/armeabi/{library_name}"),
+            entry_name: format!("lib/armeabi-v7a/{library_name}"),
             library_name: library_name.to_string(),
             load_bias: address & 0xfff0_0000,
             memory_base: address & 0xfff0_0000,

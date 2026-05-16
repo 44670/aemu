@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::armv6::Memory;
+use crate::armv7a::Memory;
 use crate::elf_dynamic::{ArmRelocationKind, ElfRelocation};
 
 pub trait SymbolResolver {
@@ -141,7 +141,7 @@ fn store32<M: Memory>(memory: &mut M, addr: u32, value: u32) -> Result<(), ElfLi
 
 #[cfg(test)]
 mod tests {
-    use crate::armv6::{Memory, VecMemory};
+    use crate::armv7a::{Memory, VecMemory};
     use crate::elf_dynamic::{ArmRelocationKind, ElfRelocation, RelocationTable};
 
     use super::*;

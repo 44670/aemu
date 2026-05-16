@@ -3282,7 +3282,7 @@ impl Cpu {
             return Ok(true);
         }
 
-        if is_unsupported_a32_newer_than_armv6(instr) {
+        if is_unsupported_a32_optional_armv7(instr) {
             return Err(Trap::UndefinedArm { pc, instr });
         }
 
@@ -8416,8 +8416,8 @@ fn thumb_expand_imm(imm12: u32, old_carry: bool) -> (u32, bool) {
     }
 }
 
-fn is_unsupported_a32_newer_than_armv6(instr: u32) -> bool {
-    const ARMV6T2_ARMV7_PATTERNS: &[(u32, u32)] = &[
+fn is_unsupported_a32_optional_armv7(instr: u32) -> bool {
+    const OPTIONAL_ARMV7_PATTERNS: &[(u32, u32)] = &[
         (0x0fe0_007f, 0x07c0_001f), // BFC
         (0x0fe0_0070, 0x07c0_0010), // BFI
         (0x0ff0_0000, 0x0340_0000), // MOVT
@@ -8428,7 +8428,7 @@ fn is_unsupported_a32_newer_than_armv6(instr: u32) -> bool {
         (0x0ff0_f0f0, 0x0710_f010), // SDIV
         (0x0ff0_f0f0, 0x0730_f010), // UDIV
     ];
-    ARMV6T2_ARMV7_PATTERNS
+    OPTIONAL_ARMV7_PATTERNS
         .iter()
         .any(|&(mask, value)| instr & mask == value)
 }
@@ -11272,7 +11272,7 @@ mod tests {
     }
 
     #[test]
-    fn thumb_armv6_extend_reverse_and_breakpoint_function() {
+    fn thumb_extend_reverse_and_breakpoint_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
         cpu.set_isa(Isa::Thumb);
@@ -11338,7 +11338,7 @@ mod tests {
     }
 
     #[test]
-    fn armv6_misc_reversal_extension_and_saturation() {
+    fn arm_misc_reversal_extension_and_saturation() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
 
@@ -11493,7 +11493,7 @@ mod tests {
     }
 
     #[test]
-    fn armv6_swap_and_exclusive_function() {
+    fn arm_swap_and_exclusive_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0x5000, 0x100);
         mem.store32(0x5040, 0x1122_3344).unwrap();
@@ -11637,7 +11637,7 @@ mod tests {
     }
 
     #[test]
-    fn armv6_pack_select_and_parallel_media_function() {
+    fn arm_pack_select_and_parallel_media_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
 
@@ -11772,7 +11772,7 @@ mod tests {
     }
 
     #[test]
-    fn armv6_unsigned_sum_absolute_differences_function() {
+    fn arm_unsigned_sum_absolute_differences_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
 
@@ -11787,7 +11787,7 @@ mod tests {
     }
 
     #[test]
-    fn armv6_dsp_multiply_function() {
+    fn arm_dsp_multiply_function() {
         let mut cpu = Cpu::new();
         let mut mem = VecMemory::new(0, 4);
 

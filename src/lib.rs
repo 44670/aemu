@@ -1,5 +1,5 @@
 pub mod apk_plan;
-pub mod armv6;
+pub mod armv7a;
 pub mod elf_dynamic;
 pub mod elf_linker;
 pub mod elf_loader;

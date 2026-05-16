@@ -339,9 +339,9 @@ mod tests {
         encoder.write_all(b"compressed text").unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let bytes = zip_with_one_file("lib/armeabi/libx.so", 8, compressed, 15);
+        let bytes = zip_with_one_file("lib/testabi/libx.so", 8, compressed, 15);
         assert_eq!(
-            extract_zip_entry(&bytes, "lib/armeabi/libx.so").unwrap(),
+            extract_zip_entry(&bytes, "lib/testabi/libx.so").unwrap(),
             b"compressed text"
         );
     }

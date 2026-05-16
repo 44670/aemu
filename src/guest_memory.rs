@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::armv6::{Memory, Result, Trap};
+use crate::armv7a::{Memory, Result, Trap};
 
 #[derive(Debug, Clone)]
 pub struct MappedMemory {
@@ -212,7 +212,7 @@ fn ranges_overlap(a_start: u32, a_end: u32, b_start: u32, b_end: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::armv6::Memory;
+    use crate::armv7a::Memory;
 
     use super::*;
 

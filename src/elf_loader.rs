@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::armv6::{Memory, VecMemory};
+use crate::armv7a::{Memory, VecMemory};
 
 const PT_LOAD: u32 = 1;
 const PT_ARM_EXIDX: u32 = 0x7000_0001;
@@ -288,7 +288,7 @@ fn le_u32(bytes: &[u8], off: usize) -> Result<u32, ElfLoadError> {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::armv6::Memory;
+    use crate::armv7a::Memory;
     use crate::guest_memory::MappedMemory;
 
     use super::*;

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use aemu::armv6::{Cpu, Isa, Memory};
+use aemu::armv7a::{Cpu, Isa, Memory};
 use aemu::guest_memory::MappedMemory;
 
 const DREG_COUNT: usize = 8;

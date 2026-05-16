@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use flate2::read::ZlibDecoder;
 
-use crate::armv6::{Cpu, Memory};
+use crate::armv7a::{Cpu, Memory};
 use crate::gles_trace::{
     TextureUploadMatch, texture_payload_stats, texture_payload_to_rgb, texture_upload_matches,
 };
@@ -10172,7 +10172,7 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::armv6::Isa;
+    use crate::armv7a::Isa;
     use crate::guest_memory::MappedMemory;
 
     use super::*;

@@ -1,7 +1,7 @@
 # Research Plan
 
 This is the working plan for the Android 4.x HLE emulator target: old Android
-games, ARMv6/`armeabi` native code, SDL2 for native debugging, and
+games, ARMv7-A/`armeabi-v7a` native code, SDL2 for native debugging, and
 wasm/WebGL for browser execution.
 
 ## Plan First
@@ -10,7 +10,7 @@ wasm/WebGL for browser execution.
    multi-crate workspace.
 2. Treat the APK as an input container: inspect ZIP metadata, parse the
    manifest/resources/assets as needed, extract or stream files, and load
-   `lib/armeabi/*.so` through our own ELF/linker path.
+   `lib/armeabi-v7a/*.so` through our own ELF/linker path.
 3. Run native game code with a custom ARM interpreter. Use QEMU user-mode as
    an offline instruction oracle and Dynarmic as a decoder/semantics reference;
    do not embed external CPU emulators as runtime cores.
@@ -22,8 +22,8 @@ wasm/WebGL for browser execution.
    2 only for a concrete target-game requirement.
 6. Use SDL2 as the native debug shell. For wasm, prefer the path that keeps
    SDL2 input/audio/windowing and WebGL context ownership straightforward.
-7. Make Minecraft PE the first target, but require an older APK containing
-   `lib/armeabi/libminecraftpe.so` before declaring ARMv6 validation complete.
+7. Make the local Minecraft PE `armeabi-v7a` APK the first target-driven
+   validation case.
 
 ## Research Decisions
 
@@ -57,14 +57,15 @@ It does not reliably preserve the original deflate compression level. The local
 Minecraft PE 0.15.0.1 APK stores its native libraries as deflated entries, with
 `libminecraftpe.so` compressed from 23,554,092 bytes to 8,171,610 bytes.
 
-### ARMv6 Interpreter
+### ARMv7-A Interpreter
 
 Use the ARM architecture manuals as semantic authority and use Dynarmic/QEMU to
 cross-check decoder organization and behavior. The interpreter should implement
-ARMv5TE plus ARMv6 user-mode ARM and Thumb-1, CP15 TLS reads/writes needed by
-Bionic, and VFPv2 where target libraries require it. Privileged instructions
-should trap or become explicit user-mode stubs instead of silently pretending
-to emulate kernel behavior.
+ARMv7-A user-mode ARM, Thumb-1, Thumb-2, interworking, VFPv3, and target-driven
+NEON coverage for the current `armeabi-v7a` Minecraft PE probe, while keeping
+older user-mode instructions that remain valid on ARMv7-A.
+Privileged instructions should trap or become explicit user-mode stubs instead
+of silently pretending to emulate kernel behavior.
 
 ### Graphics and WebGL
 
@@ -76,8 +77,8 @@ a target APK or trace needs it.
 The local Minecraft PE 0.15.0.1 library imports GLES 2.0-style APIs such as
 shader/program, attribute/uniform, VBO/FBO, texture, draw, viewport, scissor,
 blend, and depth functions. It does not directly import common GLES 1.1
-fixed-function names. The local APK is ARMv7/Thumb-2/VFPv3/NEON, so it is good
-for HLE symbol research but not for ARMv6 validation.
+fixed-function names. The local APK is ARMv7/Thumb-2/VFPv3/NEON and is the
+current CPU/HLE validation target.
 
 ANGLE can help native desktop testing when a consistent GLES implementation is
 useful, but it does not replace the browser WebGL backend.
@@ -87,14 +88,13 @@ useful, but it does not replace the browser WebGL backend.
 1. Probe APKs and native libraries.
    Current status: implemented for native library ELF attributes, ZIP
    compression metadata, and pure-Rust stored/deflated ZIP entry extraction.
-2. Finish the ARMv6 interpreter audit with focused QEMU oracle tests.
-   Current status: broad ARMv6/VFPv2 coverage exists, but the audit is not
+2. Finish the ARMv7-A interpreter audit with focused QEMU oracle tests.
+   Current status: broad ARMv7-A/VFPv2 coverage exists, but the audit is not
    complete.
-3. Add an ELF loader/linker for `armeabi` `.so` files and imported-symbol
+3. Add an ELF loader/linker for `armeabi-v7a` `.so` files and imported-symbol
    dispatch into HLE shims.
-   Current status: initial APK run planning selects `lib/armeabi` as the only
-   ARMv6 interpreter ABI and reports concrete blockers for incompatible native
-   libraries before loading. Initial ELF `PT_LOAD` segment planning and
+   Current status: APK run planning selects `lib/armeabi-v7a` as the ARMv7-A
+   interpreter ABI. Initial ELF `PT_LOAD` segment planning and
    `VecMemory` materialization exists. Dynamic metadata parsing now reports
    `DT_NEEDED`, dynamic symbol imports, relocation table ranges, and init
    arrays. ARM `REL` relocation entries are decoded and associated with dynamic
@@ -111,9 +111,9 @@ useful, but it does not replace the browser WebGL backend.
    ARM HLE trap stubs back to symbol-name dispatch. It can enumerate relocated
    `DT_INIT`/`DT_INIT_ARRAY` constructor targets and run each target until it
    returns through a sentinel LR. A `run-apk-native` CLI now reaches actual
-   constructor execution; on the local ARMv7 Minecraft PE APK it fails at an
-   ARMv7 instruction in `libfmod.so`, as expected for the ARMv6 runtime target.
-   Real EGL/GLES/audio/Android lifecycle behavior is still pending.
+   constructor execution and the local ARMv7 Minecraft PE APK now runs through
+   the native activity path into EGL/GLES first-frame probes. Further
+   EGL/GLES/audio/Android lifecycle behavior is still pending.
 4. Build Bionic/libc/pthread/time/file/memory shims only as demanded by target
    imports.
 5. Implement EGL facade and GLES 2.0 command translation to SDL2 GL/WebGL.

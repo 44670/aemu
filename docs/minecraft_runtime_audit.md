@@ -22,7 +22,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Requirement | Current Evidence | Status |
 | --- | --- | --- |
 | Keep one Rust crate | `Cargo.toml` remains a single package; no workspace split. | Satisfied |
-| Use Rust custom interpreter, not libdvm/QEMU/Dynarmic runtime | `src/armv6.rs`; QEMU/Dynarmic remain references/oracles only. | Satisfied |
+| Use Rust custom interpreter, not libdvm/QEMU/Dynarmic runtime | `src/armv7a.rs`; QEMU/Dynarmic remain references/oracles only. | Satisfied |
 | Test APK path is `/mnt/hgfs/deb13/AndroidGames` | `AGENTS.md`, `docs/minecraft_pe_probe.md`, and CLI probes use that path. | Satisfied |
 | 1:1 guest address map | `src/native_loader.rs`, `src/guest_memory.rs`, `AGENTS.md`. | Satisfied |
 | APK native load/link | `cargo run -- link-apk ... --abi armeabi-v7a` reports loaded and relocated. | Satisfied for local ARMv7 research APK |
@@ -38,7 +38,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Browser MCPE entrypoint | `src/wasm_api.rs` exports `runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)` for wasm builds. It runs the byte-backed APK path through constructors, `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, and `android_main` until `eglSwapBuffers`, then replays captured GLES events into a WebGL 1 canvas and returns draw/readback/error stats. `web/mcpe_first_frame.html` wires that export to a file input and canvas. | Initial browser harness path |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
-| Local Minecraft PE can run on ARMv6 interpreter | Current local APK has only `armeabi-v7a`; default `run-apk-native` fails with missing `armeabi`. | Blocked for ARMv6 |
+| Local Minecraft PE can run on ARMv7-A interpreter | Current local APK has `armeabi-v7a` libraries; default `run-apk-native` now selects that ABI and the SDL2/live probes reach the current loading-frame blocker. | In progress |
 
 ## Current Blocking Evidence
 
@@ -49,9 +49,9 @@ Local files rechecked on 2026-05-13:
 /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1/lib/armeabi-v7a/libminecraftpe.so
 ```
 
-No `lib/armeabi/libminecraftpe.so` is present.
+The target `lib/armeabi-v7a/libminecraftpe.so` is present.
 
-Default ARMv6 runtime probe:
+Default ARMv7-A runtime probe:
 
 ```sh
 cargo run -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --steps 1000
@@ -60,10 +60,10 @@ cargo run -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.a
 Result:
 
 ```text
-native run failed: link failed: no native libraries found for ABI armeabi; available ABIs: armeabi-v7a
+default ABI: armeabi-v7a
 ```
 
-Forced ARMv7/NEON research probe:
+ARMv7/NEON runtime probe:
 
 ```sh
 AEMU_TRACE_HLE=gl AEMU_TRACE_HLE_LIMIT=120 AEMU_TRACE_STEPS=200000000 timeout 600s cargo run --release -- run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 1200000000 --launch
@@ -211,11 +211,6 @@ or index draws. Framebuffer readback after replay reports
 
 ## Required Next Input
 
-Provide an older Minecraft PE APK or extracted native library containing:
-
-```text
-lib/armeabi/libminecraftpe.so
-```
-
-The local `armeabi-v7a` APK remains useful as the active ARMv7/Thumb-2/NEON
-research target.
+No older APK is required for the current CPU target. The active blocker is still
+MCPE progression beyond the static gradient/loading frame under the local
+`armeabi-v7a` APK.

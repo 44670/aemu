@@ -26,8 +26,8 @@ extracted ARMv7 copy at:
 /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1/lib/armeabi-v7a/libminecraftpe.so
 ```
 
-No `lib/armeabi/libminecraftpe.so` and no older ARMv6 Minecraft PE APK were
-present.
+The local APK contains the active ARMv7-A target library:
+`lib/armeabi-v7a/libminecraftpe.so`.
 
 Native libraries found:
 
@@ -48,25 +48,24 @@ lib/armeabi-v7a/libminecraftpe.so: deflated, 23,554,092 -> 8,171,610 bytes
 The APK/ZIP metadata exposes the compression method and sizes, but not a
 reliable original deflate compression level.
 
-`libminecraftpe.so` is not an ARMv6 target. The project CLI confirms ARMv7,
-Thumb-2, VFPv3, and NEON:
+`libminecraftpe.so` is the active ARMv7-A target. The project CLI confirms
+ARMv7, Thumb-2, VFPv3, and NEON:
 
 ```sh
 cargo run -- probe-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk
 ```
 
-This APK is useful for HLE/API research, but not for validating the
-ARMv6/`armeabi` interpreter path.
+This APK drives the current ARMv7-A/`armeabi-v7a` interpreter and HLE
+validation path.
 
-The APK run planner makes the loader-side blocker explicit:
+The APK run planner should select the target ABI:
 
 ```sh
 cargo run -- plan-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk
 ```
 
-Result: no `lib/armeabi/*.so` group is present. All three native libraries are
-under `lib/armeabi-v7a/` and require ARMv7/Thumb-2; `libfmod.so` and
-`libminecraftpe.so` also require NEON.
+Result: the `lib/armeabi-v7a/*.so` group is present and selected. ARMv7,
+Thumb-2, VFPv3, and NEON requirements are expected for this target.
 
 Dynamic import inspection:
 
@@ -110,11 +109,7 @@ After adding the current system-library and MCPE target HLE import table, the
 same probe found 53,631 APK-local dynamic exports, reserved 578 guest HLE
 symbols, resolved 906 imports, and applied 119,008 relocation entries with zero
 unresolved imports.
-The default ARMv6 command still fails correctly with:
-
-```text
-no native libraries found for ABI armeabi; available ABIs: armeabi-v7a
-```
+The default ARMv7-A command selects `armeabi-v7a`.
 
 Native constructor execution probe:
 
@@ -166,8 +161,8 @@ calls and 3,811,776 copied payload bytes. The SDL2 replay submits all 744
 captured indexed draws with zero skipped client-attribute or missing-index
 draws, reads back nonzero RGB/alpha pixels across the 854x480 drawable, and
 reports zero host GL errors. The run does not stop on an undefined NEON opcode.
-An older APK with `lib/armeabi/libminecraftpe.so` is still required to validate
-the ARMv6 Minecraft PE path.
+The remaining runtime blocker is progression beyond the static loading frame,
+not absence of an ARMv7-A native library.
 
 Graphics imports seen in the dynamic symbol table are GLES 2.0-style, not GLES
 1.1 fixed-function-style. Examples include:

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::apk_plan::ARMV6_TARGET_ABI;
+use crate::apk_plan::ARMV7A_TARGET_ABI;
 use crate::elf_dynamic::{
     ElfDynamicError, ElfDynamicInfo, ElfDynamicSymbol, ElfImport, ElfRelocation, SymbolBinding,
     parse_elf_dynamic_bytes,
@@ -33,7 +33,7 @@ pub struct NativeLoadConfig {
 impl Default for NativeLoadConfig {
     fn default() -> Self {
         Self {
-            abi: ARMV6_TARGET_ABI.to_string(),
+            abi: ARMV7A_TARGET_ABI.to_string(),
             first_load_bias: DEFAULT_SHARED_OBJECT_BASE,
             load_align: DEFAULT_SHARED_OBJECT_ALIGN,
             hle_base: DEFAULT_HLE_BASE,
@@ -684,7 +684,7 @@ fn align_up(value: u32, align: u32) -> Option<u32> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::armv6::Memory;
+    use crate::armv7a::Memory;
 
     use super::*;
 
@@ -717,8 +717,8 @@ mod tests {
             ],
         );
         let apk = zip_with_files(&[
-            ("lib/armeabi/libgame.so", game),
-            ("lib/armeabi/libsupport.so", support),
+            ("lib/armeabi-v7a/libgame.so", game),
+            ("lib/armeabi-v7a/libsupport.so", support),
         ]);
 
         let mut report = load_apk_native_libraries_bytes(
@@ -793,8 +793,8 @@ mod tests {
             ],
         );
         let apk = zip_with_files(&[
-            ("lib/armeabi/libgame.so", game),
-            ("lib/armeabi/libsupport.so", support),
+            ("lib/armeabi-v7a/libgame.so", game),
+            ("lib/armeabi-v7a/libsupport.so", support),
         ]);
 
         let mut report = load_apk_native_libraries_bytes(
@@ -866,7 +866,7 @@ mod tests {
                 addend: 0,
             }],
         );
-        let apk = zip_with_files(&[("lib/armeabi/libgame.so", game)]);
+        let apk = zip_with_files(&[("lib/armeabi-v7a/libgame.so", game)]);
 
         let mut report = load_apk_native_libraries_bytes(
             PathBuf::from("game.apk"),
@@ -922,7 +922,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let game = test_so(&[], &[], &exports, &relocations);
-        let apk = zip_with_files(&[("lib/armeabi/libgame.so", game)]);
+        let apk = zip_with_files(&[("lib/armeabi-v7a/libgame.so", game)]);
 
         let mut report = load_apk_native_libraries_bytes(
             PathBuf::from("game.apk"),
@@ -953,7 +953,7 @@ mod tests {
     #[test]
     fn reports_requested_abi_when_apk_has_only_other_native_abi() {
         let apk = zip_with_files(&[(
-            "lib/armeabi-v7a/libgame.so",
+            "lib/x86/libgame.so",
             test_so(&[], &[], &[("game_func", 0x1000)], &[]),
         )]);
         let err = load_apk_native_libraries_bytes(
@@ -968,8 +968,8 @@ mod tests {
                 requested,
                 available,
             } => {
-                assert_eq!(requested, "armeabi");
-                assert_eq!(available, vec!["armeabi-v7a"]);
+                assert_eq!(requested, "armeabi-v7a");
+                assert_eq!(available, vec!["x86"]);
             }
             other => panic!("unexpected error: {other}"),
         }
