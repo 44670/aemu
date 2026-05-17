@@ -77,12 +77,28 @@ fn env_hwcap_value(name: &str, default_value: u32) -> u32 {
         .unwrap_or(default_value)
 }
 
+fn env_u64_value(name: &str, default_value: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| parse_env_u64_value(&raw))
+        .unwrap_or(default_value)
+}
+
 fn parse_env_u32_value(raw: &str) -> Option<u32> {
     let raw = raw.trim();
     if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
         u32::from_str_radix(hex, 16).ok()
     } else {
         raw.parse::<u32>().ok()
+    }
+}
+
+fn parse_env_u64_value(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        raw.parse::<u64>().ok()
     }
 }
 
@@ -407,6 +423,7 @@ pub struct HleRuntime {
     unwind_tables: Vec<HleUnwindTable>,
     random_state: u32,
     clock_ns: u64,
+    clock_step_ns: u64,
     fake_geometries: Vec<NamedGuestObject>,
     fake_texture_pairs: Vec<NamedGuestObject>,
     resource_texture_aliases: Option<Vec<(String, String)>>,
@@ -1047,6 +1064,7 @@ impl HleRuntime {
             unwind_tables: Vec::new(),
             random_state: 0x1234_5678,
             clock_ns: 0,
+            clock_step_ns: env_u64_value("AEMU_FAKE_TIME_STEP_NANOS", FAKE_TIME_STEP_NANOS),
             fake_geometries: Vec::new(),
             fake_texture_pairs: Vec::new(),
             resource_texture_aliases: None,
@@ -2375,7 +2393,7 @@ impl HleRuntime {
     }
 
     fn advance_clock(&mut self) -> FakeTime {
-        self.clock_ns = self.clock_ns.saturating_add(FAKE_TIME_STEP_NANOS);
+        self.clock_ns = self.clock_ns.saturating_add(self.clock_step_ns);
         let monotonic_secs = self.clock_ns / 1_000_000_000;
         let nsecs = (self.clock_ns % 1_000_000_000) as u32;
         FakeTime {
@@ -11555,6 +11573,29 @@ mod tests {
         hle.dispatch("time", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), FAKE_TIME_BASE_SECS as u32);
         assert_eq!(memory.load32(0x1130).unwrap(), FAKE_TIME_BASE_SECS as u32);
+    }
+
+    #[test]
+    fn dispatches_time_facades_with_configured_step() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        hle.clock_step_ns = 1_000_000;
+
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("clock_gettime", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1100).unwrap(), 0);
+        assert_eq!(memory.load32(0x1104).unwrap(), 1_000_000);
+
+        cpu.set_reg(0, 0x1120);
+        hle.dispatch("gettimeofday", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load32(0x1120).unwrap(), FAKE_TIME_BASE_SECS as u32);
+        assert_eq!(memory.load32(0x1124).unwrap(), 2_000);
     }
 
     #[test]

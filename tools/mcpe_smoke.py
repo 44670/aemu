@@ -13,12 +13,266 @@ import time
 DEFAULT_APK = pathlib.Path("/mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk")
 DEFAULT_BINARY = pathlib.Path("target/release/aemu")
 DEFAULT_ABI = "armeabi-v7a"
-DEFAULT_OUT_DIR = pathlib.Path("target/mcpe-smoke")
+DEFAULT_OUT_DIR = pathlib.Path("tmp/mcpe-smoke")
+DEFAULT_STEPS = 600_000_000
 MCPE_LIBRARY = "libminecraftpe.so"
 ARMV7_NEON_HWCAP = 0x0008B0D7
 ARMV7_NO_NEON_HWCAP = 0x0008A0D7
 
 MCPE_NATIVE_TRACE_PRESETS = {
+    "render-loop": {
+        "description": "trace MCPE GameRenderer render/resource-ready path for no-draw diagnosis",
+        "events": [
+            (0x009CC754, "GameRenderer::render.entry"),
+            (0x009CC8F2, "GameRenderer::render.resource-ready-gate"),
+            (0x009CD48C, "GameRenderer::_checkAndDrawInputUI.entry"),
+            (0x006BEB1C, "MinecraftClient::onResourcesLoaded.entry"),
+        ],
+        "mem32": [
+            (0x009CC8F2, "r7+0x238,+0x23c,+0x240,+0x244"),
+        ],
+        "bytes": [
+            (0x009CC8F2, "r7+0x238,16"),
+        ],
+        "event_limit": 200,
+    },
+    "resource-callback": {
+        "description": "trace MCPE ResourcePackManager listener/callback path that should call onResourcesLoaded",
+        "events": [
+            (0x006C0164, "MinecraftClient::init.entry"),
+            (0x006C3148, "MinecraftClient::setupRenderer.entry"),
+            (0x006C4856, "MinecraftClient::update.store-23c"),
+            (0x006BEB1C, "MinecraftClient::onResourcesLoaded.entry"),
+            (0x006BEFCE, "MinecraftClient::onResourcesLoaded.store-23e"),
+            (0x009CC8F2, "GameRenderer::render.resource-ready-gate"),
+            (0x00A13858, "ResourcePackManager::ctor.entry"),
+            (0x00A1391C, "ResourcePackManager::ctor.copy-callback-source"),
+            (0x00A13924, "ResourcePackManager::ctor.store-callback-fields"),
+            (0x00A1392C, "ResourcePackManager::ctor.clone-callback"),
+            (0x00A1397A, "ResourcePackManager::ctor.store-singleton"),
+            (0x00A13A58, "ResourcePackManager::init.entry"),
+            (0x00A13DDA, "ResourcePackManager::init.before-add-user-packs"),
+            (0x00A13DE2, "ResourcePackManager::init.before-load-last-active-packs"),
+            (0x00A1569C, "ResourcePackManager::registerListener.entry"),
+            (0x00A156FE, "ResourcePackManager::registerListener.inserted-node"),
+            (0x00A157D8, "ResourcePackManager::notifyActiveChanged.entry"),
+            (0x00A157DE, "ResourcePackManager::notifyActiveChanged.dispatch-listener"),
+            (0x00A157F0, "ResourcePackManager::setActiveResourcePacks.entry"),
+            (0x00A15926, "ResourcePackManager::setActiveResourcePacks.dispatch-listener"),
+            (0x00A16058, "ResourcePackManager::preloadTextures.entry"),
+            (0x00A1606E, "ResourcePackManager::preloadTextures.mark-preloading"),
+            (0x00A1623A, "ResourcePackManager::preloadTextures.loop-next-pack"),
+            (0x00A1636C, "ResourcePackManager::preloadTextures.before-worker-queue"),
+            (0x00A16378, "ResourcePackManager::preloadTextures.worker-queue-call"),
+            (0x00A1637C, "ResourcePackManager::preloadTextures.after-worker-queue"),
+            (0x00A163D8, "ResourcePackManager::preloadTextures.cleanup-work-fn"),
+            (0x00A1645A, "ResourcePackManager::preloadTextures.cleanup-done-fn"),
+            (0x00A166E6, "ResourcePackManager::preloadTextures.exception-cleanup-work-fn"),
+            (0x00A166F2, "ResourcePackManager::preloadTextures.exception-cleanup-work-fn-call"),
+            (0x00A16778, "ResourcePackManager::preloadTextures.exception-cleanup-done-fn"),
+            (0x00A16782, "ResourcePackManager::preloadTextures.exception-cleanup-done-fn-call"),
+            (0x00A16982, "ResourcePackManager::preloadTextures.return"),
+            (0x00AF6A0C, "BackgroundWorker::queue.entry"),
+            (0x00AF6A24, "BackgroundWorker::queue.store-job"),
+            (0x00AF6AFE, "BackgroundWorker::queue.enqueued"),
+            (0x00AF6B02, "BackgroundWorker::queue.signal"),
+            (0x00AF6B74, "BackgroundWorker::_processNextCallback.entry"),
+            (0x00AF6B8E, "BackgroundWorker::_processNextCallback.invoke"),
+            (0x00AF6D0C, "BackgroundWorker::_processCallbacks.entry"),
+            (0x00AF6D68, "BackgroundWorker::processNext.entry"),
+            (0x00AF6D8A, "BackgroundWorker::processNext.invoke-work"),
+            (0x00AF6D90, "BackgroundWorker::processNext.after-work"),
+            (0x00AF6DCC, "BackgroundWorker::_processNextCoroutine.entry"),
+            (0x00AF6DE4, "BackgroundWorker::_processNextCoroutine.invoke-work"),
+            (0x00AF6DEA, "BackgroundWorker::_processNextCoroutine.after-work"),
+            (0x00AF7294, "BackgroundWorker::flush.entry"),
+            (0x00AF72D4, "BackgroundWorker::sync.entry"),
+            (0x00AF8834, "WorkerPool::_createWorker.entry"),
+            (0x00AF88B8, "WorkerPool::_start.entry"),
+            (0x00AF88DA, "WorkerPool::_start.create-main-worker-call"),
+            (0x00AF8906, "WorkerPool::_start.store-main-worker"),
+            (0x00AF8D90, "WorkerPool::start.entry"),
+            (0x00AF8E40, "WorkerPool::_runCoroutines.entry"),
+            (0x00AF8EA2, "WorkerPool::_runCoroutines.before-worker-process"),
+            (0x00AF8EAA, "WorkerPool::_runCoroutines.after-worker-process"),
+            (0x00AF9050, "WorkerPool::processCoroutines.entry"),
+            (0x00AF90C6, "WorkerPool::processCoroutines.run-coroutines-call"),
+            (0x00AF90CA, "WorkerPool::processCoroutines.after-run-coroutines"),
+            (0x00AF92B0, "WorkerPool::getInstance.entry"),
+        ],
+        "mem32": [
+            (0x006C0164, "r0+0x238,+0x23c,+0x23e,+0x240"),
+            (0x006C3148, "r0+0x238,+0x23c,+0x23e,+0x240"),
+            (0x006C4856, "r4+0x238,+0x23c,+0x23e,+0x240"),
+            (0x006BEB1C, "r0+0x238,+0x23c,+0x23e,+0x240"),
+            (0x006BEFCE, "r8+0x238,+0x23c,+0x23e,+0x240"),
+            (0x009CC8F2, "r7+0x238,+0x23c,+0x23e,+0x240"),
+            (0x00A1391C, "r1+0,+0x4,+0x8,+0xc"),
+            (0x00A13924, "r4+0x2c,+0x30,+0x38,+0x3c"),
+            (0x00A1392C, "r4+0x2c,+0x30,+0x38,+0x3c"),
+            (0x00A1397A, "r4+0x10,+0x14,+0x30,+0x38,+0x3c"),
+            (0x00A13A58, "r0+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68"),
+            (0x00A13DDA, "r4+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68"),
+            (0x00A13DE2, "r4+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68"),
+            (0x00A1569C, "r0+0x8,+0xc,+0x10,+0x14"),
+            (0x00A1569C, "r1+0"),
+            (0x00A156FE, "r3+0,+0x4"),
+            (0x00A157DE, "r4+0,+0x4"),
+            (0x00A157F0, "r0+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68"),
+            (0x00A157F0, "r1+0,+0x4,+0x8"),
+            (0x00A15926, "r4+0,+0x4"),
+            (0x00A16058, "r0+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68,+0x6c"),
+            (0x00A1606E, "r5+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68,+0x6c"),
+            (0x00A1623A, "r5+0,+0x4,+0x8,+0xc"),
+            (0x00A1636C, "sp+0x44,+0x48,+0x4c,+0x5c,+0x60,+0x64,+0x7c,+0x80,+0x84"),
+            (0x00A1636C, "r10+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+            (0x00A16378, "sp+0x5c,+0x60,+0x64,+0x7c,+0x80,+0x84"),
+            (0x00A16378, "r1+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+            (0x00A1637C, "r10+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68,+0x6c"),
+            (0x00A163D8, "sp+0x5c,+0x60,+0x64"),
+            (0x00A1645A, "sp+0x7c,+0x80,+0x84"),
+            (0x00A166E6, "sp+0x5c,+0x60,+0x64"),
+            (0x00A16778, "sp+0x7c,+0x80,+0x84"),
+            (0x00A16982, "sp+0x138,+0x13c"),
+            (0x00AF6A0C, "r0+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60,+0x80,+0x88"),
+            (0x00AF6A0C, "r1+0,+0x4,+0x8,+0xc"),
+            (0x00AF6A0C, "r2+0,+0x4,+0x8,+0xc"),
+            (0x00AF6A24, "sp+0,+0x4,+0x8,+0xc,+0x20,+0x24"),
+            (0x00AF6AFE, "r6+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60,+0x80,+0x88"),
+            (0x00AF6B74, "r0+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+            (0x00AF6B8E, "sp+0,+0x4,+0x8,+0xc"),
+            (0x00AF6D68, "r0+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+            (0x00AF6D8A, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6D90, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6DCC, "r0+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6DE4, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6DEA, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF88B8, "r0+0,+0x4,+0x8,+0xc,+0x20,+0x24,+0x28,+0x50,+0x54,+0x58,+0xd8,+0xdc"),
+            (0x00AF8906, "r0+0,+0x20,+0x24,+0x28,+0xd8,+0xdc"),
+            (0x00AF8E40, "r0+0x50,+0x54,+0x58,+0x5c,+0x60,+0xd8,+0xdc"),
+            (0x00AF8EA2, "r10+0x50,+0x54,+0x58,+0xd8,+0xdc"),
+            (0x00AF9050, "r0+0x50,+0x54,+0x58,+0x5c,+0x60,+0x98,+0xa8,+0xd8,+0xdc"),
+            (0x00AF90CA, "r4+0x50,+0x54,+0x58,+0x5c,+0x60,+0xd8,+0xdc"),
+        ],
+        "deref32": [
+            (0x00A157DE, "r4+0x4,+0,+0x8"),
+            (0x00A15926, "r4+0x4,+0,+0x8"),
+            (0x00AF8EA2, "r7+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+        ],
+        "bytes": [
+            (0x006C4856, "r4+0x238,16"),
+            (0x006BEFCE, "r8+0x238,16"),
+            (0x009CC8F2, "r7+0x238,16"),
+            (0x00A13DDA, "r4+0x30,16"),
+            (0x00A13DE2, "r4+0x30,16"),
+            (0x00A1636C, "sp+0x5c,48"),
+            (0x00A1636C, "sp+0x7c,48"),
+        ],
+        "event_limit": 1600,
+    },
+    "resource-worker": {
+        "description": "trace MCPE resource preload worker execution without hot queue-loop events",
+        "events": [
+            (0x006BEB1C, "MinecraftClient::onResourcesLoaded.entry"),
+            (0x006BEFCE, "MinecraftClient::onResourcesLoaded.store-23e"),
+            (0x009CC8F2, "GameRenderer::render.resource-ready-gate"),
+            (0x00A1569C, "ResourcePackManager::registerListener.entry"),
+            (0x00A156FE, "ResourcePackManager::registerListener.inserted-node"),
+            (0x00A157D8, "ResourcePackManager::notifyActiveChanged.entry"),
+            (0x00A157DE, "ResourcePackManager::notifyActiveChanged.dispatch-listener"),
+            (0x00A157F0, "ResourcePackManager::setActiveResourcePacks.entry"),
+            (0x00A15926, "ResourcePackManager::setActiveResourcePacks.dispatch-listener"),
+            (0x00A16058, "ResourcePackManager::preloadTextures.entry"),
+            (0x00A16378, "ResourcePackManager::preloadTextures.worker-queue-call"),
+            (0x00A16982, "ResourcePackManager::preloadTextures.return"),
+            (0x00A17318, "ResourcePackManager::preloadTextures.done-callback"),
+            (0x00A1754C, "ResourcePackManager::preloadTextures.work-load-texture"),
+            (0x00AF6B74, "BackgroundWorker::_processNextCallback.entry"),
+            (0x00AF6B8E, "BackgroundWorker::_processNextCallback.invoke"),
+            (0x00AF6D0C, "BackgroundWorker::_processCallbacks.entry"),
+            (0x00AF6D68, "BackgroundWorker::processNext.entry"),
+            (0x00AF6D8A, "BackgroundWorker::processNext.invoke-work"),
+            (0x00AF6D90, "BackgroundWorker::processNext.after-work"),
+            (0x00AF6DCC, "BackgroundWorker::_processNextCoroutine.entry"),
+            (0x00AF6DE4, "BackgroundWorker::_processNextCoroutine.invoke-work"),
+            (0x00AF6DEA, "BackgroundWorker::_processNextCoroutine.after-work"),
+            (0x00AF8E40, "WorkerPool::_runCoroutines.entry"),
+            (0x00AF8EA2, "WorkerPool::_runCoroutines.before-worker-process"),
+            (0x00AF8EAA, "WorkerPool::_runCoroutines.after-worker-process"),
+            (0x00AF9050, "WorkerPool::processCoroutines.entry"),
+            (0x00AF90C6, "WorkerPool::processCoroutines.run-coroutines-call"),
+            (0x00AF90CA, "WorkerPool::processCoroutines.after-run-coroutines"),
+        ],
+        "mem32": [
+            (0x006BEFCE, "r8+0x238,+0x23c,+0x23e,+0x240"),
+            (0x009CC8F2, "r7+0x238,+0x23c,+0x23e,+0x240"),
+            (0x00A1569C, "r0+0x8,+0xc,+0x10,+0x14"),
+            (0x00A1569C, "r1+0"),
+            (0x00A156FE, "r3+0,+0x4"),
+            (0x00A157DE, "r4+0,+0x4"),
+            (0x00A157F0, "r0+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68,+0x6c"),
+            (0x00A15926, "r4+0,+0x4"),
+            (0x00A16058, "r0+0x10,+0x14,+0x30,+0x38,+0x3c,+0x48,+0x4c,+0x64,+0x68,+0x6c"),
+            (0x00A16378, "sp+0x5c,+0x60,+0x64,+0x7c,+0x80,+0x84"),
+            (0x00A16378, "r1+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60,+0x80,+0x88"),
+            (0x00A17318, "r0+0,+0x4,+0x8,+0xc,+0x10,+0x14"),
+            (0x00A1754C, "r0+0,+0x4,+0x8,+0xc"),
+            (0x00AF6B74, "r0+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+            (0x00AF6B8E, "sp+0,+0x4,+0x8,+0xc"),
+            (0x00AF6D68, "r0+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6D8A, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6D90, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6DCC, "r0+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6DE4, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF6DEA, "r4+0,+0x18,+0x1c,+0x20,+0x24,+0x28,+0x30,+0x40,+0x48"),
+            (0x00AF8E40, "r0+0x50,+0x54,+0x58,+0x5c,+0x60,+0xd8,+0xdc"),
+            (0x00AF8EA2, "r10+0x50,+0x54,+0x58,+0xd8,+0xdc"),
+            (0x00AF9050, "r0+0x50,+0x54,+0x58,+0x5c,+0x60,+0x98,+0xa8,+0xd8,+0xdc"),
+            (0x00AF90CA, "r4+0x50,+0x54,+0x58,+0x5c,+0x60,+0xd8,+0xdc"),
+        ],
+        "deref32": [
+            (0x00A157DE, "r4+0x4,+0,+0x8"),
+            (0x00A15926, "r4+0x4,+0,+0x8"),
+            (0x00AF8EA2, "r7+0,+0x18,+0x1c,+0x40,+0x44,+0x48,+0x5c,+0x60"),
+        ],
+        "bytes": [
+            (0x006BEFCE, "r8+0x238,16"),
+            (0x009CC8F2, "r7+0x238,16"),
+            (0x00A16378, "sp+0x5c,48"),
+            (0x00A16378, "sp+0x7c,48"),
+        ],
+        "event_limit": 3000,
+    },
+    "resource-done": {
+        "description": "trace ResourcePackManager preload done-callback counter and final resource-loaded callback",
+        "events": [
+            (0x006BEB1C, "MinecraftClient::onResourcesLoaded.entry"),
+            (0x006BEFCE, "MinecraftClient::onResourcesLoaded.store-23e"),
+            (0x009CC8F2, "GameRenderer::render.resource-ready-gate"),
+            (0x00A17318, "ResourcePackManager::preloadTextures.done-callback.entry"),
+            (0x00A17344, "ResourcePackManager::preloadTextures.done-callback.load-count"),
+            (0x00A1734A, "ResourcePackManager::preloadTextures.done-callback.check-count"),
+            (0x00A17350, "ResourcePackManager::preloadTextures.done-callback.final-callback-load"),
+            (0x00A1735E, "ResourcePackManager::preloadTextures.done-callback.final-callback-call"),
+            (0x00A1754C, "ResourcePackManager::preloadTextures.work-load-texture.entry"),
+        ],
+        "mem32": [
+            (0x006BEB1C, "r0+0x238,+0x23c,+0x23e,+0x240"),
+            (0x006BEFCE, "r8+0x238,+0x23c,+0x23e,+0x240"),
+            (0x009CC8F2, "r7+0x238,+0x23c,+0x23e,+0x240"),
+            (0x00A17318, "r0+0,+0x4,+0x8,+0xc,+0x10,+0x14"),
+            (0x00A17344, "r0+0"),
+            (0x00A1734A, "r4+0x30,+0x38,+0x3c,+0x60"),
+            (0x00A17350, "r4+0x30,+0x38,+0x3c,+0x60"),
+            (0x00A1735E, "r4+0x30,+0x38,+0x3c,+0x60"),
+            (0x00A1754C, "r0+0,+0x4,+0x8,+0xc"),
+        ],
+        "bytes": [
+            (0x006BEFCE, "r8+0x238,16"),
+            (0x009CC8F2, "r7+0x238,16"),
+        ],
+        "event_limit": 5000,
+    },
     "webtoken": {
         "description": "trace MCPE certificate WebToken creation without HLE-ing game logic",
         "events": [
@@ -624,6 +878,26 @@ RECENT_PC_RE = re.compile(
     r"sp=(?P<sp>0x[0-9a-fA-F]+) lr=(?P<lr>0x[0-9a-fA-F]+)$"
 )
 LABEL_RE = re.compile(r"^\s*([0-9a-fA-F]+) <([^>]+)>:")
+FIRST_SWAP_RE = re.compile(r"native activity reached eglSwapBuffers at step (?P<step>\d+)")
+LIVE_FRAME_RE = re.compile(
+    r"^sdl2-live: frame=(?P<frame>\d+) "
+    r"events=(?P<events>\d+) "
+    r"payload=(?P<payload>\d+) "
+    r"draws arrays=(?P<draw_arrays>\d+) "
+    r"elements=(?P<draw_elements>\d+) "
+    r"skipped_client_attrib=(?P<skipped_client_attrib>\d+) "
+    r"skipped_missing_indices=(?P<skipped_missing_indices>\d+) "
+    r"readback=(?P<readback_width>\d+)x(?P<readback_height>\d+) "
+    r"rgb=(?P<readback_rgb>\d+) "
+    r"alpha=(?P<readback_alpha>\d+) "
+    r"gl_errors=(?P<gl_errors>\d+)"
+)
+LIVE_FRAME_LIMIT_RE = re.compile(
+    r"^sdl2-live: reached frame limit "
+    r"frames=(?P<frames>\d+) "
+    r"events=(?P<events>\d+) "
+    r"payload=(?P<payload>\d+)"
+)
 
 
 STAGE_MARKERS = [
@@ -633,7 +907,9 @@ STAGE_MARKERS = [
     ("native_register_this", "launch: nativeRegisterThis"),
     ("activity_on_create", "launch: ANativeActivity_onCreate"),
     ("android_main", "launch: android_main"),
+    ("first_swap", "native activity reached eglSwapBuffers"),
     ("completed", "native activity launch returned"),
+    ("completed", "sdl2-live: reached frame limit"),
 ]
 
 
@@ -661,6 +937,7 @@ def run_capture(cmd, *, env=None, timeout=60, log_path=None):
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         returncode = None
+
     elapsed = time.time() - started
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -794,6 +1071,11 @@ def parse_run_log(run_log: str):
         if marker in run_log:
             reached_stage = stage
 
+    first_swap_step = None
+    match = FIRST_SWAP_RE.search(run_log)
+    if match:
+        first_swap_step = int(match.group("step"))
+
     crash = None
     match = CRASH_RE.search(run_log)
     if match:
@@ -804,20 +1086,47 @@ def parse_run_log(run_log: str):
         }
 
     recent = []
+    live_frames = []
+    frame_limit = None
     for line in run_log.splitlines():
         match = RECENT_PC_RE.match(line)
-        if not match:
+        if match:
+            recent.append(
+                {
+                    "isa": match.group("isa"),
+                    "pc": parse_u32(match.group("pc")),
+                    "sp": parse_u32(match.group("sp")),
+                    "lr": parse_u32(match.group("lr")),
+                }
+            )
             continue
-        recent.append(
-            {
-                "isa": match.group("isa"),
-                "pc": parse_u32(match.group("pc")),
-                "sp": parse_u32(match.group("sp")),
-                "lr": parse_u32(match.group("lr")),
-            }
-        )
+        match = LIVE_FRAME_RE.match(line)
+        if match:
+            live_frames.append({key: int(value) for key, value in match.groupdict().items()})
+            continue
+        match = LIVE_FRAME_LIMIT_RE.match(line)
+        if match:
+            frame_limit = {key: int(value) for key, value in match.groupdict().items()}
+
+    live = {
+        "logged_frame_count": len(live_frames),
+        "max_logged_frame": max((frame["frame"] for frame in live_frames), default=0),
+        "max_logged_draw_elements": max(
+            (frame["draw_elements"] for frame in live_frames), default=0
+        ),
+        "max_logged_draw_arrays": max((frame["draw_arrays"] for frame in live_frames), default=0),
+        "max_logged_readback_rgb": max(
+            (frame["readback_rgb"] for frame in live_frames), default=0
+        ),
+        "max_logged_gl_errors": max((frame["gl_errors"] for frame in live_frames), default=0),
+        "last_logged_frame": live_frames[-1] if live_frames else None,
+        "frame_limit": frame_limit,
+    }
+
     return {
         "reached_stage": reached_stage,
+        "first_swap_step": first_swap_step,
+        "live": live,
         "native_run_failed": "native run failed:" in run_log,
         "crash": crash,
         "recent_guest_pcs": recent,
@@ -907,13 +1216,49 @@ def count_jsonl(path: pathlib.Path) -> int:
         return sum(1 for line in handle if line.strip())
 
 
+def summarize_gles_events(path: pathlib.Path):
+    summary = {
+        "rows": 0,
+        "kind_counts": {},
+        "first_draw_index": None,
+        "last_event_index": None,
+    }
+    if not path.exists():
+        return summary
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            summary["rows"] += 1
+            kind = row.get("kind") or "<unknown>"
+            summary["kind_counts"][kind] = summary["kind_counts"].get(kind, 0) + 1
+            index = row.get("index")
+            if isinstance(index, int):
+                summary["last_event_index"] = index
+                if kind in ("DrawElements", "DrawArrays") and summary["first_draw_index"] is None:
+                    summary["first_draw_index"] = index
+    return summary
+
+
 def collect_artifacts(trace_dir: pathlib.Path):
     draw_dir = trace_dir / "sdl-draw"
     gles_path = trace_dir / "gles_events.jsonl"
     native_events_path = trace_dir / "native_events.jsonl"
+    gles = summarize_gles_events(gles_path)
+    kind_counts = gles["kind_counts"]
     return {
         "gles_events_jsonl": str(gles_path),
-        "gles_event_count": count_jsonl(gles_path),
+        "gles_event_count": gles["rows"],
+        "gles_kind_counts": kind_counts,
+        "gles_swap_count": kind_counts.get("SwapBuffers", 0),
+        "gles_draw_arrays_count": kind_counts.get("DrawArrays", 0),
+        "gles_draw_elements_count": kind_counts.get("DrawElements", 0),
+        "gles_first_draw_index": gles["first_draw_index"],
+        "gles_last_event_index": gles["last_event_index"],
         "native_events_jsonl": str(native_events_path),
         "native_event_count": count_jsonl(native_events_path),
         "sdl_draw_dir": str(draw_dir),
@@ -973,6 +1318,43 @@ def validate_expectations(args, summary):
         for expected in args.expect_run_log_contains:
             if expected not in run_log:
                 errors.append(f"expected run log to contain {expected!r}")
+    live = summary["run"].get("live") or {}
+    artifacts = summary["artifacts"]
+    if args.min_live_frame and live.get("max_logged_frame", 0) < args.min_live_frame:
+        errors.append(
+            f"expected logged live frame >= {args.min_live_frame}, "
+            f"got {live.get('max_logged_frame', 0)}"
+        )
+    if args.min_gles_events and artifacts["gles_event_count"] < args.min_gles_events:
+        errors.append(
+            f"expected at least {args.min_gles_events} GLES events, "
+            f"got {artifacts['gles_event_count']}"
+        )
+    if args.min_gles_swaps and artifacts["gles_swap_count"] < args.min_gles_swaps:
+        errors.append(
+            f"expected at least {args.min_gles_swaps} GLES SwapBuffers, "
+            f"got {artifacts['gles_swap_count']}"
+        )
+    if args.min_gles_draw_elements and artifacts["gles_draw_elements_count"] < args.min_gles_draw_elements:
+        errors.append(
+            f"expected at least {args.min_gles_draw_elements} GLES DrawElements, "
+            f"got {artifacts['gles_draw_elements_count']}"
+        )
+    if args.min_sdl_draw_pngs and artifacts["sdl_draw_png_count"] < args.min_sdl_draw_pngs:
+        errors.append(
+            f"expected at least {args.min_sdl_draw_pngs} SDL draw PNGs, "
+            f"got {artifacts['sdl_draw_png_count']}"
+        )
+    if args.min_readback_rgb and live.get("max_logged_readback_rgb", 0) < args.min_readback_rgb:
+        errors.append(
+            f"expected logged readback rgb >= {args.min_readback_rgb}, "
+            f"got {live.get('max_logged_readback_rgb', 0)}"
+        )
+    if args.max_gl_errors is not None and live.get("max_logged_gl_errors", 0) > args.max_gl_errors:
+        errors.append(
+            f"expected logged GL errors <= {args.max_gl_errors}, "
+            f"got {live.get('max_logged_gl_errors', 0)}"
+        )
     return errors
 
 
@@ -991,6 +1373,17 @@ def print_summary(summary, expectation_errors):
         f"elapsed={summary['process']['elapsed_seconds']}s"
     )
     print(f"stage: {summary['run'].get('reached_stage')}")
+    live = summary["run"].get("live") or {}
+    if live.get("logged_frame_count"):
+        print(
+            "live: "
+            f"first_swap_step={summary['run'].get('first_swap_step')} "
+            f"logged_frames={live.get('logged_frame_count')} "
+            f"max_frame={live.get('max_logged_frame')} "
+            f"max_logged_draw_elements={live.get('max_logged_draw_elements')} "
+            f"max_rgb={live.get('max_logged_readback_rgb')} "
+            f"max_gl_errors={live.get('max_logged_gl_errors')}"
+        )
     if crash:
         print(
             "crash: "
@@ -1028,6 +1421,8 @@ def print_summary(summary, expectation_errors):
     print(
         "artifacts: "
         f"gles_events={artifacts['gles_event_count']} "
+        f"gles_swaps={artifacts['gles_swap_count']} "
+        f"gles_draw_elements={artifacts['gles_draw_elements_count']} "
         f"native_events={artifacts['native_event_count']} "
         f"sdl_draw_pngs={artifacts['sdl_draw_png_count']} "
         f"sdl_draw_manifest_rows={artifacts['sdl_draw_manifest_count']}"
@@ -1052,11 +1447,22 @@ def build_arg_parser():
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--trace-dir")
     parser.add_argument("--allow-existing-trace-dir", action="store_true")
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--display", default=":0")
-    parser.add_argument("--gles-event-limit", type=int, default=2000)
+    parser.add_argument("--gles-event-limit", type=int, default=50000)
     parser.add_argument("--draw-dump-limit", type=int, default=10)
+    parser.add_argument(
+        "--fake-time-step-nanos",
+        type=int,
+        help="set AEMU_FAKE_TIME_STEP_NANOS for Android time HLE diagnostics",
+    )
+    parser.add_argument(
+        "--guest-thread-swap-slices",
+        type=int,
+        help="set AEMU_GUEST_THREAD_SWAP_SLICES for frame-boundary guest worker scheduling",
+    )
     parser.add_argument(
         "--cpu-feature-preset",
         choices=["default", "no-neon"],
@@ -1109,7 +1515,10 @@ def build_arg_parser():
     )
     parser.add_argument("--expect-crash-pc")
     parser.add_argument("--expect-fault-address")
-    parser.add_argument("--expect-stage", choices=[stage for stage, _marker in STAGE_MARKERS])
+    parser.add_argument(
+        "--expect-stage",
+        choices=list(dict.fromkeys(stage for stage, _marker in STAGE_MARKERS)),
+    )
     parser.add_argument("--expect-exit", choices=["any", "zero", "nonzero"], default="any")
     parser.add_argument(
         "--expect-native-event",
@@ -1121,6 +1530,13 @@ def build_arg_parser():
         action="append",
         help="require run.log to contain this exact substring",
     )
+    parser.add_argument("--min-live-frame", type=int, default=0)
+    parser.add_argument("--min-gles-events", type=int, default=0)
+    parser.add_argument("--min-gles-swaps", type=int, default=0)
+    parser.add_argument("--min-gles-draw-elements", type=int, default=0)
+    parser.add_argument("--min-sdl-draw-pngs", type=int, default=0)
+    parser.add_argument("--min-readback-rgb", type=int, default=0)
+    parser.add_argument("--max-gl-errors", type=int)
     parser.add_argument("--echo-log", action="store_true")
     return parser
 
@@ -1163,6 +1579,10 @@ def main(argv=None):
         env["AEMU_HWCAP"] = args.hwcap
     if args.hwcap2:
         env["AEMU_HWCAP2"] = args.hwcap2
+    if args.fake_time_step_nanos is not None:
+        env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
+    if args.guest_thread_swap_slices is not None:
+        env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
     env["AEMU_TRACE_GLES_EVENTS_JSONL"] = str(trace_dir / "gles_events.jsonl")
     env["AEMU_TRACE_GLES_EVENTS_MATCH"] = (
         "SwapBuffers,UseProgram,BindTexture,DrawElements,TexImage2D,TexSubImage2D"
@@ -1186,6 +1606,8 @@ def main(argv=None):
         str(apk),
         "--abi",
         args.abi,
+        "--steps",
+        str(args.steps),
         "--sdl2-live",
         "--sdl2-frames",
         str(args.frames),
@@ -1226,6 +1648,12 @@ def main(argv=None):
             "filter": args.trace_hle,
             "limit": args.trace_hle_limit,
             "file_trace": args.trace_hle_file,
+        },
+        "time": {
+            "fake_step_nanos": args.fake_time_step_nanos,
+        },
+        "threads": {
+            "guest_thread_swap_slices": args.guest_thread_swap_slices,
         },
         "run": parsed_run,
         "artifacts": collect_artifacts(trace_dir),

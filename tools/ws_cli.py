@@ -328,7 +328,7 @@ def build_parser():
     debug.set_defaults(func=cmd_debug)
 
     screenshot = sub.add_parser("screenshot", help="save framebuffer screenshot as PNG")
-    screenshot.add_argument("--out", default="target/aemu-ws-screenshot.png")
+    screenshot.add_argument("--out", default="tmp/aemu-ws-screenshot.png")
     screenshot.set_defaults(func=cmd_screenshot)
 
     pointer = sub.add_parser("pointer", help="send one pointer event")
@@ -351,7 +351,7 @@ def build_parser():
     journal.add_argument(
         "script",
         nargs="?",
-        help="actions, for example: touch 280,386; wait 1; screenshot target/out.png",
+        help="actions, for example: touch 280,386; wait 1; screenshot tmp/out.png",
     )
     journal.add_argument("--file", help="read actions from a script file")
     journal.add_argument("--id", type=int, default=0)

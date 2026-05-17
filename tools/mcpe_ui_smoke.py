@@ -1,0 +1,686 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import queue
+import re
+import subprocess
+import sys
+import threading
+import time
+
+import ws_cli
+
+
+DEFAULT_APK = pathlib.Path("/mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk")
+DEFAULT_BINARY = pathlib.Path("target/release/aemu")
+DEFAULT_ABI = "armeabi-v7a"
+DEFAULT_OUTPUT_ROOT = pathlib.Path("tmp")
+DEFAULT_WS_ADDR = "127.0.0.1:0"
+DEFAULT_STEPS = 600_000_000
+DEFAULT_SCRIPT = (
+    "debug; "
+    "screenshot {trace_dir}/before.png; "
+    "tap 427,240; "
+    "wait 0.25; "
+    "screenshot {trace_dir}/after.png; "
+    "debug"
+)
+
+WS_URL_RE = re.compile(r"sdl2-live: websocket (?P<url>ws://\S+)")
+
+
+def timestamp():
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def prepare_output_dir(path):
+    if path is None:
+        out_dir = DEFAULT_OUTPUT_ROOT / f"mcpe-ui-smoke-{timestamp()}"
+    else:
+        out_dir = pathlib.Path(path)
+    (out_dir / "screenshots").mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def load_script(args, out_dir):
+    chunks = []
+    if args.script_file:
+        chunks.append(pathlib.Path(args.script_file).read_text(encoding="utf-8"))
+    if args.script:
+        chunks.append(args.script)
+    if not chunks:
+        chunks.append(DEFAULT_SCRIPT)
+    text = "\n".join(chunks)
+    return text.format(trace_dir=out_dir, screenshots=out_dir / "screenshots")
+
+
+def start_reader(process, log_path):
+    lines = queue.Queue()
+
+    def read_stdout():
+        with log_path.open("w", encoding="utf-8") as log:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                lines.put(line)
+
+    thread = threading.Thread(target=read_stdout, daemon=True)
+    thread.start()
+    return lines, thread
+
+
+def wait_for_ws_url(process, lines, timeout):
+    deadline = time.monotonic() + timeout
+    buffered = []
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            while True:
+                try:
+                    buffered.append(lines.get_nowait())
+                except queue.Empty:
+                    break
+            raise RuntimeError(
+                "emulator exited before WebSocket became available; "
+                f"returncode={process.returncode}"
+            )
+        try:
+            line = lines.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        buffered.append(line)
+        match = WS_URL_RE.search(line)
+        if match:
+            return match.group("url"), buffered
+    raise RuntimeError(f"timed out waiting {timeout:.1f}s for SDL2 WebSocket URL")
+
+
+def wait_for_debug_frames(client, min_frames, timeout, journal):
+    if min_frames <= 0:
+        return None
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            response = client.request({"cmd": "debug"})
+        except Exception as err:
+            response = {"ok": False, "error": str(err)}
+        last = response
+        journal.write(
+            json.dumps(
+                {
+                    "kind": "wait_debug",
+                    "target_frames": min_frames,
+                    "response": response,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        if response.get("ok") and int(response.get("frames") or 0) >= min_frames:
+            return response
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"timed out waiting for debug frames >= {min_frames}; last={json.dumps(last)}"
+    )
+
+
+def action_json(step):
+    value = {"action": step.action}
+    value.update(step.kwargs)
+    return value
+
+
+def ensure_parent(path):
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def run_step(client, step, args):
+    if step.action == "tap":
+        down, up = ws_cli.send_tap(
+            client,
+            step.kwargs["x"],
+            step.kwargs["y"],
+            args.pointer_id,
+            args.pressure,
+            args.tap_duration_ms,
+        )
+        return {"ok": bool(down.get("ok") and up.get("ok")), "down": down, "up": up}
+    if step.action == "pointer":
+        pressure = 0.0 if step.kwargs["phase"] == "up" else args.pressure
+        return client.request(
+            ws_cli.make_pointer_payload(
+                step.kwargs["phase"],
+                step.kwargs["x"],
+                step.kwargs["y"],
+                args.pointer_id,
+                pressure,
+            )
+        )
+    if step.action == "wait":
+        time.sleep(step.kwargs["seconds"])
+        return {"ok": True, "seconds": step.kwargs["seconds"]}
+    if step.action == "screenshot":
+        ensure_parent(step.kwargs["out"])
+        result, _size = ws_cli.save_screenshot(client, step.kwargs["out"])
+        return result
+    if step.action == "debug":
+        return client.request({"cmd": "debug"})
+    return {"ok": False, "error": f"unhandled action {step.action!r}"}
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def summarize_screenshot(result):
+    if not result.get("ok") or not result.get("path"):
+        return None
+    path = pathlib.Path(result["path"])
+    if not path.exists():
+        return None
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": file_sha256(path),
+        "format": result.get("format"),
+        "width": result.get("width"),
+        "height": result.get("height"),
+    }
+
+
+def count_jsonl(path):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def read_jsonl(path):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def native_event_matches(row, needle):
+    needle = needle.lower()
+    event = row.get("event")
+    if isinstance(event, str) and needle in event.lower():
+        return True
+    pc = row.get("pc")
+    return isinstance(pc, int) and needle in f"0x{pc:08x}".lower()
+
+
+def collect_artifacts(out_dir):
+    out_dir = pathlib.Path(out_dir)
+    gles_path = out_dir / "gles_events.jsonl"
+    native_path = out_dir / "native_events.jsonl"
+    draw_dir = out_dir / "sdl-draw"
+    return {
+        "gles_events_jsonl": str(gles_path),
+        "gles_event_count": count_jsonl(gles_path),
+        "native_events_jsonl": str(native_path),
+        "native_event_count": count_jsonl(native_path),
+        "sdl_draw_dir": str(draw_dir),
+        "sdl_draw_png_count": len(list(draw_dir.glob("*.png"))) if draw_dir.exists() else 0,
+        "sdl_draw_manifest_jsonl": str(draw_dir / "draw_manifest.jsonl"),
+        "sdl_draw_manifest_count": count_jsonl(draw_dir / "draw_manifest.jsonl"),
+    }
+
+
+def append_env_list(env, name, values):
+    if values:
+        env[name] = ";".join(values)
+
+
+def apply_trace_env(args, out_dir, env):
+    env["AEMU_TRACE_GLES_EVENTS_JSONL"] = str(out_dir / "gles_events.jsonl")
+    env["AEMU_TRACE_GLES_EVENTS_MATCH"] = args.gles_event_match
+    env["AEMU_TRACE_GLES_EVENTS_LIMIT"] = str(args.gles_event_limit)
+    if args.fake_time_step_nanos is not None:
+        env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
+    if args.guest_thread_swap_slices is not None:
+        env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
+    if args.trace_hle:
+        env["AEMU_TRACE_HLE"] = args.trace_hle
+    if args.trace_hle_limit is not None:
+        env["AEMU_TRACE_HLE_LIMIT"] = str(args.trace_hle_limit)
+    if args.trace_hle_file:
+        env["AEMU_TRACE_HLE_FILE"] = "1"
+    if args.native_event:
+        env["AEMU_TRACE_NATIVE_EVENTS_JSONL"] = str(out_dir / "native_events.jsonl")
+    append_env_list(env, "AEMU_TRACE_NATIVE_EVENTS", args.native_event)
+    append_env_list(env, "AEMU_TRACE_NATIVE_EVENT_MEM32", args.native_event_mem32)
+    append_env_list(env, "AEMU_TRACE_NATIVE_EVENT_DEREF32", args.native_event_deref32)
+    append_env_list(env, "AEMU_TRACE_NATIVE_EVENT_CXX_STRING", args.native_event_cxx_string)
+    append_env_list(env, "AEMU_TRACE_NATIVE_EVENT_BYTES", args.native_event_bytes)
+    if args.native_event_limit is not None:
+        env["AEMU_TRACE_NATIVE_EVENTS_LIMIT"] = str(args.native_event_limit)
+    if args.dump_sdl_draws:
+        draw_dir = out_dir / "sdl-draw"
+        draw_dir.mkdir(parents=True, exist_ok=True)
+        env["AEMU_DUMP_SDL_DRAW_CHANGES_DIR"] = str(draw_dir)
+        env["AEMU_DUMP_SDL_DRAW_CHANGES_MATCH"] = args.sdl_draw_match
+        env["AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT"] = str(args.sdl_draw_limit)
+        env["AEMU_TRACE_SDL_DRAW_CHANGES"] = str(args.sdl_draw_limit)
+
+
+def summarize_env(env):
+    keys = [
+        "DISPLAY",
+        "SDL_VIDEO_X11_FORCE_EGL",
+        "AEMU_TRACE_GLES_EVENTS_JSONL",
+        "AEMU_TRACE_GLES_EVENTS_MATCH",
+        "AEMU_TRACE_GLES_EVENTS_LIMIT",
+        "AEMU_FAKE_TIME_STEP_NANOS",
+        "AEMU_GUEST_THREAD_SWAP_SLICES",
+        "AEMU_TRACE_HLE",
+        "AEMU_TRACE_HLE_LIMIT",
+        "AEMU_TRACE_HLE_FILE",
+        "AEMU_TRACE_NATIVE_EVENTS_JSONL",
+        "AEMU_TRACE_NATIVE_EVENTS",
+        "AEMU_TRACE_NATIVE_EVENT_MEM32",
+        "AEMU_TRACE_NATIVE_EVENT_DEREF32",
+        "AEMU_TRACE_NATIVE_EVENT_CXX_STRING",
+        "AEMU_TRACE_NATIVE_EVENT_BYTES",
+        "AEMU_TRACE_NATIVE_EVENTS_LIMIT",
+        "AEMU_DUMP_SDL_DRAW_CHANGES_DIR",
+        "AEMU_DUMP_SDL_DRAW_CHANGES_MATCH",
+        "AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT",
+        "AEMU_TRACE_SDL_DRAW_CHANGES",
+    ]
+    return {key: env.get(key) for key in keys if env.get(key) is not None}
+
+
+def run_journal(client, steps, args, journal_path):
+    entries = []
+    screenshots = []
+    with journal_path.open("a", encoding="utf-8") as journal:
+        for index, step in enumerate(steps, start=1):
+            started = time.monotonic()
+            try:
+                result = run_step(client, step, args)
+                ok = bool(result.get("ok"))
+                error = None
+            except Exception as err:
+                result = None
+                ok = False
+                error = str(err)
+            entry = {
+                "kind": "step",
+                "step": index,
+                "action": action_json(step),
+                "ok": ok,
+                "elapsed_seconds": round(time.monotonic() - started, 6),
+                "result": result,
+            }
+            if error is not None:
+                entry["error"] = error
+            if result is not None and step.action == "screenshot":
+                screenshot = summarize_screenshot(result)
+                if screenshot is not None:
+                    screenshots.append(screenshot)
+                    entry["screenshot"] = screenshot
+            journal.write(json.dumps(entry, sort_keys=True) + "\n")
+            entries.append(entry)
+            if not ok:
+                break
+    return entries, screenshots
+
+
+def terminate_process(process, timeout=5):
+    if process.poll() is not None:
+        return False
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout)
+    return True
+
+
+def build_emulator_cmd(args, ws_addr):
+    return [
+        str(args.binary),
+        "run-apk-native",
+        str(args.apk),
+        "--abi",
+        args.abi,
+        "--steps",
+        str(args.steps),
+        "--sdl2-live",
+        "--sdl2-frames",
+        str(args.frames),
+        "--ws",
+        ws_addr,
+    ]
+
+
+def collect_debug(entries):
+    values = []
+    for entry in entries:
+        if entry.get("action", {}).get("action") != "debug":
+            continue
+        result = entry.get("result")
+        if isinstance(result, dict):
+            values.append(result)
+    return values
+
+
+def validate_summary(args, summary):
+    errors = []
+    failed_steps = [entry for entry in summary["journal"]["entries"] if not entry.get("ok")]
+    if failed_steps:
+        first = failed_steps[0]
+        errors.append(f"journal step {first['step']} failed: {first.get('error') or first.get('result')}")
+
+    screenshots = summary["journal"]["screenshots"]
+    if args.expect_screenshot_change:
+        if len(screenshots) < 2:
+            errors.append("expected screenshot change, but fewer than two screenshots were captured")
+        elif screenshots[0]["sha256"] == screenshots[-1]["sha256"]:
+            errors.append(
+                "expected first and last screenshots to differ, "
+                f"but both have sha256={screenshots[0]['sha256']}"
+            )
+
+    for shot in screenshots:
+        if shot["bytes"] < args.min_screenshot_bytes:
+            errors.append(
+                f"{shot['path']}: screenshot is only {shot['bytes']} bytes, "
+                f"expected at least {args.min_screenshot_bytes}"
+            )
+
+    debug_values = collect_debug(summary["journal"]["entries"])
+    if debug_values:
+        last_debug = debug_values[-1]
+        gl_errors = int(last_debug.get("gl_error_count") or 0)
+        if gl_errors > args.max_gl_errors:
+            errors.append(f"expected gl_error_count <= {args.max_gl_errors}, got {gl_errors}")
+        frames = int(last_debug.get("frames") or 0)
+        if frames < args.expect_frames:
+            errors.append(f"expected debug frames >= {args.expect_frames}, got {frames}")
+        readback_rgb = int(last_debug.get("readback_nonzero_rgb_pixels") or 0)
+        if readback_rgb < args.min_readback_rgb:
+            errors.append(
+                f"expected readback_nonzero_rgb_pixels >= {args.min_readback_rgb}, "
+                f"got {readback_rgb}"
+            )
+        draw_elements = int(last_debug.get("draw_elements") or 0)
+        if draw_elements < args.min_draw_elements:
+            errors.append(f"expected draw_elements >= {args.min_draw_elements}, got {draw_elements}")
+    elif args.expect_frames > 0:
+        errors.append("no debug step was captured")
+
+    if args.expect_native_event:
+        native_rows = read_jsonl(summary["artifacts"]["native_events_jsonl"])
+        for expected in args.expect_native_event:
+            if not any(native_event_matches(row, expected) for row in native_rows):
+                errors.append(f"expected native event matching {expected!r}")
+
+    artifacts = summary["artifacts"]
+    if artifacts["gles_event_count"] < args.min_gles_events:
+        errors.append(
+            f"expected at least {args.min_gles_events} GLES trace events, "
+            f"got {artifacts['gles_event_count']}"
+        )
+    if artifacts["native_event_count"] < args.min_native_events:
+        errors.append(
+            f"expected at least {args.min_native_events} native trace events, "
+            f"got {artifacts['native_event_count']}"
+        )
+    if artifacts["sdl_draw_png_count"] < args.min_sdl_draw_pngs:
+        errors.append(
+            f"expected at least {args.min_sdl_draw_pngs} SDL draw PNGs, "
+            f"got {artifacts['sdl_draw_png_count']}"
+        )
+
+    run_log = None
+    if args.expect_run_log_contains or args.expect_hle_call:
+        run_log_path = pathlib.Path(summary["process"]["run_log"])
+        run_log = run_log_path.read_text(encoding="utf-8", errors="replace")
+    if args.expect_run_log_contains:
+        for expected in args.expect_run_log_contains:
+            if expected not in run_log:
+                errors.append(f"expected run log to contain {expected!r}")
+    if args.expect_hle_call:
+        for expected in args.expect_hle_call:
+            if f"name={expected}" not in run_log:
+                errors.append(f"expected HLE call {expected!r} in run log")
+
+    process = summary["process"]
+    if process["returncode"] not in (0, None) and not process["terminated_by_harness"]:
+        errors.append(f"emulator exited with returncode {process['returncode']}")
+    return errors
+
+
+def print_summary(summary):
+    errors = summary["expectation_errors"]
+    print(f"mcpe-ui-smoke: trace_dir={summary['trace_dir']}")
+    print(f"mcpe-ui-smoke: ws_url={summary['ws_url']}")
+    print(
+        "mcpe-ui-smoke: "
+        f"steps={len(summary['journal']['entries'])} "
+        f"screenshots={len(summary['journal']['screenshots'])} "
+        f"returncode={summary['process']['returncode']} "
+        f"terminated_by_harness={summary['process']['terminated_by_harness']}"
+    )
+    for shot in summary["journal"]["screenshots"]:
+        print(
+            "mcpe-ui-smoke: screenshot "
+            f"{shot['path']} {shot.get('width')}x{shot.get('height')} "
+            f"bytes={shot['bytes']} sha256={shot['sha256']}"
+        )
+    artifacts = summary.get("artifacts", {})
+    print(
+        "mcpe-ui-smoke: artifacts "
+        f"gles_events={artifacts.get('gles_event_count', 0)} "
+        f"native_events={artifacts.get('native_event_count', 0)} "
+        f"sdl_draw_pngs={artifacts.get('sdl_draw_png_count', 0)}"
+    )
+    if errors:
+        for error in errors:
+            print(f"mcpe-ui-smoke: ERROR: {error}", file=sys.stderr)
+    else:
+        print("mcpe-ui-smoke: ok")
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Launch MCPE in SDL2 live mode and run a WebSocket UI journal"
+    )
+    parser.add_argument("--apk", type=pathlib.Path, default=DEFAULT_APK)
+    parser.add_argument("--binary", type=pathlib.Path, default=DEFAULT_BINARY)
+    parser.add_argument("--abi", default=DEFAULT_ABI)
+    parser.add_argument("--out-dir", type=pathlib.Path)
+    parser.add_argument("--display", default=":0")
+    parser.add_argument("--ws", default=DEFAULT_WS_ADDR)
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument(
+        "--fake-time-step-nanos",
+        type=int,
+        help="set AEMU_FAKE_TIME_STEP_NANOS for Android time HLE diagnostics",
+    )
+    parser.add_argument(
+        "--guest-thread-swap-slices",
+        type=int,
+        help="set AEMU_GUEST_THREAD_SWAP_SLICES for frame-boundary guest worker scheduling",
+    )
+    parser.add_argument("--frames", type=int, default=240)
+    parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--wait-ws-timeout", type=float, default=90.0)
+    parser.add_argument("--wait-frames", type=int, default=1)
+    parser.add_argument("--script", help="semicolon/newline separated ws_cli journal actions")
+    parser.add_argument("--script-file", help="read journal actions from a file")
+    parser.add_argument("--pointer-id", type=int, default=0)
+    parser.add_argument("--pressure", type=float, default=1.0)
+    parser.add_argument("--tap-duration-ms", type=float, default=180.0)
+    parser.add_argument("--post-journal-seconds", type=float, default=0.25)
+    parser.add_argument(
+        "--keep-running-until-exit",
+        action="store_true",
+        help="wait for --sdl2-frames process exit instead of terminating after the journal",
+    )
+    parser.add_argument("--expect-frames", type=int, default=1)
+    parser.add_argument("--max-gl-errors", type=int, default=0)
+    parser.add_argument("--min-readback-rgb", type=int, default=0)
+    parser.add_argument("--min-draw-elements", type=int, default=0)
+    parser.add_argument("--min-screenshot-bytes", type=int, default=100)
+    parser.add_argument("--min-gles-events", type=int, default=0)
+    parser.add_argument("--min-native-events", type=int, default=0)
+    parser.add_argument("--min-sdl-draw-pngs", type=int, default=0)
+    parser.add_argument(
+        "--expect-run-log-contains",
+        action="append",
+        help="require run.log to contain this exact substring",
+    )
+    parser.add_argument(
+        "--expect-hle-call",
+        action="append",
+        help="require a traced HLE line with name=<value> in run.log",
+    )
+    parser.add_argument("--gles-event-match", default="SwapBuffers,UseProgram,BindTexture,DrawElements")
+    parser.add_argument("--gles-event-limit", type=int, default=50000)
+    parser.add_argument("--trace-hle", help="set AEMU_TRACE_HLE filter")
+    parser.add_argument("--trace-hle-limit", type=int)
+    parser.add_argument("--trace-hle-file", action="store_true")
+    parser.add_argument(
+        "--native-event",
+        action="append",
+        help="append raw AEMU_TRACE_NATIVE_EVENTS spec, e.g. 0x716eb818:TextureOGL::bind",
+    )
+    parser.add_argument("--native-event-mem32", action="append", default=[])
+    parser.add_argument("--native-event-deref32", action="append", default=[])
+    parser.add_argument("--native-event-cxx-string", action="append", default=[])
+    parser.add_argument("--native-event-bytes", action="append", default=[])
+    parser.add_argument("--native-event-limit", type=int)
+    parser.add_argument(
+        "--expect-native-event",
+        action="append",
+        help="require a native trace event whose name or PC contains this text",
+    )
+    parser.add_argument("--dump-sdl-draws", action="store_true")
+    parser.add_argument("--sdl-draw-match", default="all")
+    parser.add_argument("--sdl-draw-limit", type=int, default=50)
+    parser.add_argument(
+        "--expect-screenshot-change",
+        action="store_true",
+        help="fail unless the first and last captured screenshots have different hashes",
+    )
+    parser.add_argument("--echo-log", action="store_true")
+    return parser
+
+
+def main(argv=None):
+    args = build_arg_parser().parse_args(argv)
+    if not args.apk.exists():
+        raise SystemExit(f"APK not found: {args.apk}")
+    if not args.binary.exists():
+        raise SystemExit(f"aemu binary not found: {args.binary}; run cargo build --release --features sdl2")
+    try:
+        out_dir = prepare_output_dir(args.out_dir)
+        script_text = load_script(args, out_dir)
+        steps = ws_cli.parse_journal_text(script_text)
+    except Exception as err:
+        raise SystemExit(str(err)) from err
+
+    run_log_path = out_dir / "run.log"
+    journal_path = out_dir / "journal.jsonl"
+    summary_path = out_dir / "summary.json"
+    script_path = out_dir / "journal.txt"
+    script_path.write_text(script_text + "\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.setdefault("DISPLAY", args.display)
+    env.setdefault("SDL_VIDEO_X11_FORCE_EGL", "1")
+    apply_trace_env(args, out_dir, env)
+
+    cmd = build_emulator_cmd(args, args.ws)
+    started = time.monotonic()
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    lines, reader = start_reader(process, run_log_path)
+    terminated_by_harness = False
+    entries = []
+    screenshots = []
+    ws_url = None
+    startup_lines = []
+    startup_error = None
+    try:
+        ws_url, startup_lines = wait_for_ws_url(process, lines, args.wait_ws_timeout)
+        client = ws_cli.WsClient(ws_url)
+        try:
+            with journal_path.open("w", encoding="utf-8") as journal:
+                wait_for_debug_frames(client, args.wait_frames, args.timeout, journal)
+            entries, screenshots = run_journal(client, steps, args, journal_path)
+        finally:
+            client.close()
+        if args.keep_running_until_exit:
+            try:
+                process.wait(timeout=args.timeout)
+            except subprocess.TimeoutExpired:
+                terminated_by_harness = terminate_process(process)
+        else:
+            time.sleep(args.post_journal_seconds)
+            terminated_by_harness = terminate_process(process)
+    except Exception as err:
+        startup_error = str(err)
+        terminated_by_harness = terminate_process(process)
+    finally:
+        reader.join(timeout=2)
+
+    if args.echo_log and run_log_path.exists():
+        print(run_log_path.read_text(encoding="utf-8", errors="replace"), end="")
+
+    summary = {
+        "trace_dir": str(out_dir),
+        "script": str(script_path),
+        "ws_url": ws_url,
+        "startup_lines": startup_lines,
+        "startup_error": startup_error,
+        "command": cmd,
+        "environment": summarize_env(env),
+        "process": {
+            "returncode": process.returncode,
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "terminated_by_harness": terminated_by_harness,
+            "run_log": str(run_log_path),
+        },
+        "journal": {
+            "path": str(journal_path),
+            "entries": entries,
+            "screenshots": screenshots,
+        },
+        "artifacts": collect_artifacts(out_dir),
+    }
+    errors = []
+    if startup_error is not None:
+        errors.append(startup_error)
+    errors.extend(validate_summary(args, summary))
+    summary["expectation_errors"] = errors
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print_summary(summary)
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -198,11 +198,15 @@ cargo build --release --features sdl2
 tools/mcpe_smoke.py
 ```
 
-It creates a unique `target/mcpe-smoke-*` trace directory, writes `link.log`,
+It creates a unique `tmp/mcpe-smoke-*` trace directory, writes `link.log`,
 `run.log`, `summary.json`, GLES event JSONL, and SDL draw PNG artifacts when a
 frame is reached. It also parses crash PC/fault address and symbolicates the PC
-against the linked native object. For known blocker tracking, pass explicit
-expectations such as:
+against the linked native object. It records parsed live-frame stats plus GLES
+swap/draw counts in `summary.json`; use `--min-gles-events`,
+`--min-gles-swaps`, `--min-gles-draw-elements`, `--min-sdl-draw-pngs`,
+`--min-readback-rgb`, and `--max-gl-errors` to turn those artifacts into
+regression gates. For known blocker tracking, pass explicit expectations such
+as:
 
 ```sh
 tools/mcpe_smoke.py --expect-stage android_main --expect-exit nonzero \
@@ -217,7 +221,7 @@ tools/mcpe_smoke.py --native-trace-preset webtoken \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10 \
   --expect-native-event WebToken::createFromData.return-null
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 20
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 20
 ```
 
 To inspect the upstream OpenSSL key-generation path that feeds the WebToken
@@ -230,7 +234,7 @@ tools/mcpe_smoke.py --native-trace-preset keygen \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10 \
   --expect-native-event OpenSSLInterface::generateKeyPair.fail-keygen2
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 40
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 40
 ```
 
 If generated EC private keys later fail point validation, use `keygen-ec` to
@@ -240,7 +244,7 @@ follow bundled OpenSSL's `EC_KEY_generate_key` and `EC_POINT_mul` path:
 tools/mcpe_smoke.py --native-trace-preset keygen-ec \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 120
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 120
 ```
 
 Use `keygen-mul` to inspect `EC_POINT_mul` inputs, the group generator point,
@@ -255,7 +259,7 @@ tools/mcpe_smoke.py --native-trace-preset keygen-mul \
 tools/mcpe_smoke.py --cpu-feature-preset no-neon --native-trace-preset keygen-mul \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 80
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 80
 ```
 
 Use `bn-mont` when `keygen-mul` points at low-level OpenSSL field arithmetic;
@@ -263,7 +267,7 @@ it dumps `BN_mod_mul_montgomery` and `bn_mul_mont` limb buffers so individual
 Montgomery products can be checked against a host oracle:
 
 ```sh
-tools/trace_query.py target/mcpe-smoke-<stamp> bn-mont-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-mont-check
 ```
 
 Use `ec-point-ops` after Montgomery multiplication checks out; it traces
@@ -275,7 +279,7 @@ point can be narrowed to point arithmetic or affine conversion:
 tools/mcpe_smoke.py --native-trace-preset ec-point-ops \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 80
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 80
 ```
 
 Use `point-affine` when `EC_POINT_mul` produces the correct Jacobian point but
@@ -287,7 +291,7 @@ Z-inverse squared, and final output `BIGNUM` limbs:
 tools/mcpe_smoke.py --native-trace-preset point-affine \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --contains point_get_affine --limit 120
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --contains point_get_affine --limit 120
 ```
 
 If affine tracing shows `Z^-2` diverging after
@@ -299,7 +303,7 @@ the `BN_sqr` output before the `BN_div` reduction step:
 tools/mcpe_smoke.py --native-trace-preset bn-mod-sqr \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> bn-mod-sqr-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-mod-sqr-check
 ```
 
 If `bn-mod-sqr-check` reports `square_ok=True` but the final reduced result is
@@ -309,7 +313,7 @@ wrong, use `bn-nnmod` to isolate the bundled OpenSSL division/remainder path:
 tools/mcpe_smoke.py --native-trace-preset bn-nnmod \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> bn-nnmod-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-nnmod-check
 ```
 
 If `bn-nnmod-check` points at `BN_div`, first verify the 64-bit division import
@@ -319,7 +323,7 @@ used by the quotient-estimation path:
 tools/mcpe_smoke.py --trace-hle =__aeabi_uldivmod --trace-hle-limit 80 \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> hle-uldivmod-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> hle-uldivmod-check
 ```
 
 Then use `bn-div` to check `BN_div` directly, including the final normalized
@@ -329,7 +333,7 @@ remainder before and after the right-shift denormalization step:
 tools/mcpe_smoke.py --native-trace-preset bn-div \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-div-check
 ```
 
 If `bn-div-check` shows a bad remainder before denormalization, narrow the
@@ -342,7 +346,7 @@ HLE-ing OpenSSL or MCPE game methods:
 tools/mcpe_smoke.py --native-trace-preset bn-div-loop \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-loop-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-div-loop-check
 ```
 
 After the OpenSSL division path checks out, `font-texture-pair` narrows the
@@ -355,7 +359,7 @@ null and `Font::init` dereferences it at `0x70c3cad4`:
 tools/mcpe_smoke.py --native-trace-preset font-texture-pair \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x70c3cad4 --expect-fault-address 0x40
-tools/trace_query.py target/mcpe-smoke-<stamp> mcpe-font-pair-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> mcpe-font-pair-check
 ```
 
 The static OpenSSL `bn_div_words` wrapper is available as an extra check, but
@@ -366,7 +370,7 @@ directly and record no `bn_div_words` events:
 tools/mcpe_smoke.py --native-trace-preset bn-div-words \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> bn-div-words-check
+tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-div-words-check
 ```
 
 Use `keygen-serialize` to inspect whether `i2d_ECPrivateKey` / `point2oct`
@@ -376,7 +380,7 @@ serializes the generated public point correctly:
 tools/mcpe_smoke.py --native-trace-preset keygen-serialize \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 160
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 160
 ```
 
 After key generation succeeds, use the `signdata` preset to inspect the bundled
@@ -386,7 +390,7 @@ OpenSSL signing path without HLE-ing MCPE game or engine functions:
 tools/mcpe_smoke.py --native-trace-preset signdata \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 80
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 80
 ```
 
 If `signdata` shows `d2i_AutoPrivateKey` returning null, add the `d2i-private`
@@ -397,7 +401,7 @@ tools/mcpe_smoke.py --native-trace-preset signdata \
   --native-trace-preset d2i-private \
   --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
-tools/trace_query.py target/mcpe-smoke-<stamp> native-event --limit 120
+tools/trace_query.py tmp/mcpe-smoke-<stamp> native-event --limit 120
 ```
 
 `--trace-hle`, `--trace-hle-limit`, and `--trace-hle-file` write the existing
@@ -425,7 +429,7 @@ WebSocket control harness:
 ```sh
 DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1 target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --sdl2-live --ws 127.0.0.1:8766
 tools/ws_cli.py --url ws://127.0.0.1:8766 debug
-tools/ws_cli.py --url ws://127.0.0.1:8766 screenshot --out target/aemu-ws-screenshot.png
+tools/ws_cli.py --url ws://127.0.0.1:8766 screenshot --out tmp/aemu-ws-screenshot.png
 tools/ws_cli.py --url ws://127.0.0.1:8766 tap 427 240
 ```
 
@@ -460,7 +464,7 @@ cargo build --lib --target wasm32-unknown-unknown --no-default-features --featur
 Texture upload tracing:
 
 ```sh
-trace_dir=target/mcpe-trace-check
+trace_dir=tmp/mcpe-trace-check
 AEMU_DUMP_GLES_TEXTURE_UPLOADS_DIR=$trace_dir/hle \
 AEMU_DUMP_GLES_TEXTURE_UPLOADS_MATCH=64x32 \
 AEMU_DUMP_GLES_TEXTURE_UPLOADS_LIMIT=2 \
@@ -483,7 +487,7 @@ payload lengths, HLE manifest consistency, and HLE-vs-SDL upload matches.
 Per-draw framebuffer tracing:
 
 ```sh
-trace_dir=target/mcpe-draw-trace
+trace_dir=tmp/mcpe-draw-trace
 AEMU_TRACE_SDL_DRAW_CHANGES=200 \
 AEMU_DUMP_SDL_DRAW_CHANGES_DIR=$trace_dir/sdl-draw \
 AEMU_DUMP_SDL_DRAW_CHANGES_MATCH=program86,tex325 \

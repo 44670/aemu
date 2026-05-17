@@ -27,6 +27,7 @@ const GUEST_THREAD_STACK_SIZE: u32 = 0x0004_0000;
 const GUEST_THREAD_STACK_ALIGN: u32 = 8;
 const GUEST_THREAD_SLICE_STEPS: usize = 4096;
 const GUEST_THREAD_SERVICE_INTERVAL: usize = 50_000;
+const GUEST_THREAD_SWAP_SERVICE_SLICES: usize = 64;
 const MAIN_THREAD_WAIT_SPINS: usize = 1024;
 const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
 const GUEST_THREAD_SERVICE_HLE: &[&str] = &[
@@ -1161,6 +1162,7 @@ impl NativeRuntime {
                         self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
                     }
                     if stop_hle_name.is_some_and(|stop| stop == name) {
+                        self.service_guest_threads_at_stop_hle(&name)?;
                         return Ok(NativeRuntimeFunctionExit::HleCall {
                             name,
                             address: hle_address,
@@ -1205,6 +1207,26 @@ impl NativeRuntime {
             if !done {
                 self.guest_threads.push_back(thread);
             }
+        }
+        Ok(())
+    }
+
+    fn service_guest_threads_at_stop_hle(&mut self, name: &str) -> Result<(), NativeRuntimeError> {
+        let slices = match name {
+            "eglSwapBuffers" => parse_usize_env("AEMU_GUEST_THREAD_SWAP_SLICES")
+                .unwrap_or(GUEST_THREAD_SWAP_SERVICE_SLICES),
+            _ => 0,
+        };
+        for _ in 0..slices {
+            if !self.hle.has_created_pthreads()
+                && self
+                    .guest_threads
+                    .iter()
+                    .all(|thread| !thread.wait.is_runnable())
+            {
+                break;
+            }
+            self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
         }
         Ok(())
     }
@@ -2604,6 +2626,10 @@ fn parse_trace_limit(name: &str) -> Option<usize> {
     let raw = std::env::var(name).ok()?;
     let limit = raw.trim().parse().ok()?;
     (limit != 0).then_some(limit)
+}
+
+fn parse_usize_env(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.trim().parse().ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -121,22 +121,30 @@ useful, but it does not replace the browser WebGL backend.
    GLES2 debug shell and WebGL 1/WebGL 2 context-selection scaffolding. GLES
    HLE now records clear, viewport, draw, swap, buffer, texture, uniform,
    vertex-attrib, and common render-state events into a bounded command queue.
-   The local MCPE first-frame probe captures 21,674 GLES events before the
+   Historical MCPE first-frame traces captured 21,674 GLES events before the
    first swap without queue saturation, including 3,811,776 copied payload
-   bytes for buffer, texture, uniform, and client-side draw-index data. The SDL2
-   host replays the first-swap stream, submits all 744 indexed draws, reads back
-   nonzero RGB/alpha pixels, and reports zero host GL errors. A wasm-only WebGL
-   replay host now compiles and mirrors the SDL2 guest object/state mapping.
+   bytes for buffer, texture, uniform, and client-side draw-index data, and the
+   SDL2 host replayed 744 indexed draws with nonzero RGB/alpha pixels. The
+   current 64-slice `tools/mcpe_smoke.py` baseline reaches the live frame limit
+   but records zero draw submissions and black RGB readback. A heavier
+   256-slice guest-thread diagnostic reaches real `DrawElements`, proving the
+   native resource path can progress into drawing, but it times out before long
+   smoke completion. The active blocker is now efficient guest-thread scheduling
+   around resource preload and `eglSwapBuffers`, then UI progression. A
+   wasm-only WebGL replay host now compiles and mirrors the SDL2 guest
+   object/state mapping.
    APK linking and Android asset reads both have byte-backed paths, so browser
    code does not need a host filesystem path for native libraries or
    `AAssetManager_open`. The initial wasm export and static harness can run
    MCPE bytes to first swap and replay the resulting GLES stream into WebGL 1;
    browser-side performance and worker/asynchronous execution are still pending.
    SDL2 live mode now resumes guest execution after each `eglSwapBuffers`,
-   replays each frame batch into the SDL2 GLES context on `DISPLAY=:0`, and has
-   screenshot/readback evidence for nonblack MCPE frames with zero host GL
-   errors. Full playability still needs guest input/audio HLE and a fix for
-   long-run HLE heap exhaustion.
+   replays each frame batch into the SDL2 GLES context on `DISPLAY=:0`, and
+   still reports zero host GL errors. `tools/mcpe_ui_smoke.py` now wraps SDL2
+   live mode and the WebSocket harness into a one-command UI journal for
+   multi-step tap/screenshot/debug checks, with default screenshots under
+   `tmp/`. Full playability still needs efficient draw-stream progression,
+   visible response to input, and audio HLE.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach
