@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -128,6 +128,7 @@ pub struct NativeRuntime {
     minecraft_resource_bridge: Option<MinecraftResourceBridge>,
     minecraft_resource_bridge_active: bool,
     trace_native_event_count: usize,
+    pc_profiler: Option<PcProfiler>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +201,63 @@ struct RuntimeHleTrap {
 enum RuntimeHleTrapKind {
     Jni(JniFunction),
     CxxDynamicCast,
+}
+
+#[derive(Debug)]
+struct PcProfiler {
+    path: PathBuf,
+    interval: usize,
+    flush_interval: usize,
+    top_count: usize,
+    sample_limit: Option<usize>,
+    guest_instructions: usize,
+    instructions_until_sample: usize,
+    samples: usize,
+    last_flushed_samples: usize,
+    buckets: BTreeMap<PcProfileKey, PcProfileBucket>,
+    objects: Vec<PcProfileObject>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PcProfileKey {
+    thread_id: u32,
+    pc: u32,
+    isa: u8,
+}
+
+#[derive(Debug, Clone)]
+struct PcProfileBucket {
+    key: PcProfileKey,
+    count: usize,
+    instr: Option<u32>,
+    op: Option<&'static str>,
+    library_name: Option<String>,
+    object_offset: Option<u32>,
+    symbol_name: Option<String>,
+    symbol_offset: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct PcProfileObject {
+    library_name: String,
+    load_bias: u32,
+    memory_base: u32,
+    memory_end: u32,
+    symbols: Vec<PcProfileSymbol>,
+}
+
+#[derive(Debug, Clone)]
+struct PcProfileSymbol {
+    address: u32,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+struct PcProfileLookup {
+    library_name: String,
+    object_offset: Option<u32>,
+    symbol_name: Option<String>,
+    symbol_offset: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +447,404 @@ impl fmt::Display for NativeRuntimeError {
 
 impl std::error::Error for NativeRuntimeError {}
 
+impl PcProfiler {
+    const DEFAULT_INTERVAL: usize = 4096;
+    const DEFAULT_FLUSH_INTERVAL: usize = 512;
+    const DEFAULT_TOP_COUNT: usize = 80;
+
+    fn from_env(link: &NativeLinkReport) -> Option<Self> {
+        let path = std::env::var_os("AEMU_PROFILE_PC_JSONL").map(PathBuf::from)?;
+        let interval = std::env::var("AEMU_PROFILE_PC_INTERVAL")
+            .ok()
+            .and_then(|raw| parse_nonzero_usize(&raw))
+            .unwrap_or(Self::DEFAULT_INTERVAL);
+        let flush_interval = std::env::var("AEMU_PROFILE_PC_FLUSH_INTERVAL")
+            .ok()
+            .and_then(|raw| parse_nonzero_usize(&raw))
+            .unwrap_or(Self::DEFAULT_FLUSH_INTERVAL);
+        let top_count = std::env::var("AEMU_PROFILE_PC_TOP")
+            .ok()
+            .and_then(|raw| parse_nonzero_usize(&raw))
+            .unwrap_or(Self::DEFAULT_TOP_COUNT);
+        Some(Self {
+            path,
+            interval,
+            flush_interval,
+            top_count,
+            sample_limit: parse_trace_limit("AEMU_PROFILE_PC_LIMIT"),
+            guest_instructions: 0,
+            instructions_until_sample: interval,
+            samples: 0,
+            last_flushed_samples: 0,
+            buckets: BTreeMap::new(),
+            objects: Self::build_objects(link),
+        })
+    }
+
+    fn build_objects(link: &NativeLinkReport) -> Vec<PcProfileObject> {
+        let mut objects = link
+            .objects
+            .iter()
+            .filter_map(|object| {
+                let memory_end = object.memory_base.checked_add(object.memory_size)?;
+                let mut symbols = object
+                    .defined_symbols
+                    .iter()
+                    .map(|symbol| PcProfileSymbol {
+                        address: symbol.address & !1,
+                        name: symbol.name.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                symbols.sort_by(|left, right| {
+                    left.address
+                        .cmp(&right.address)
+                        .then_with(|| left.name.cmp(&right.name))
+                });
+                Some(PcProfileObject {
+                    library_name: object.library_name.clone(),
+                    load_bias: object.load_bias,
+                    memory_base: object.memory_base,
+                    memory_end,
+                    symbols,
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(memory_base) = link.hle_symbols.iter().map(|symbol| symbol.address).min() {
+            let memory_end = link
+                .hle_symbols
+                .iter()
+                .filter_map(|symbol| symbol.address.checked_add(symbol.shape.size()))
+                .max()
+                .unwrap_or(memory_base);
+            let mut symbols = link
+                .hle_symbols
+                .iter()
+                .map(|symbol| PcProfileSymbol {
+                    address: symbol.address,
+                    name: symbol.name.clone(),
+                })
+                .collect::<Vec<_>>();
+            symbols.sort_by(|left, right| {
+                left.address
+                    .cmp(&right.address)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            objects.push(PcProfileObject {
+                library_name: "hle-imports".to_string(),
+                load_bias: memory_base,
+                memory_base,
+                memory_end,
+                symbols,
+            });
+        }
+        objects
+    }
+
+    fn tick(&mut self) -> bool {
+        self.guest_instructions = self.guest_instructions.saturating_add(1);
+        if self.sample_limit.is_some_and(|limit| self.samples >= limit) {
+            return false;
+        }
+        self.instructions_until_sample -= 1;
+        if self.instructions_until_sample != 0 {
+            return false;
+        }
+        self.instructions_until_sample = self.interval;
+        self.samples = self.samples.saturating_add(1);
+        true
+    }
+
+    fn record_sample(&mut self, thread_id: u32, pc: u32, isa: Isa, instr: Option<u32>) {
+        let key = PcProfileKey {
+            thread_id,
+            pc,
+            isa: pc_profile_isa_id(isa),
+        };
+        if let Some(bucket) = self.buckets.get_mut(&key) {
+            bucket.count = bucket.count.saturating_add(1);
+        } else {
+            let bucket = self.bucket_for_key(key, instr);
+            self.buckets.insert(key, bucket);
+        }
+
+        if self.samples.saturating_sub(self.last_flushed_samples) >= self.flush_interval {
+            self.flush_snapshot();
+        } else if self.sample_limit.is_some_and(|limit| self.samples >= limit) {
+            self.flush_snapshot();
+        }
+    }
+
+    fn bucket_for_key(&self, key: PcProfileKey, instr: Option<u32>) -> PcProfileBucket {
+        let lookup = self.lookup(key.pc & !1);
+        PcProfileBucket {
+            key,
+            count: 1,
+            instr,
+            op: pc_profile_op(key.isa, instr),
+            library_name: lookup.as_ref().map(|item| item.library_name.clone()),
+            object_offset: lookup.as_ref().and_then(|item| item.object_offset),
+            symbol_name: lookup.as_ref().and_then(|item| item.symbol_name.clone()),
+            symbol_offset: lookup.as_ref().and_then(|item| item.symbol_offset),
+        }
+    }
+
+    fn lookup(&self, pc: u32) -> Option<PcProfileLookup> {
+        let object = self
+            .objects
+            .iter()
+            .find(|object| pc >= object.memory_base && pc < object.memory_end)?;
+        let symbol = match object
+            .symbols
+            .binary_search_by_key(&pc, |symbol| symbol.address)
+        {
+            Ok(index) => object.symbols.get(index),
+            Err(0) => None,
+            Err(index) => object.symbols.get(index - 1),
+        };
+        Some(PcProfileLookup {
+            library_name: object.library_name.clone(),
+            object_offset: pc.checked_sub(object.load_bias),
+            symbol_name: symbol.map(|symbol| symbol.name.clone()),
+            symbol_offset: symbol.map(|symbol| pc.wrapping_sub(symbol.address)),
+        })
+    }
+
+    fn flush_snapshot(&mut self) {
+        if self.samples == self.last_flushed_samples {
+            return;
+        }
+        let row = self.snapshot_row();
+        match append_trace_jsonl(&self.path, &row) {
+            Ok(()) => {
+                self.last_flushed_samples = self.samples;
+            }
+            Err(err) => {
+                eprintln!("AEMU_PROFILE_PC_JSONL write failed: {err}");
+            }
+        }
+    }
+
+    fn snapshot_row(&self) -> serde_json::Value {
+        let mut buckets = self.buckets.values().collect::<Vec<_>>();
+        buckets.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.key.thread_id.cmp(&right.key.thread_id))
+                .then_with(|| left.key.pc.cmp(&right.key.pc))
+                .then_with(|| left.key.isa.cmp(&right.key.isa))
+        });
+        let top = buckets
+            .into_iter()
+            .take(self.top_count)
+            .enumerate()
+            .map(|(index, bucket)| bucket.to_json(index + 1))
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "kind": "pc_profile_snapshot",
+            "samples": self.samples,
+            "guest_instructions": self.guest_instructions,
+            "interval": self.interval,
+            "unique_buckets": self.buckets.len(),
+            "top": top,
+        })
+    }
+}
+
+impl Drop for PcProfiler {
+    fn drop(&mut self) {
+        self.flush_snapshot();
+    }
+}
+
+impl PcProfileBucket {
+    fn to_json(&self, rank: usize) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "rank": rank,
+            "thread_id": self.key.thread_id,
+            "pc": self.key.pc,
+            "pc_hex": format!("{:#010x}", self.key.pc),
+            "isa": pc_profile_isa_name(self.key.isa),
+            "count": self.count,
+        });
+        if let Some(instr) = self.instr {
+            row["instr"] = serde_json::json!(instr);
+            row["instr_hex"] = serde_json::json!(format!("{instr:#010x}"));
+        }
+        if let Some(op) = self.op {
+            row["op"] = serde_json::json!(op);
+        }
+        if let Some(library_name) = &self.library_name {
+            row["library"] = serde_json::json!(library_name);
+        }
+        if let Some(object_offset) = self.object_offset {
+            row["object_offset"] = serde_json::json!(object_offset);
+            row["object_offset_hex"] = serde_json::json!(format!("{object_offset:#010x}"));
+        }
+        if let Some(symbol_name) = &self.symbol_name {
+            row["symbol"] = serde_json::json!(symbol_name);
+        }
+        if let Some(symbol_offset) = self.symbol_offset {
+            row["symbol_offset"] = serde_json::json!(symbol_offset);
+            row["symbol_offset_hex"] = serde_json::json!(format!("{symbol_offset:#x}"));
+        }
+        row
+    }
+}
+
+fn pc_profile_isa_id(isa: Isa) -> u8 {
+    match isa {
+        Isa::Arm => 0,
+        Isa::Thumb => 1,
+    }
+}
+
+fn pc_profile_isa_name(isa: u8) -> &'static str {
+    match isa {
+        0 => "Arm",
+        1 => "Thumb",
+        _ => "Unknown",
+    }
+}
+
+fn pc_profile_op(isa: u8, instr: Option<u32>) -> Option<&'static str> {
+    let instr = instr?;
+    if isa == pc_profile_isa_id(Isa::Thumb) {
+        return Some("thumb");
+    }
+    if isa != pc_profile_isa_id(Isa::Arm) {
+        return None;
+    }
+    if (instr & 0x0ff0_00f0) == 0x0040_0090 {
+        return Some("umaal");
+    }
+    if (instr & 0x0ff0_00f0) == 0x0060_0090 {
+        return Some("mls");
+    }
+    if (instr & 0x0f80_00f0) == 0x0080_0090 {
+        let signed = instr & (1 << 22) != 0;
+        let accumulate = instr & (1 << 21) != 0;
+        return Some(match (signed, accumulate) {
+            (false, false) => "umull",
+            (false, true) => "umlal",
+            (true, false) => "smull",
+            (true, true) => "smlal",
+        });
+    }
+    if (instr & 0x0fc0_00f0) == 0x0000_0090 {
+        return Some(if instr & (1 << 21) != 0 { "mla" } else { "mul" });
+    }
+    if (instr & 0x0e00_0000) == 0x0a00_0000 {
+        return Some(if instr & (1 << 24) != 0 { "bl" } else { "b" });
+    }
+    if (instr & 0x0c00_0000) == 0x0400_0000 {
+        let load = instr & (1 << 20) != 0;
+        let byte = instr & (1 << 22) != 0;
+        return Some(match (load, byte) {
+            (true, false) => "ldr",
+            (true, true) => "ldrb",
+            (false, false) => "str",
+            (false, true) => "strb",
+        });
+    }
+    if (instr & 0x0c00_0000) == 0 {
+        let opcode = (instr >> 21) & 0xf;
+        let set_flags = instr & (1 << 20) != 0;
+        return Some(match opcode {
+            0 => {
+                if set_flags {
+                    "ands"
+                } else {
+                    "and"
+                }
+            }
+            1 => {
+                if set_flags {
+                    "eors"
+                } else {
+                    "eor"
+                }
+            }
+            2 => {
+                if set_flags {
+                    "subs"
+                } else {
+                    "sub"
+                }
+            }
+            3 => {
+                if set_flags {
+                    "rsbs"
+                } else {
+                    "rsb"
+                }
+            }
+            4 => {
+                if set_flags {
+                    "adds"
+                } else {
+                    "add"
+                }
+            }
+            5 => {
+                if set_flags {
+                    "adcs"
+                } else {
+                    "adc"
+                }
+            }
+            6 => {
+                if set_flags {
+                    "sbcs"
+                } else {
+                    "sbc"
+                }
+            }
+            7 => {
+                if set_flags {
+                    "rscs"
+                } else {
+                    "rsc"
+                }
+            }
+            8 => "tst",
+            9 => "teq",
+            10 => "cmp",
+            11 => "cmn",
+            12 => {
+                if set_flags {
+                    "orrs"
+                } else {
+                    "orr"
+                }
+            }
+            13 => {
+                if set_flags {
+                    "movs"
+                } else {
+                    "mov"
+                }
+            }
+            14 => {
+                if set_flags {
+                    "bics"
+                } else {
+                    "bic"
+                }
+            }
+            15 => {
+                if set_flags {
+                    "mvns"
+                } else {
+                    "mvn"
+                }
+            }
+            _ => "data-processing",
+        });
+    }
+    None
+}
+
 impl NativeRuntime {
     pub fn new(
         link: NativeLinkReport,
@@ -448,6 +904,7 @@ impl NativeRuntime {
         } else {
             None
         };
+        let pc_profiler = PcProfiler::from_env(&link);
 
         Ok(Self {
             link,
@@ -466,6 +923,7 @@ impl NativeRuntime {
             minecraft_resource_bridge,
             minecraft_resource_bridge_active: false,
             trace_native_event_count: 0,
+            pc_profiler,
         })
     }
 
@@ -532,6 +990,27 @@ impl NativeRuntime {
                 isa: isa_before,
                 source: err,
             }),
+        }
+    }
+
+    fn profile_guest_pc(&mut self, thread_id: u32) {
+        let should_sample = self.pc_profiler.as_mut().is_some_and(PcProfiler::tick);
+        if should_sample {
+            let pc = self.cpu.pc();
+            let isa = self.cpu.isa();
+            let instr = match isa {
+                Isa::Arm => self.link.memory.load32(pc).ok(),
+                Isa::Thumb => self.link.memory.load16(pc).ok().map(u32::from),
+            };
+            if let Some(profiler) = self.pc_profiler.as_mut() {
+                profiler.record_sample(thread_id, pc, isa, instr);
+            }
+        }
+    }
+
+    fn flush_pc_profile(&mut self) {
+        if let Some(profiler) = self.pc_profiler.as_mut() {
+            profiler.flush_snapshot();
         }
     }
 
@@ -1018,8 +1497,10 @@ impl NativeRuntime {
         let mut trace_hle_count = 0usize;
         for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
+                self.flush_pc_profile();
                 return Ok(NativeRuntimeFunctionExit::Returned);
             }
+            self.profile_guest_pc(1);
             if tail.len() == RUN_FUNCTION_TRACE_LEN {
                 tail.pop_front();
             }
@@ -1163,6 +1644,7 @@ impl NativeRuntime {
                     }
                     if stop_hle_name.is_some_and(|stop| stop == name) {
                         self.service_guest_threads_at_stop_hle(&name)?;
+                        self.flush_pc_profile();
                         return Ok(NativeRuntimeFunctionExit::HleCall {
                             name,
                             address: hle_address,
@@ -1172,6 +1654,7 @@ impl NativeRuntime {
                     }
                 }
                 Err(source) => {
+                    self.flush_pc_profile();
                     return Err(NativeRuntimeError::Traced {
                         source: Box::new(source),
                         tail: tail.into_iter().collect(),
@@ -1185,6 +1668,7 @@ impl NativeRuntime {
                 self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
             }
         }
+        self.flush_pc_profile();
         Err(NativeRuntimeError::Traced {
             source: Box::new(NativeRuntimeError::Cpu(Trap::StepLimit)),
             tail: tail.into_iter().collect(),
@@ -1682,6 +2166,7 @@ impl NativeRuntime {
                 result = Ok(true);
                 break;
             }
+            self.profile_guest_pc(thread.id);
             if !trace_ranges.is_empty() {
                 let pc = self.cpu.pc();
                 if trace_ranges
@@ -3298,6 +3783,91 @@ mod tests {
     }
 
     #[test]
+    fn pc_profiler_symbolicates_nearest_loaded_symbol() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: vec![LoadedNativeObject {
+                entry_name: "libtest.so".to_string(),
+                library_name: "libtest.so".to_string(),
+                load_bias: 0x7100_0000,
+                memory_base: 0x7100_0000,
+                memory_size: 0x1000,
+                entry: 0,
+                needed: Vec::new(),
+                imports: Vec::new(),
+                defined_symbols: vec![
+                    NativeSymbol {
+                        name: "cold_func".to_string(),
+                        address: 0x7100_0040,
+                        library_name: "libtest.so".to_string(),
+                    },
+                    NativeSymbol {
+                        name: "hot_func".to_string(),
+                        address: 0x7100_0101,
+                        library_name: "libtest.so".to_string(),
+                    },
+                ],
+                relocations: Vec::new(),
+                relocation_count: 0,
+                init: None,
+                init_array: None,
+                arm_exidx: None,
+            }],
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let profiler = PcProfiler {
+            path: PathBuf::from("unused.jsonl"),
+            interval: 1,
+            flush_interval: 1,
+            top_count: 8,
+            sample_limit: None,
+            guest_instructions: 0,
+            instructions_until_sample: 1,
+            samples: 0,
+            last_flushed_samples: 0,
+            buckets: BTreeMap::new(),
+            objects: PcProfiler::build_objects(&report),
+        };
+
+        let lookup = profiler.lookup(0x7100_0128).unwrap();
+
+        assert_eq!(lookup.library_name, "libtest.so");
+        assert_eq!(lookup.object_offset, Some(0x128));
+        assert_eq!(lookup.symbol_name.as_deref(), Some("hot_func"));
+        assert_eq!(lookup.symbol_offset, Some(0x28));
+    }
+
+    #[test]
+    fn pc_profiler_classifies_arm_hot_loop_ops() {
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(0xe0ab_a295)),
+            Some("umlal")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(0xe09b_a007)),
+            Some("adds")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(0xe2ab_b000)),
+            Some("adc")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(0xe484_c004)),
+            Some("str")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(0x1aff_fff1)),
+            Some("b")
+        );
+    }
+
+    #[test]
     fn write_guest_words_preserves_arm_alignment_after_byte_allocations() {
         let report = NativeLinkReport {
             apk_path: PathBuf::from("test.apk"),
@@ -4376,6 +4946,7 @@ mod tests {
             minecraft_resource_bridge: None,
             minecraft_resource_bridge_active: false,
             trace_native_event_count: 0,
+            pc_profiler: None,
         };
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));

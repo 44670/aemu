@@ -167,6 +167,41 @@ fn oracle_cases() -> Vec<OracleCase> {
             ],
         },
         OracleCase {
+            name: "arm_openssl_umlal_adc",
+            isa: GuestIsa::Arm,
+            setup_asm: "
+                ldr r0, =0xfedcba98
+                ldr r1, =0x13579bdf
+                ldr r2, =0x89abcdef
+                ldr r3, =0x01234567
+                ldr r4, =0x76543210
+            ",
+            body_asm: "
+                umlal r2, r3, r0, r1
+                adds r0, r2, r4
+                adc r1, r3, #0
+                bx lr
+            ",
+            data_asm: "",
+            setup_aemu: |cpu, _mem, _symbols| {
+                cpu.set_isa(Isa::Arm);
+                cpu.set_reg(0, 0xfedc_ba98);
+                cpu.set_reg(1, 0x1357_9bdf);
+                cpu.set_reg(2, 0x89ab_cdef);
+                cpu.set_reg(3, 0x0123_4567);
+                cpu.set_reg(4, 0x7654_3210);
+            },
+            compare: compare_mask(&[0, 1, 2, 3], true, false, &[], &[]),
+            coverage: &[
+                "ARM",
+                "integer-alu",
+                "flags",
+                "multiply",
+                "long-multiply",
+                "OpenSSL-arithmetic",
+            ],
+        },
+        OracleCase {
             name: "arm_bitops_rev_ubfx",
             isa: GuestIsa::Arm,
             setup_asm: "

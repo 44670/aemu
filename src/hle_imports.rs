@@ -1332,6 +1332,10 @@ impl HleRuntime {
             "__udivsi3" => self.aeabi_uidiv(cpu),
             "__modsi3" => self.modsi3(cpu),
             "__umodsi3" => self.umodsi3(cpu),
+            "__divdi3" => self.divdi3(cpu),
+            "__udivdi3" => self.udivdi3(cpu),
+            "__moddi3" => self.moddi3(cpu),
+            "__umoddi3" => self.umoddi3(cpu),
             name if descriptor.kind == HleSymbolKind::Libm => self.libm(name, cpu),
             "getauxval" => Ok(self.return32(cpu, self.getauxval(cpu.reg(0)))),
             "gettimeofday" => self.gettimeofday(cpu, memory),
@@ -2361,6 +2365,34 @@ impl HleRuntime {
         let rhs = cpu.reg(1);
         let result = if rhs == 0 { 0 } else { lhs % rhs };
         Ok(self.return32(cpu, result))
+    }
+
+    fn divdi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = i64_arg(cpu, 0);
+        let rhs = i64_arg(cpu, 2);
+        let result = if rhs == 0 { 0 } else { lhs.wrapping_div(rhs) };
+        Ok(self.return_u64(cpu, result as u64))
+    }
+
+    fn udivdi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = u64_arg(cpu, 0);
+        let rhs = u64_arg(cpu, 2);
+        let result = if rhs == 0 { 0 } else { lhs / rhs };
+        Ok(self.return_u64(cpu, result))
+    }
+
+    fn moddi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = i64_arg(cpu, 0);
+        let rhs = i64_arg(cpu, 2);
+        let result = if rhs == 0 { 0 } else { lhs.wrapping_rem(rhs) };
+        Ok(self.return_u64(cpu, result as u64))
+    }
+
+    fn umoddi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let lhs = u64_arg(cpu, 0);
+        let rhs = u64_arg(cpu, 2);
+        let result = if rhs == 0 { 0 } else { lhs % rhs };
+        Ok(self.return_u64(cpu, result))
     }
 
     fn gettimeofday<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -6530,18 +6562,7 @@ fn hle_shape(name: &str) -> HleSymbolShape {
             size: 0x08,
             code: HleFunctionCode::ReturnNull,
         },
-        "strcmp" => HleSymbolShape::FunctionCode {
-            size: 0x24,
-            code: HleFunctionCode::Strcmp,
-        },
-        "strlen" => HleSymbolShape::FunctionCode {
-            size: 0x1c,
-            code: HleFunctionCode::Strlen,
-        },
-        "strncmp" => HleSymbolShape::FunctionCode {
-            size: 0x34,
-            code: HleFunctionCode::Strncmp,
-        },
+        "strcmp" | "strlen" | "strncmp" => HleSymbolShape::Function,
         "__aeabi_uidiv" | "__aeabi_uidivmod" => HleSymbolShape::FunctionCode {
             size: 0x48,
             code: HleFunctionCode::Uidivmod,
@@ -6681,6 +6702,10 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "__udivsi3"
                 | "__modsi3"
                 | "__umodsi3"
+                | "__divdi3"
+                | "__udivdi3"
+                | "__moddi3"
+                | "__umoddi3"
                 | "getauxval"
                 | "gettimeofday"
                 | "clock_gettime"
@@ -6965,18 +6990,22 @@ fn is_libc_symbol(name: &str) -> bool {
     matches!(
         name,
         "__assert2"
+            | "__divdi3"
             | "__divsi3"
             | "__errno"
             | "__gnu_Unwind_Find_exidx"
             | "__google_potentially_blocking_region_begin"
             | "__google_potentially_blocking_region_end"
+            | "__moddi3"
             | "__modsi3"
             | "__pthread_cleanup_pop"
             | "__pthread_cleanup_push"
             | "__sF"
             | "__stack_chk_fail"
             | "__stack_chk_guard"
+            | "__udivdi3"
             | "__udivsi3"
+            | "__umoddi3"
             | "__umodsi3"
             | "_ctype_"
             | "_tolower_tab_"
@@ -10422,40 +10451,19 @@ mod tests {
         assert_eq!(memory.load32(0x10d4).unwrap(), 0xe12f_ff1e);
 
         let strlen = describe_hle_import("strlen").unwrap();
-        assert_eq!(
-            strlen.shape,
-            HleSymbolShape::FunctionCode {
-                size: 0x1c,
-                code: HleFunctionCode::Strlen,
-            }
-        );
+        assert_eq!(strlen.shape, HleSymbolShape::Function);
         initialize_hle_symbol(&mut memory, strlen, 0x10e0).unwrap();
-        assert_eq!(memory.load32(0x10e0).unwrap(), 0xe1a0_1000);
-        assert_eq!(memory.load32(0x10f8).unwrap(), 0xe12f_ff1e);
+        assert_eq!(memory.load32(0x10e0).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let strcmp = describe_hle_import("strcmp").unwrap();
-        assert_eq!(
-            strcmp.shape,
-            HleSymbolShape::FunctionCode {
-                size: 0x24,
-                code: HleFunctionCode::Strcmp,
-            }
-        );
+        assert_eq!(strcmp.shape, HleSymbolShape::Function);
         initialize_hle_symbol(&mut memory, strcmp, 0x1100).unwrap();
-        assert_eq!(memory.load32(0x1100).unwrap(), 0xe4d0_2001);
-        assert_eq!(memory.load32(0x1120).unwrap(), 0xe12f_ff1e);
+        assert_eq!(memory.load32(0x1100).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let strncmp = describe_hle_import("strncmp").unwrap();
-        assert_eq!(
-            strncmp.shape,
-            HleSymbolShape::FunctionCode {
-                size: 0x34,
-                code: HleFunctionCode::Strncmp,
-            }
-        );
+        assert_eq!(strncmp.shape, HleSymbolShape::Function);
         initialize_hle_symbol(&mut memory, strncmp, 0x1130).unwrap();
-        assert_eq!(memory.load32(0x1130).unwrap(), 0xe352_0000);
-        assert_eq!(memory.load32(0x1160).unwrap(), 0xe12f_ff1e);
+        assert_eq!(memory.load32(0x1130).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let memset = describe_hle_import("memset").unwrap();
         assert_eq!(
@@ -11944,6 +11952,13 @@ mod tests {
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(14, 0x2000);
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        fn set_u64_arg(cpu: &mut Cpu, reg: usize, value: u64) {
+            cpu.set_reg(reg, value as u32);
+            cpu.set_reg(reg + 1, (value >> 32) as u32);
+        }
+        fn ret_u64(cpu: &Cpu) -> u64 {
+            u64::from(cpu.reg(0)) | (u64::from(cpu.reg(1)) << 32)
+        }
 
         cpu.set_reg(0, 43);
         cpu.set_reg(1, 11);
@@ -11964,6 +11979,30 @@ mod tests {
         cpu.set_reg(1, 11);
         hle.dispatch("__divsi3", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0) as i32, -3);
+
+        let unsigned_lhs = 0x1_0000_0007u64;
+        let unsigned_rhs = 5u64;
+        set_u64_arg(&mut cpu, 0, unsigned_lhs);
+        set_u64_arg(&mut cpu, 2, unsigned_rhs);
+        hle.dispatch("__umoddi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(ret_u64(&cpu), unsigned_lhs % unsigned_rhs);
+
+        set_u64_arg(&mut cpu, 0, unsigned_lhs);
+        set_u64_arg(&mut cpu, 2, unsigned_rhs);
+        hle.dispatch("__udivdi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(ret_u64(&cpu), unsigned_lhs / unsigned_rhs);
+
+        let signed_lhs = -4_294_967_303i64;
+        let signed_rhs = 5i64;
+        set_u64_arg(&mut cpu, 0, signed_lhs as u64);
+        set_u64_arg(&mut cpu, 2, signed_rhs as u64);
+        hle.dispatch("__moddi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(ret_u64(&cpu) as i64, signed_lhs.wrapping_rem(signed_rhs));
+
+        set_u64_arg(&mut cpu, 0, signed_lhs as u64);
+        set_u64_arg(&mut cpu, 2, signed_rhs as u64);
+        hle.dispatch("__divdi3", &mut cpu, &mut memory).unwrap();
+        assert_eq!(ret_u64(&cpu) as i64, signed_lhs.wrapping_div(signed_rhs));
     }
 
     #[test]

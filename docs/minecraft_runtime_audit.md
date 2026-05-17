@@ -42,6 +42,34 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 
 ## Current Blocking Evidence
 
+Local profiler-first update on 2026-05-17:
+
+- `tools/mcpe_smoke.py --profile-pc` now writes `pc_profile.jsonl` under each
+  `tmp/mcpe-smoke-*` trace directory and summarizes samples in `summary.json`.
+  `tools/trace_query.py <trace-dir> pc-profile` prints the latest snapshot,
+  tolerating a truncated final JSONL row from timeout-killed runs.
+- Baseline profiler run `tmp/mcpe-smoke-1778992046` timed out after 120s at
+  `android_main`, recorded 54 GLES events, 0 swaps, 94,413 PC samples, and
+  showed top samples in HLE-page `strlen`/`strcmp` helpers plus
+  `libminecraftpe.so` `bn_mul_mont` and UI definition resolution.
+- Moving `strlen`, `strcmp`, and `strncmp` from interpreted HLE-page ARM helper
+  code to Rust HLE traps moved the top samples out of string helpers and raised
+  same-window GLES event progress to 366 in `tmp/mcpe-smoke-1778992374`.
+- Adding HLE coverage for defined 64-bit compiler helpers
+  `__divdi3`, `__udivdi3`, `__moddi3`, and `__umoddi3` removed `__umoddi3`
+  from the latest top profile, but did not move the 120s run beyond
+  `android_main` or produce the first swap.
+- Optimizing `MappedMemory` 16/32-bit loads and stores to avoid default
+  byte-at-a-time trait access is correct and tested, but it did not produce a
+  visible 120s MCPE progression change: `tmp/mcpe-smoke-1778993627` still
+  records 366 GLES events, 0 swaps, and top samples in `bn_mul_mont`.
+- The current evidence points at ARM interpreter throughput in native
+  `bn_mul_mont` and MCPE UI/JSON parsing paths, not blind guest-thread slice
+  tuning. The hot `bn_mul_mont` loop is ARM state around object offsets
+  `0x012e0738..0x012e076c` and consists of `ldr`, `adds`, `umlal`, `adc`,
+  `str`, `cmp`, and `bne`. A focused qemu-user oracle case now covers the
+  observed `UMLAL + ADDS/ADC` pattern.
+
 Local files rechecked on 2026-05-13:
 
 ```text

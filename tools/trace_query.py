@@ -5,6 +5,7 @@ import pathlib
 import re
 import sys
 import tempfile
+from collections import Counter
 
 
 class TraceQueryError(RuntimeError):
@@ -71,6 +72,11 @@ def native_events_path(args) -> pathlib.Path:
     return pathlib.Path(args.native_events) if args.native_events else root / "native_events.jsonl"
 
 
+def pc_profile_path(args) -> pathlib.Path:
+    root = pathlib.Path(args.trace_dir)
+    return pathlib.Path(args.pc_profile) if args.pc_profile else root / "pc_profile.jsonl"
+
+
 def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path]:
     _root, hle_dir, draw_dir = trace_paths(args)
     uploads = read_jsonl(hle_dir / "manifest.jsonl")
@@ -86,6 +92,29 @@ def load_gles_events(args) -> tuple[list[dict], pathlib.Path]:
 def load_native_events(args) -> tuple[list[dict], pathlib.Path]:
     path = native_events_path(args)
     return read_jsonl(path), path
+
+
+def load_pc_profile(args) -> tuple[list[dict], pathlib.Path, int]:
+    path = pc_profile_path(args)
+    if not path.exists():
+        return [], path, 0
+    lines = path.read_text().splitlines()
+    rows = []
+    invalid_trailing_rows = 0
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as err:
+            if line_no == len(lines):
+                invalid_trailing_rows += 1
+                continue
+            raise TraceQueryError(f"{path}:{line_no}: invalid JSON: {err}") from err
+        if not isinstance(row, dict):
+            raise TraceQueryError(f"{path}:{line_no}: expected JSON object")
+        rows.append(row)
+    return rows, path, invalid_trailing_rows
 
 
 def row_int(row: dict, key: str) -> int | None:
@@ -357,6 +386,97 @@ def print_native_event(args) -> int:
     print(f"native-event: path={path} rows={len(rows)}")
     for row in rows[: args.limit]:
         print(format_native_event(row))
+    return 0
+
+
+def pc_profile_entry_matches(row: dict, args) -> bool:
+    if args.thread is not None and row.get("thread_id") != args.thread:
+        return False
+    if args.library and row.get("library") != args.library:
+        return False
+    if args.contains:
+        needle = args.contains.lower()
+        fields = [
+            row.get("symbol"),
+            row.get("library"),
+            row.get("op"),
+            row.get("instr_hex"),
+            row.get("pc_hex"),
+            row.get("object_offset_hex"),
+            row.get("symbol_offset_hex"),
+        ]
+        if not any(isinstance(field, str) and needle in field.lower() for field in fields):
+            return False
+    return True
+
+
+def format_pc_profile_entry(row: dict) -> str:
+    symbol = row.get("symbol") or row.get("pc_hex")
+    offset = row.get("symbol_offset_hex")
+    symbol_text = symbol if not offset else f"{symbol}+{offset}"
+    return " ".join(
+        [
+            f"rank={row.get('rank')}",
+            f"count={row.get('count')}",
+            f"thread={row.get('thread_id')}",
+            f"isa={row.get('isa')}",
+            f"pc={row.get('pc_hex')}",
+            f"instr={row.get('instr_hex', '<unknown>')}",
+            f"op={row.get('op', '<unknown>')}",
+            f"library={row.get('library', '<unknown>')}",
+            f"object_offset={row.get('object_offset_hex', '<unknown>')}",
+            f"symbol={symbol_text}",
+        ]
+    )
+
+
+def print_pc_profile(args) -> int:
+    rows, path, invalid_trailing_rows = load_pc_profile(args)
+    if not rows:
+        raise TraceQueryError(f"{path}: missing or empty PC profile trace")
+    snapshot = rows[-1]
+    top_rows = snapshot.get("top")
+    if not isinstance(top_rows, list):
+        raise TraceQueryError(f"{path}: latest PC profile snapshot has no top array")
+    filtered = [
+        row
+        for row in top_rows
+        if isinstance(row, dict) and pc_profile_entry_matches(row, args)
+    ]
+    libraries = Counter()
+    threads = Counter()
+    ops = Counter()
+    for row in filtered:
+        count = row.get("count") if isinstance(row.get("count"), int) else 0
+        libraries[row.get("library", "<unknown>")] += count
+        threads[row.get("thread_id")] += count
+        ops[row.get("op", "<unknown>")] += count
+    print(
+        "pc-profile: "
+        f"path={path} rows={len(rows)} invalid_trailing_rows={invalid_trailing_rows} "
+        f"samples={snapshot.get('samples')} "
+        f"guest_instructions={snapshot.get('guest_instructions')} "
+        f"unique_buckets={snapshot.get('unique_buckets')} "
+        f"interval={snapshot.get('interval')} "
+        f"top_rows={len(top_rows)} filtered_rows={len(filtered)}"
+    )
+    print(
+        "pc-profile-libraries: "
+        + (
+            ", ".join(f"{library}:{count}" for library, count in libraries.most_common(10))
+            or "none"
+        )
+    )
+    print(
+        "pc-profile-threads: "
+        + (", ".join(f"{thread}:{count}" for thread, count in threads.most_common(10)) or "none")
+    )
+    print(
+        "pc-profile-ops: "
+        + (", ".join(f"{op}:{count}" for op, count in ops.most_common(12)) or "none")
+    )
+    for row in filtered[: args.limit]:
+        print(format_pc_profile_entry(row))
     return 0
 
 
@@ -2196,6 +2316,60 @@ def run_self_test() -> None:
         )
         hle_args = argparse.Namespace(trace_dir=str(root), native_log=None, limit=4)
         assert print_hle_uldivmod_check(hle_args) == 0
+        (root / "pc_profile.jsonl").write_text(
+            json.dumps(
+                {
+                    "kind": "pc_profile_snapshot",
+                    "samples": 128,
+                    "guest_instructions": 524288,
+                    "interval": 4096,
+                    "unique_buckets": 2,
+                    "top": [
+                        {
+                            "rank": 1,
+                            "thread_id": 1,
+                            "pc_hex": "0x717e073c",
+                            "isa": "Arm",
+                            "count": 42,
+                            "instr_hex": "0xe09ba007",
+                            "op": "adds",
+                            "library": "libminecraftpe.so",
+                            "object_offset_hex": "0x012e073c",
+                            "symbol": "bn_mul_mont",
+                            "symbol_offset_hex": "0x11c",
+                        },
+                        {
+                            "rank": 2,
+                            "thread_id": 2,
+                            "pc_hex": "0x6f001300",
+                            "isa": "Arm",
+                            "count": 7,
+                            "instr_hex": "0xe7f000f0",
+                            "op": "<unknown>",
+                            "library": "hle-imports",
+                            "object_offset_hex": "0x00001300",
+                            "symbol": "malloc",
+                            "symbol_offset_hex": "0x0",
+                        },
+                    ],
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+            + '{"partial":'
+        )
+        pc_args = argparse.Namespace(
+            trace_dir=str(root),
+            pc_profile=None,
+            contains="bn_mul",
+            library=None,
+            thread=None,
+            limit=4,
+        )
+        rows, _profile_path, invalid = load_pc_profile(pc_args)
+        assert len(rows) == 1
+        assert invalid == 1
+        assert pc_profile_entry_matches(rows[0]["top"][0], pc_args)
         (root / "native_events.jsonl").write_text(
             "\n".join(
                 [
@@ -2696,6 +2870,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gles-events", help="override GLES event JSONL path")
     parser.add_argument("--native-log", help="override native stderr trace log path")
     parser.add_argument("--native-events", help="override native event JSONL path")
+    parser.add_argument("--pc-profile", help="override PC profile JSONL path")
     parser.add_argument("--self-test", action="store_true", help="run built-in self-test")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -2716,6 +2891,12 @@ def build_parser() -> argparse.ArgumentParser:
     native_event.add_argument("--pc", type=parse_u32)
     native_event.add_argument("--contains")
     native_event.add_argument("--limit", type=int, default=40)
+
+    pc_profile = subparsers.add_parser("pc-profile", help="show guest PC profile hot spots")
+    pc_profile.add_argument("--contains")
+    pc_profile.add_argument("--library")
+    pc_profile.add_argument("--thread", type=parse_u32)
+    pc_profile.add_argument("--limit", type=int, default=40)
 
     bn_mont = subparsers.add_parser(
         "bn-mont-check",
@@ -2818,6 +2999,8 @@ def main(argv=None) -> int:
         return print_gles_event(args)
     if args.command == "native-event":
         return print_native_event(args)
+    if args.command == "pc-profile":
+        return print_pc_profile(args)
     if args.command == "bn-mont-check":
         return print_bn_mont_check(args)
     if args.command == "bn-mod-sqr-check":

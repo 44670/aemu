@@ -185,10 +185,71 @@ impl Memory for MappedMemory {
         Ok(self.regions[region].data[off])
     }
 
+    fn load16(&mut self, addr: u32) -> Result<u16> {
+        if let Ok((region, off)) = self.offset(addr) {
+            let data = &self.regions[region].data;
+            if off.checked_add(2).is_some_and(|end| end <= data.len()) {
+                return Ok(u16::from_le_bytes([data[off], data[off + 1]]));
+            }
+        }
+        let b0 = self.load8(addr)?;
+        let b1 = self.load8(addr.wrapping_add(1))?;
+        Ok(u16::from_le_bytes([b0, b1]))
+    }
+
+    fn load32(&mut self, addr: u32) -> Result<u32> {
+        if let Ok((region, off)) = self.offset(addr) {
+            let data = &self.regions[region].data;
+            if off.checked_add(4).is_some_and(|end| end <= data.len()) {
+                return Ok(u32::from_le_bytes([
+                    data[off],
+                    data[off + 1],
+                    data[off + 2],
+                    data[off + 3],
+                ]));
+            }
+        }
+        let b0 = self.load8(addr)?;
+        let b1 = self.load8(addr.wrapping_add(1))?;
+        let b2 = self.load8(addr.wrapping_add(2))?;
+        let b3 = self.load8(addr.wrapping_add(3))?;
+        Ok(u32::from_le_bytes([b0, b1, b2, b3]))
+    }
+
     fn store8(&mut self, addr: u32, value: u8) -> Result<()> {
         let (region, off) = self.offset(addr)?;
         self.regions[region].data[off] = value;
         self.dirty_pages.insert(addr & !0xfff);
+        Ok(())
+    }
+
+    fn store16(&mut self, addr: u32, value: u16) -> Result<()> {
+        if let Ok((region, off)) = self.offset(addr) {
+            let data = &mut self.regions[region].data;
+            if off.checked_add(2).is_some_and(|end| end <= data.len()) {
+                data[off..off + 2].copy_from_slice(&value.to_le_bytes());
+                self.mark_dirty_range(addr, 2);
+                return Ok(());
+            }
+        }
+        for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.store8(addr.wrapping_add(idx as u32), byte)?;
+        }
+        Ok(())
+    }
+
+    fn store32(&mut self, addr: u32, value: u32) -> Result<()> {
+        if let Ok((region, off)) = self.offset(addr) {
+            let data = &mut self.regions[region].data;
+            if off.checked_add(4).is_some_and(|end| end <= data.len()) {
+                data[off..off + 4].copy_from_slice(&value.to_le_bytes());
+                self.mark_dirty_range(addr, 4);
+                return Ok(());
+            }
+        }
+        for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.store8(addr.wrapping_add(idx as u32), byte)?;
+        }
         Ok(())
     }
 }
@@ -238,6 +299,18 @@ mod tests {
         );
         assert_eq!(snapshots[1].base, 0x3000);
         assert_eq!(&snapshots[1].bytes[0x02..0x04], &0x5566u16.to_le_bytes());
+    }
+
+    #[test]
+    fn word_access_falls_back_across_adjacent_regions() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 2).unwrap();
+        memory.map_zeroed(0x1002, 2).unwrap();
+
+        memory.store32(0x1000, 0x1122_3344).unwrap();
+
+        assert_eq!(memory.load16(0x1001).unwrap(), 0x2233);
+        assert_eq!(memory.load32(0x1000).unwrap(), 0x1122_3344);
     }
 
     #[test]

@@ -1244,11 +1244,44 @@ def summarize_gles_events(path: pathlib.Path):
     return summary
 
 
+def summarize_pc_profile(path: pathlib.Path):
+    summary = {
+        "jsonl": str(path),
+        "rows": 0,
+        "samples": 0,
+        "guest_instructions": 0,
+        "unique_buckets": 0,
+        "top": [],
+    }
+    if not path.exists():
+        return summary
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            summary["rows"] += 1
+            summary["samples"] = row.get("samples", summary["samples"])
+            summary["guest_instructions"] = row.get(
+                "guest_instructions", summary["guest_instructions"]
+            )
+            summary["unique_buckets"] = row.get("unique_buckets", summary["unique_buckets"])
+            top = row.get("top")
+            if isinstance(top, list):
+                summary["top"] = top[:10]
+    return summary
+
+
 def collect_artifacts(trace_dir: pathlib.Path):
     draw_dir = trace_dir / "sdl-draw"
     gles_path = trace_dir / "gles_events.jsonl"
     native_events_path = trace_dir / "native_events.jsonl"
+    pc_profile_path = trace_dir / "pc_profile.jsonl"
     gles = summarize_gles_events(gles_path)
+    pc_profile = summarize_pc_profile(pc_profile_path)
     kind_counts = gles["kind_counts"]
     return {
         "gles_events_jsonl": str(gles_path),
@@ -1261,6 +1294,12 @@ def collect_artifacts(trace_dir: pathlib.Path):
         "gles_last_event_index": gles["last_event_index"],
         "native_events_jsonl": str(native_events_path),
         "native_event_count": count_jsonl(native_events_path),
+        "pc_profile_jsonl": str(pc_profile_path),
+        "pc_profile_rows": pc_profile["rows"],
+        "pc_profile_samples": pc_profile["samples"],
+        "pc_profile_guest_instructions": pc_profile["guest_instructions"],
+        "pc_profile_unique_buckets": pc_profile["unique_buckets"],
+        "pc_profile_top": pc_profile["top"],
         "sdl_draw_dir": str(draw_dir),
         "sdl_draw_png_count": len(list(draw_dir.glob("*.png"))) if draw_dir.exists() else 0,
         "sdl_draw_manifest_count": count_jsonl(draw_dir / "draw_manifest.jsonl"),
@@ -1355,7 +1394,30 @@ def validate_expectations(args, summary):
             f"expected logged GL errors <= {args.max_gl_errors}, "
             f"got {live.get('max_logged_gl_errors', 0)}"
         )
+    if args.min_pc_profile_samples and artifacts["pc_profile_samples"] < args.min_pc_profile_samples:
+        errors.append(
+            f"expected at least {args.min_pc_profile_samples} PC profile samples, "
+            f"got {artifacts['pc_profile_samples']}"
+        )
     return errors
+
+
+def has_expectation_gates(args) -> bool:
+    return bool(
+        args.expect_crash_pc
+        or args.expect_fault_address
+        or args.expect_stage
+        or args.expect_native_event
+        or args.expect_run_log_contains
+        or args.min_live_frame
+        or args.min_gles_events
+        or args.min_gles_swaps
+        or args.min_gles_draw_elements
+        or args.min_sdl_draw_pngs
+        or args.min_readback_rgb
+        or args.min_pc_profile_samples
+        or args.max_gl_errors is not None
+    )
 
 
 def format_hex(value):
@@ -1424,9 +1486,20 @@ def print_summary(summary, expectation_errors):
         f"gles_swaps={artifacts['gles_swap_count']} "
         f"gles_draw_elements={artifacts['gles_draw_elements_count']} "
         f"native_events={artifacts['native_event_count']} "
+        f"pc_profile_samples={artifacts['pc_profile_samples']} "
         f"sdl_draw_pngs={artifacts['sdl_draw_png_count']} "
         f"sdl_draw_manifest_rows={artifacts['sdl_draw_manifest_count']}"
     )
+    if artifacts["pc_profile_top"]:
+        top = artifacts["pc_profile_top"][0]
+        where = top.get("symbol") or top.get("library") or top.get("pc_hex")
+        print(
+            "pc_profile: "
+            f"rows={artifacts['pc_profile_rows']} "
+            f"unique={artifacts['pc_profile_unique_buckets']} "
+            f"top={where}+{top.get('symbol_offset_hex', '0x0')} "
+            f"count={top.get('count')} thread={top.get('thread_id')}"
+        )
     print(f"run_log: {summary['run_log']}")
     print(f"summary_json: {summary['summary_json']}")
     if expectation_errors:
@@ -1462,6 +1535,34 @@ def build_arg_parser():
         "--guest-thread-swap-slices",
         type=int,
         help="set AEMU_GUEST_THREAD_SWAP_SLICES for frame-boundary guest worker scheduling",
+    )
+    parser.add_argument(
+        "--profile-pc",
+        action="store_true",
+        help="write low-overhead guest PC/function hot spot samples to pc_profile.jsonl",
+    )
+    parser.add_argument(
+        "--profile-pc-interval",
+        type=int,
+        default=4096,
+        help="sample one guest PC every N interpreted guest instructions",
+    )
+    parser.add_argument(
+        "--profile-pc-limit",
+        type=int,
+        help="stop collecting PC samples after this many samples",
+    )
+    parser.add_argument(
+        "--profile-pc-flush-interval",
+        type=int,
+        default=512,
+        help="append a PC profile snapshot every N new samples",
+    )
+    parser.add_argument(
+        "--profile-pc-top",
+        type=int,
+        default=80,
+        help="include this many hottest buckets in each PC profile snapshot",
     )
     parser.add_argument(
         "--cpu-feature-preset",
@@ -1536,6 +1637,7 @@ def build_arg_parser():
     parser.add_argument("--min-gles-draw-elements", type=int, default=0)
     parser.add_argument("--min-sdl-draw-pngs", type=int, default=0)
     parser.add_argument("--min-readback-rgb", type=int, default=0)
+    parser.add_argument("--min-pc-profile-samples", type=int, default=0)
     parser.add_argument("--max-gl-errors", type=int)
     parser.add_argument("--echo-log", action="store_true")
     return parser
@@ -1583,6 +1685,13 @@ def main(argv=None):
         env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
     if args.guest_thread_swap_slices is not None:
         env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
+    if args.profile_pc:
+        env["AEMU_PROFILE_PC_JSONL"] = str(trace_dir / "pc_profile.jsonl")
+        env["AEMU_PROFILE_PC_INTERVAL"] = str(args.profile_pc_interval)
+        env["AEMU_PROFILE_PC_FLUSH_INTERVAL"] = str(args.profile_pc_flush_interval)
+        env["AEMU_PROFILE_PC_TOP"] = str(args.profile_pc_top)
+        if args.profile_pc_limit is not None:
+            env["AEMU_PROFILE_PC_LIMIT"] = str(args.profile_pc_limit)
     env["AEMU_TRACE_GLES_EVENTS_JSONL"] = str(trace_dir / "gles_events.jsonl")
     env["AEMU_TRACE_GLES_EVENTS_MATCH"] = (
         "SwapBuffers,UseProgram,BindTexture,DrawElements,TexImage2D,TexSubImage2D"
@@ -1655,6 +1764,13 @@ def main(argv=None):
         "threads": {
             "guest_thread_swap_slices": args.guest_thread_swap_slices,
         },
+        "pc_profile": {
+            "enabled": args.profile_pc,
+            "interval": args.profile_pc_interval if args.profile_pc else None,
+            "limit": args.profile_pc_limit if args.profile_pc else None,
+            "flush_interval": args.profile_pc_flush_interval if args.profile_pc else None,
+            "top": args.profile_pc_top if args.profile_pc else None,
+        },
         "run": parsed_run,
         "artifacts": collect_artifacts(trace_dir),
     }
@@ -1665,9 +1781,7 @@ def main(argv=None):
 
     if expectation_errors:
         return 1
-    if args.expect_exit == "any" and not (
-        args.expect_crash_pc or args.expect_fault_address or args.expect_stage
-    ):
+    if args.expect_exit == "any" and not has_expectation_gates(args):
         return 0 if run["returncode"] == 0 else 1
     return 0
 
