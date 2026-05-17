@@ -29,6 +29,7 @@ const GUEST_THREAD_SLICE_STEPS: usize = 4096;
 const GUEST_THREAD_SERVICE_INTERVAL: usize = 50_000;
 const GUEST_THREAD_SWAP_SERVICE_SLICES: usize = 64;
 const MAIN_THREAD_WAIT_SPINS: usize = 1024;
+const GUEST_THREAD_STALL_SUMMARY_LIMIT: usize = 16;
 const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
 const GUEST_THREAD_SERVICE_HLE: &[&str] = &[
     "pthread_create",
@@ -123,6 +124,7 @@ pub struct NativeRuntime {
     stack_size: u32,
     next_thread_stack_top: u32,
     guest_threads: VecDeque<GuestThread>,
+    skipped_guest_threads: VecDeque<CreatedPthread>,
     guest_mutexes: Vec<GuestMutex>,
     main_wait: GuestThreadWait,
     minecraft_resource_bridge: Option<MinecraftResourceBridge>,
@@ -1089,6 +1091,7 @@ impl NativeRuntime {
             stack_size,
             next_thread_stack_top: config.stack_base,
             guest_threads: VecDeque::new(),
+            skipped_guest_threads: VecDeque::new(),
             guest_mutexes: Vec::new(),
             main_wait: GuestThreadWait::Runnable,
             minecraft_resource_bridge,
@@ -1904,6 +1907,7 @@ impl NativeRuntime {
     fn drain_created_pthreads(&mut self) -> Result<(), NativeRuntimeError> {
         for created in self.hle.take_created_pthreads() {
             if !self.should_run_created_pthread(created) {
+                self.record_skipped_guest_thread(created);
                 if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
                     eprintln!(
                         "THREAD skip id={} start={:#010x} arg={:#010x} library={}",
@@ -1933,6 +1937,13 @@ impl NativeRuntime {
             self.guest_threads.push_back(thread);
         }
         Ok(())
+    }
+
+    fn record_skipped_guest_thread(&mut self, created: CreatedPthread) {
+        if self.skipped_guest_threads.len() >= GUEST_THREAD_STALL_SUMMARY_LIMIT {
+            self.skipped_guest_threads.pop_front();
+        }
+        self.skipped_guest_threads.push_back(created);
     }
 
     fn pthread_callable_entry(&mut self, arg: u32) -> Option<u32> {
@@ -2116,10 +2127,115 @@ impl NativeRuntime {
             }
             self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
         }
+        let summary = self.guest_thread_stall_summary();
+        for line in summary.lines() {
+            eprintln!("THREAD stall {line}");
+        }
         Err(NativeRuntimeError::Memory(format!(
-            "main guest thread stalled waiting for {:?}",
-            self.main_wait
+            "main guest thread stalled waiting for {:?}\n{}",
+            self.main_wait, summary
         )))
+    }
+
+    fn guest_thread_stall_summary(&mut self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("main_wait={:?}", self.main_wait));
+        if self.guest_threads.is_empty() {
+            lines.push("guest_threads=none".to_string());
+        } else {
+            lines.push(format!(
+                "guest_threads={} shown={}",
+                self.guest_threads.len(),
+                self.guest_threads
+                    .len()
+                    .min(GUEST_THREAD_STALL_SUMMARY_LIMIT)
+            ));
+            for thread in self
+                .guest_threads
+                .iter()
+                .take(GUEST_THREAD_STALL_SUMMARY_LIMIT)
+            {
+                let pc = thread.cpu.pc();
+                lines.push(format!(
+                    "guest id={} wait={:?} pc={pc:#010x} isa={:?} lr={:#010x} r0={:#010x} at={}",
+                    thread.id,
+                    thread.wait,
+                    thread.cpu.isa(),
+                    thread.cpu.reg(14),
+                    thread.cpu.reg(0),
+                    self.describe_guest_address(pc & !1),
+                ));
+            }
+        }
+        if self.skipped_guest_threads.is_empty() {
+            lines.push("skipped_pthreads=none".to_string());
+        } else {
+            lines.push(format!(
+                "skipped_pthreads={} shown={}",
+                self.skipped_guest_threads.len(),
+                self.skipped_guest_threads
+                    .len()
+                    .min(GUEST_THREAD_STALL_SUMMARY_LIMIT)
+            ));
+            let skipped_threads = self
+                .skipped_guest_threads
+                .iter()
+                .copied()
+                .take(GUEST_THREAD_STALL_SUMMARY_LIMIT)
+                .collect::<Vec<_>>();
+            for skipped in skipped_threads {
+                let entry = self.pthread_callable_entry(skipped.arg);
+                let entry_desc = entry
+                    .map(|addr| self.describe_guest_address(addr & !1))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                lines.push(format!(
+                    "skipped id={} start={:#010x} arg={:#010x} start_at={} entry={} entry_at={entry_desc}",
+                    skipped.id,
+                    skipped.start,
+                    skipped.arg,
+                    self.describe_guest_address(skipped.start & !1),
+                    entry
+                        .map(|addr| format!("{addr:#010x}"))
+                        .unwrap_or_else(|| "<unknown>".to_string()),
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn describe_guest_address(&self, address: u32) -> String {
+        let Some(object) = self.link.objects.iter().find(|object| {
+            object
+                .memory_base
+                .checked_add(object.memory_size)
+                .is_some_and(|end| address >= object.memory_base && address < end)
+        }) else {
+            return "<unknown>".to_string();
+        };
+        let object_offset = address
+            .checked_sub(object.load_bias)
+            .map(|offset| format!("+0x{offset:08x}"))
+            .unwrap_or_else(|| "+?".to_string());
+        let mut nearest: Option<&crate::native_loader::NativeSymbol> = None;
+        for symbol in &object.defined_symbols {
+            let symbol_addr = symbol.address & !1;
+            if symbol_addr <= address
+                && nearest
+                    .as_ref()
+                    .is_none_or(|best| (best.address & !1) <= symbol_addr)
+            {
+                nearest = Some(symbol);
+            }
+        }
+        if let Some(symbol) = nearest {
+            let offset = address.wrapping_sub(symbol.address & !1);
+            format!(
+                "{}{} {}+0x{offset:x}",
+                object.library_name, object_offset, symbol.name
+            )
+        } else {
+            format!("{}{}", object.library_name, object_offset)
+        }
     }
 
     fn wake_cond_threads(&mut self, cond: u32, broadcast: bool) {
@@ -4813,6 +4929,88 @@ mod tests {
     }
 
     #[test]
+    fn stall_summary_reports_guest_and_skipped_threads() {
+        let object = LoadedNativeObject {
+            entry_name: "lib/armeabi-v7a/libminecraftpe.so".to_string(),
+            library_name: "libminecraftpe.so".to_string(),
+            load_bias: 0x7050_0000,
+            memory_base: 0x7100_0000,
+            memory_size: 0x0060_0000,
+            entry: 0x7100_0000,
+            needed: Vec::new(),
+            imports: Vec::new(),
+            defined_symbols: vec![
+                NativeSymbol {
+                    name: "Worker::run".to_string(),
+                    address: 0x7100_1000,
+                    library_name: "libminecraftpe.so".to_string(),
+                },
+                NativeSymbol {
+                    name: "ThreadStart".to_string(),
+                    address: 0x715c_de84,
+                    library_name: "libminecraftpe.so".to_string(),
+                },
+            ],
+            relocations: Vec::new(),
+            relocation_count: 0,
+            init: None,
+            init_array: None,
+            arm_exidx: None,
+        };
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: vec![object],
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.main_wait = GuestThreadWait::Condvar {
+            cond: 0x71bf_a0dc,
+            mutex: 0x71bf_a0d8,
+        };
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Thumb);
+        cpu.set_pc(0x7100_1012);
+        cpu.set_reg(0, 0x6000_0000);
+        cpu.set_reg(14, 0x7100_2001);
+        runtime.guest_threads.push_back(GuestThread {
+            id: 7,
+            cpu,
+            wait: GuestThreadWait::Runnable,
+            trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
+            trace_pc_count: 0,
+            trace_mem32_count: 0,
+            trace_mem32_deref_count: 0,
+            trace_cxx_string_count: 0,
+        });
+        runtime.record_skipped_guest_thread(CreatedPthread {
+            id: 13,
+            start: 0x715c_de85,
+            arg: 0x6004_0000,
+        });
+
+        let summary = runtime.guest_thread_stall_summary();
+        assert!(summary.contains("main_wait=Condvar"));
+        assert!(summary.contains("guest id=7"));
+        assert!(summary.contains("libminecraftpe.so+0x00b01012 Worker::run+0x12"));
+        assert!(summary.contains("skipped id=13"));
+        assert!(summary.contains("libminecraftpe.so+0x010cde84 ThreadStart+0x0"));
+    }
+
+    #[test]
     fn blocks_main_thread_on_pthread_mutex_lock_until_guest_unlocks() {
         let lock_addr = 0x6f00_0000;
         let unlock_addr = 0x6f00_0004;
@@ -5221,6 +5419,7 @@ mod tests {
             stack_size: 0x1000,
             next_thread_stack_top: 0x5000_1000,
             guest_threads: VecDeque::new(),
+            skipped_guest_threads: VecDeque::new(),
             guest_mutexes: Vec::new(),
             main_wait: GuestThreadWait::Runnable,
             minecraft_resource_bridge: None,

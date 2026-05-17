@@ -535,7 +535,7 @@ def print_pc_profile(args) -> int:
 
 
 THREAD_ACTION_RE = re.compile(
-    r"^THREAD (?P<action>create|skip|wait|wake|abort|signal|condwait)\b(?P<rest>.*)$"
+    r"^THREAD (?P<action>create|skip|wait|wake|abort|signal|condwait|stall)\b(?P<rest>.*)$"
 )
 THREAD_SLICE_RE = re.compile(
     r"^THREAD slice id=(?P<id>\d+) done=(?P<done>\w+) "
@@ -560,6 +560,7 @@ def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
     signals = []
     condwaits = []
     aborts = []
+    stalls = []
     slices = Counter()
     slice_pcs = Counter()
     line_count = 0
@@ -632,6 +633,8 @@ def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
             (signals if action == "signal" else condwaits).append(row)
         elif action == "abort":
             aborts.append({"raw": rest})
+        elif action == "stall":
+            stalls.append({"raw": rest})
     return (
         {
             "line_count": line_count,
@@ -643,6 +646,7 @@ def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
             "signals": signals,
             "condwaits": condwaits,
             "aborts": aborts,
+            "stalls": stalls,
             "slices": slices,
             "slice_pcs": slice_pcs,
         },
@@ -703,6 +707,10 @@ def print_thread_summary(args) -> int:
     print("thread-cond-waits:")
     for (name, cond, mutex), count in condwaits.most_common(args.limit):
         print(f"  count={count} name={name} cond={cond} mutex={mutex}")
+    if data["stalls"]:
+        print("thread-stalls:")
+        for row in data["stalls"][-args.limit:]:
+            print(f"  {row['raw']}")
     if args.slice_pcs:
         print("thread-slice-pcs:")
         for (thread, pc, isa), count in data["slice_pcs"].most_common(args.limit):
@@ -2546,6 +2554,7 @@ def run_self_test() -> None:
                         "THREAD wake id=7 cond=0x60049040 mutex=0x6004903c wait=Runnable",
                         "THREAD skip id=13 start=0x715cde85 arg=0x71bfa0c8 library=libminecraftpe.so",
                         "THREAD slice id=7 done=false pc=0x70f7c722 Thumb r0=0x00000000",
+                        "THREAD stall skipped id=13 start=0x715cde85 arg=0x71bfa0c8 start_at=libminecraftpe.so+0x010cde84",
                     ]
                 )
                 + "\n"
@@ -2559,7 +2568,9 @@ def run_self_test() -> None:
         assert thread_data["actions"]["signal"] == 1
         assert thread_data["actions"]["wake"] == 1
         assert thread_data["actions"]["slice"] == 1
+        assert thread_data["actions"]["stall"] == 1
         assert thread_data["skips"][0]["library"] == "libminecraftpe.so"
+        assert "start_at=libminecraftpe.so" in thread_data["stalls"][0]["raw"]
         assert thread_data["signals"][0]["waiters_before"] == 1
         assert thread_data["condwaits"][0]["name"] == "pthread_cond_wait"
         (root / "native_events.jsonl").write_text(
