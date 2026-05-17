@@ -173,6 +173,18 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   (63,017 bytes). `tools/mcpe_smoke.py` now lets future milestone scripts gate
   this directly with `--min-readback-rgb`, `--require-stop-screenshot`, and
   `--min-stop-screenshot-bytes`.
+- `tmp/mcpe-stop-after-draw-resource-20260517` repeats the same draw-stop gate
+  with `--native-trace-preset resource-done` and the stricter visible artifact
+  expectations. It exits 0 after 506.497s, writes the same 854x480 RGB
+  `stop.png`, and records 3,501 native resource events. At the visible draw
+  stop the preload path has completed all 859 work callbacks and all 859 done
+  callbacks, the done counter reaches zero, and the trace records
+  `ResourcePackManager::preloadTextures.done-callback.final-callback-call`,
+  `MinecraftClient::onResourcesLoaded.entry`, and
+  `MinecraftClient::onResourcesLoaded.store-23e` before the GLES stream's
+  first draw at event index `14276`. This narrows the next scheduler work to
+  making native resource callback draining deterministic and efficient; it is
+  not evidence for broad MCPE game-method HLE.
 
 Local files rechecked on 2026-05-13:
 
@@ -374,6 +386,16 @@ zero host GL errors.
   --min-gles-draw-elements 1 --expect-stage completed --expect-exit zero`
   exits 0, records 61 swaps, 721 `DrawElements`, stop readback
   `rgb=35348`, and writes `stop.png` as an 854x480 RGB PNG.
+- `tools/mcpe_smoke.py --trace-dir tmp/mcpe-stop-after-draw-resource-20260517
+  --frames 260 --timeout 640 --fake-time-step-nanos 100000
+  --guest-thread-swap-slices 256 --native-trace-preset resource-done
+  --stop-after-gles-draw-elements 1 --min-gles-draw-elements 1
+  --min-readback-rgb 1 --require-stop-screenshot
+  --min-stop-screenshot-bytes 1000 --max-gl-errors 0
+  --expect-stage completed --expect-exit zero` exits 0, records 61 swaps,
+  721 `DrawElements`, 3,501 native resource events, all 859 preload
+  callbacks, final resource callback, `onResourcesLoaded.store-23e`, and a
+  visible stop screenshot.
 - `tools/mcpe_ui_smoke.py --out-dir tmp --trace-hle AInput,AMotion
   --trace-hle-limit 80 --min-gles-events 1 --expect-hle-call
   AInputQueue_getEvent --expect-hle-call AMotionEvent_getX --expect-hle-call
