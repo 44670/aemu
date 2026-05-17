@@ -216,6 +216,13 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   `tmp/mcpe-localization-trace-20260517` confirms the profile PCs but fills an
   800-event limit quickly, so the entry-only preset is the better default for
   low-noise resource-text diagnosis.
+- `HleRuntime` now caches parsed APK ZIP entries when APK bytes are already
+  resident, so repeated `AAssetManager_open` and texture/image asset reads do
+  not reparse the central directory. The control run
+  `tmp/mcpe-first-visible-draw-apk-cache-20260517` still takes 501.090s to
+  reach the same 61-swap, 721-`DrawElements`, visible screenshot milestone.
+  This confirms central-directory reparsing was worth cleaning up but is not
+  the primary first-visible-draw bottleneck.
 
 Local files rechecked on 2026-05-13:
 
@@ -441,6 +448,10 @@ zero host GL errors.
   --expect-stage completed --expect-exit zero --expect-native-event
   Localization::_appendTranslations.entry` exits 0 and captures the first five
   localization language files without filling the native event limit.
+- `tools/mcpe_smoke.py --trace-dir tmp/mcpe-first-visible-draw-apk-cache-20260517
+  --first-visible-draw` exits 0 after 501.090s with 61 swaps, 721
+  `DrawElements`, and the same visible stop screenshot, so APK ZIP entry
+  caching does not materially move the first-visible-draw milestone.
 - `tools/mcpe_ui_smoke.py --out-dir tmp --trace-hle AInput,AMotion
   --trace-hle-limit 80 --min-gles-events 1 --expect-hle-call
   AInputQueue_getEvent --expect-hle-call AMotionEvent_getX --expect-hle-call

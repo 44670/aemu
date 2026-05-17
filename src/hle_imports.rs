@@ -11,7 +11,7 @@ use crate::gles_trace::{
     TextureUploadMatch, texture_payload_stats, texture_payload_to_rgb, texture_upload_matches,
 };
 use crate::png_util::encode_rgb_png;
-use crate::zip_probe::{extract_zip_entry, read_zip_entry};
+use crate::zip_probe::{ZipEntry, extract_parsed_zip_entry, parse_zip_entries, read_zip_entry};
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 const NATIVE_MALLOC_BUMP_SYMBOL_SIZE: u32 = 0x4084;
@@ -396,6 +396,7 @@ pub struct HleRuntime {
     freed: Vec<HleAllocation>,
     apk_path: Option<PathBuf>,
     apk_bytes: Option<Vec<u8>>,
+    apk_entries: Option<Vec<ZipEntry>>,
     assets: Vec<AndroidAsset>,
     next_gl_name: u32,
     gl_shaders: Vec<GlShader>,
@@ -1037,6 +1038,7 @@ impl HleRuntime {
             freed: Vec::new(),
             apk_path: None,
             apk_bytes: None,
+            apk_entries: None,
             assets: Vec::new(),
             next_gl_name: 1,
             gl_shaders: Vec::new(),
@@ -1083,16 +1085,18 @@ impl HleRuntime {
 
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
+        self.apk_entries = None;
         self.resource_texture_aliases = None;
     }
 
     pub fn set_apk_bytes(&mut self, apk_bytes: Vec<u8>) {
         self.apk_bytes = Some(apk_bytes);
+        self.apk_entries = None;
         self.resource_texture_aliases = None;
     }
 
     pub(crate) fn load_apk_image_argb_pixels(
-        &self,
+        &mut self,
         path: &str,
     ) -> Result<(u32, u32, Vec<u32>), String> {
         let texture = self.load_image_texture_for_path(path, ImageFormat::Any)?;
@@ -3806,7 +3810,7 @@ impl HleRuntime {
         Ok(self.return32(cpu, font))
     }
 
-    fn load_minecraft_font_widths(&self) -> Option<[u32; 256]> {
+    fn load_minecraft_font_widths(&mut self) -> Option<[u32; 256]> {
         let bytes = self
             .read_apk_asset_entry("assets/images/font/default8.png")
             .ok()?;
@@ -4645,9 +4649,20 @@ impl HleRuntime {
         }
     }
 
-    fn read_apk_asset_entry(&self, entry_name: &str) -> Result<Vec<u8>, String> {
-        if let Some(apk_bytes) = self.apk_bytes.as_deref() {
-            return extract_zip_entry(apk_bytes, entry_name).map_err(|err| err.to_string());
+    fn read_apk_asset_entry(&mut self, entry_name: &str) -> Result<Vec<u8>, String> {
+        if self.apk_bytes.is_some() {
+            if self.apk_entries.is_none() {
+                let apk_bytes = self.apk_bytes.as_deref().expect("checked above");
+                self.apk_entries =
+                    Some(parse_zip_entries(apk_bytes).map_err(|err| err.to_string())?);
+            }
+            let apk_bytes = self.apk_bytes.as_deref().expect("checked above");
+            let entries = self.apk_entries.as_ref().expect("initialized above");
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name == entry_name)
+                .ok_or_else(|| format!("ZIP entry not found: {entry_name}"))?;
+            return extract_parsed_zip_entry(apk_bytes, entry).map_err(|err| err.to_string());
         }
         let Some(apk_path) = self.apk_path.as_ref() else {
             return Err("no APK path or bytes".to_string());
@@ -4712,7 +4727,7 @@ impl HleRuntime {
         self.resource_texture_aliases.as_deref().unwrap_or(&[])
     }
 
-    fn load_resource_texture_aliases(&self) -> Vec<(String, String)> {
+    fn load_resource_texture_aliases(&mut self) -> Vec<(String, String)> {
         let entry_name = "assets/resourcepacks/vanilla/resources.json";
         let bytes = match self.read_apk_asset_entry(entry_name) {
             Ok(bytes) => bytes,
@@ -4750,7 +4765,7 @@ impl HleRuntime {
     }
 
     fn load_image_texture_for_path(
-        &self,
+        &mut self,
         path: &str,
         format: ImageFormat,
     ) -> Result<DecodedTexture, String> {
