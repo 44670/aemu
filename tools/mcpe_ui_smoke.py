@@ -28,6 +28,16 @@ DEFAULT_SCRIPT = (
     "screenshot {trace_dir}/after.png; "
     "debug"
 )
+PLAY_PRESET_SCRIPT = (
+    "screenshot {screenshots}/01_visible.png; "
+    "tap 280,386; "
+    "wait 1.0; "
+    "screenshot {screenshots}/02_after_not_now.png; "
+    "tap 427,240; "
+    "wait 8.0; "
+    "screenshot {screenshots}/03_after_play.png; "
+    "debug"
+)
 
 WS_URL_RE = re.compile(r"sdl2-live: websocket (?P<url>ws://\S+)")
 
@@ -410,6 +420,11 @@ def validate_summary(args, summary):
         errors.append(f"journal step {first['step']} failed: {first.get('error') or first.get('result')}")
 
     screenshots = summary["journal"]["screenshots"]
+    if len(screenshots) < args.min_screenshots:
+        errors.append(
+            f"expected at least {args.min_screenshots} screenshots, "
+            f"got {len(screenshots)}"
+        )
     if args.expect_screenshot_change:
         if len(screenshots) < 2:
             errors.append("expected screenshot change, but fewer than two screenshots were captured")
@@ -577,6 +592,11 @@ def build_arg_parser():
     parser.add_argument("--ws", default=DEFAULT_WS_ADDR)
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument(
+        "--preset",
+        choices=["play"],
+        help="apply a reusable MCPE UI smoke profile",
+    )
+    parser.add_argument(
         "--fake-time-step-nanos",
         type=int,
         help="set AEMU_FAKE_TIME_STEP_NANOS for Android time HLE diagnostics",
@@ -619,6 +639,7 @@ def build_arg_parser():
     parser.add_argument("--max-gl-errors", type=int, default=0)
     parser.add_argument("--min-readback-rgb", type=int, default=0)
     parser.add_argument("--min-draw-elements", type=int, default=0)
+    parser.add_argument("--min-screenshots", type=int, default=0)
     parser.add_argument("--min-screenshot-bytes", type=int, default=100)
     parser.add_argument("--min-gles-events", type=int, default=0)
     parser.add_argument("--min-native-events", type=int, default=0)
@@ -675,6 +696,30 @@ def build_arg_parser():
     return parser
 
 
+def append_arg_once(args, name, value):
+    values = getattr(args, name)
+    if values is None:
+        values = []
+        setattr(args, name, values)
+    if value not in values:
+        values.append(value)
+
+
+def apply_preset_defaults(args):
+    if args.preset is None:
+        return
+    if args.preset == "play":
+        args.first_visible_draw = True
+        if not args.script and not args.script_file:
+            args.script = PLAY_PRESET_SCRIPT
+        args.wait_ws_timeout = max(args.wait_ws_timeout, 220.0)
+        args.post_journal_seconds = max(args.post_journal_seconds, 60.0)
+        args.min_screenshots = max(args.min_screenshots, 3)
+        append_arg_once(args, "expect_screenshot_pair_change", "1:2")
+        append_arg_once(args, "reject_run_log_contains", "THREAD stall")
+        append_arg_once(args, "reject_run_log_contains", "native run failed")
+
+
 def apply_milestone_defaults(args):
     if not args.first_visible_draw:
         return
@@ -694,6 +739,7 @@ def apply_milestone_defaults(args):
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
+    apply_preset_defaults(args)
     apply_milestone_defaults(args)
     if not args.apk.exists():
         raise SystemExit(f"APK not found: {args.apk}")
