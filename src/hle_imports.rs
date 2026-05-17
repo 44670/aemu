@@ -6429,22 +6429,39 @@ impl HleRuntime {
         if allocation.size == 0 {
             return;
         }
-        self.freed.push(allocation);
-        self.freed.sort_by_key(|allocation| allocation.ptr);
+        let mut idx = self
+            .freed
+            .partition_point(|block| block.ptr < allocation.ptr);
 
-        let mut coalesced: Vec<HleAllocation> = Vec::with_capacity(self.freed.len());
-        for block in self.freed.drain(..) {
-            if let Some(last) = coalesced.last_mut() {
-                let last_end = last.ptr.saturating_add(last.size);
-                if last_end >= block.ptr {
-                    let block_end = block.ptr.saturating_add(block.size);
-                    last.size = block_end.saturating_sub(last.ptr).max(last.size);
-                    continue;
-                }
+        if idx > 0 {
+            let prev_end = self.freed[idx - 1]
+                .ptr
+                .saturating_add(self.freed[idx - 1].size);
+            if prev_end >= allocation.ptr {
+                let allocation_end = allocation.ptr.saturating_add(allocation.size);
+                let merged_end = prev_end.max(allocation_end);
+                let prev = &mut self.freed[idx - 1];
+                prev.size = merged_end.saturating_sub(prev.ptr);
+                idx -= 1;
+            } else {
+                self.freed.insert(idx, allocation);
             }
-            coalesced.push(block);
+        } else {
+            self.freed.insert(idx, allocation);
         }
-        self.freed = coalesced;
+
+        while idx + 1 < self.freed.len() {
+            let current_end = self.freed[idx].ptr.saturating_add(self.freed[idx].size);
+            let next = self.freed[idx + 1];
+            if current_end < next.ptr {
+                break;
+            }
+            let next_end = next.ptr.saturating_add(next.size);
+            self.freed[idx].size = current_end
+                .max(next_end)
+                .saturating_sub(self.freed[idx].ptr);
+            self.freed.remove(idx + 1);
+        }
     }
 
     fn alloc_c_string<M: Memory>(&mut self, memory: &mut M, value: &str) -> Result<u32, HleError> {
@@ -10451,6 +10468,43 @@ mod tests {
 
     fn set_f64_regs(cpu: &mut Cpu, reg: usize, value: f64) {
         set_reg64(cpu, reg, value.to_bits());
+    }
+
+    fn free_block(ptr: u32, size: u32) -> HleAllocation {
+        HleAllocation {
+            ptr,
+            size,
+            freeable: true,
+        }
+    }
+
+    #[test]
+    fn hle_heap_free_blocks_remain_sorted_without_full_resort() {
+        let mut hle = HleRuntime::new(0, 0x1000, 0x1000);
+
+        hle.insert_free_block(free_block(0x1300, 0x40));
+        hle.insert_free_block(free_block(0x1100, 0x40));
+        hle.insert_free_block(free_block(0x1200, 0x40));
+
+        let blocks: Vec<(u32, u32)> = hle
+            .freed
+            .iter()
+            .map(|block| (block.ptr, block.size))
+            .collect();
+        assert_eq!(blocks, vec![(0x1100, 0x40), (0x1200, 0x40), (0x1300, 0x40)]);
+    }
+
+    #[test]
+    fn hle_heap_free_blocks_coalesce_neighbors() {
+        let mut hle = HleRuntime::new(0, 0x1000, 0x1000);
+
+        hle.insert_free_block(free_block(0x1000, 0x20));
+        hle.insert_free_block(free_block(0x1040, 0x20));
+        hle.insert_free_block(free_block(0x1020, 0x20));
+
+        assert_eq!(hle.freed.len(), 1);
+        assert_eq!(hle.freed[0].ptr, 0x1000);
+        assert_eq!(hle.freed[0].size, 0x60);
     }
 
     #[test]
