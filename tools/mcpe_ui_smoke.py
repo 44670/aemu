@@ -237,6 +237,37 @@ def read_jsonl(path):
     return rows
 
 
+def summarize_pc_profile(path):
+    summary = {
+        "jsonl": str(path),
+        "rows": 0,
+        "samples": 0,
+        "guest_instructions": 0,
+        "unique_buckets": 0,
+        "top": [],
+    }
+    if not path.exists():
+        return summary
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            summary["rows"] += 1
+            summary["samples"] = row.get("samples", summary["samples"])
+            summary["guest_instructions"] = row.get(
+                "guest_instructions", summary["guest_instructions"]
+            )
+            summary["unique_buckets"] = row.get("unique_buckets", summary["unique_buckets"])
+            top = row.get("top")
+            if isinstance(top, list):
+                summary["top"] = top[:10]
+    return summary
+
+
 def native_event_matches(row, needle):
     needle = needle.lower()
     event = row.get("event")
@@ -250,12 +281,20 @@ def collect_artifacts(out_dir):
     out_dir = pathlib.Path(out_dir)
     gles_path = out_dir / "gles_events.jsonl"
     native_path = out_dir / "native_events.jsonl"
+    pc_profile_path = out_dir / "pc_profile.jsonl"
     draw_dir = out_dir / "sdl-draw"
+    pc_profile = summarize_pc_profile(pc_profile_path)
     return {
         "gles_events_jsonl": str(gles_path),
         "gles_event_count": count_jsonl(gles_path),
         "native_events_jsonl": str(native_path),
         "native_event_count": count_jsonl(native_path),
+        "pc_profile_jsonl": str(pc_profile_path),
+        "pc_profile_rows": pc_profile["rows"],
+        "pc_profile_samples": pc_profile["samples"],
+        "pc_profile_guest_instructions": pc_profile["guest_instructions"],
+        "pc_profile_unique_buckets": pc_profile["unique_buckets"],
+        "pc_profile_top": pc_profile["top"],
         "sdl_draw_dir": str(draw_dir),
         "sdl_draw_png_count": len(list(draw_dir.glob("*.png"))) if draw_dir.exists() else 0,
         "sdl_draw_manifest_jsonl": str(draw_dir / "draw_manifest.jsonl"),
@@ -276,6 +315,13 @@ def apply_trace_env(args, out_dir, env):
         env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
     if args.guest_thread_swap_slices is not None:
         env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
+    if args.profile_pc:
+        env["AEMU_PROFILE_PC_JSONL"] = str(out_dir / "pc_profile.jsonl")
+        env["AEMU_PROFILE_PC_INTERVAL"] = str(args.profile_pc_interval)
+        env["AEMU_PROFILE_PC_FLUSH_INTERVAL"] = str(args.profile_pc_flush_interval)
+        env["AEMU_PROFILE_PC_TOP"] = str(args.profile_pc_top)
+        if args.profile_pc_limit is not None:
+            env["AEMU_PROFILE_PC_LIMIT"] = str(args.profile_pc_limit)
     if args.trace_hle:
         env["AEMU_TRACE_HLE"] = args.trace_hle
     if args.trace_hle_limit is not None:
@@ -309,6 +355,11 @@ def summarize_env(env):
         "AEMU_TRACE_GLES_EVENTS_LIMIT",
         "AEMU_FAKE_TIME_STEP_NANOS",
         "AEMU_GUEST_THREAD_SWAP_SLICES",
+        "AEMU_PROFILE_PC_JSONL",
+        "AEMU_PROFILE_PC_INTERVAL",
+        "AEMU_PROFILE_PC_FLUSH_INTERVAL",
+        "AEMU_PROFILE_PC_TOP",
+        "AEMU_PROFILE_PC_LIMIT",
         "AEMU_TRACE_HLE",
         "AEMU_TRACE_HLE_LIMIT",
         "AEMU_TRACE_HLE_FILE",
@@ -488,20 +539,29 @@ def validate_summary(args, summary):
                 errors.append(f"expected native event matching {expected!r}")
 
     artifacts = summary["artifacts"]
-    if artifacts["gles_event_count"] < args.min_gles_events:
+    gles_event_count = artifacts.get("gles_event_count", 0)
+    if gles_event_count < args.min_gles_events:
         errors.append(
             f"expected at least {args.min_gles_events} GLES trace events, "
-            f"got {artifacts['gles_event_count']}"
+            f"got {gles_event_count}"
         )
-    if artifacts["native_event_count"] < args.min_native_events:
+    native_event_count = artifacts.get("native_event_count", 0)
+    if native_event_count < args.min_native_events:
         errors.append(
             f"expected at least {args.min_native_events} native trace events, "
-            f"got {artifacts['native_event_count']}"
+            f"got {native_event_count}"
         )
-    if artifacts["sdl_draw_png_count"] < args.min_sdl_draw_pngs:
+    pc_profile_samples = artifacts.get("pc_profile_samples", 0)
+    if pc_profile_samples < args.min_pc_profile_samples:
+        errors.append(
+            f"expected at least {args.min_pc_profile_samples} PC profile samples, "
+            f"got {pc_profile_samples}"
+        )
+    sdl_draw_png_count = artifacts.get("sdl_draw_png_count", 0)
+    if sdl_draw_png_count < args.min_sdl_draw_pngs:
         errors.append(
             f"expected at least {args.min_sdl_draw_pngs} SDL draw PNGs, "
-            f"got {artifacts['sdl_draw_png_count']}"
+            f"got {sdl_draw_png_count}"
         )
 
     run_log = None
@@ -571,8 +631,19 @@ def print_summary(summary):
         "mcpe-ui-smoke: artifacts "
         f"gles_events={artifacts.get('gles_event_count', 0)} "
         f"native_events={artifacts.get('native_event_count', 0)} "
+        f"pc_profile_samples={artifacts.get('pc_profile_samples', 0)} "
         f"sdl_draw_pngs={artifacts.get('sdl_draw_png_count', 0)}"
     )
+    if artifacts.get("pc_profile_top"):
+        top = artifacts["pc_profile_top"][0]
+        where = top.get("symbol") or top.get("library") or top.get("pc_hex")
+        print(
+            "mcpe-ui-smoke: pc_profile "
+            f"rows={artifacts.get('pc_profile_rows', 0)} "
+            f"unique={artifacts.get('pc_profile_unique_buckets', 0)} "
+            f"top={where}+{top.get('symbol_offset_hex', '0x0')} "
+            f"count={top.get('count')} thread={top.get('thread_id')}"
+        )
     if errors:
         for error in errors:
             print(f"mcpe-ui-smoke: ERROR: {error}", file=sys.stderr)
@@ -605,6 +676,34 @@ def build_arg_parser():
         "--guest-thread-swap-slices",
         type=int,
         help="set AEMU_GUEST_THREAD_SWAP_SLICES for frame-boundary guest worker scheduling",
+    )
+    parser.add_argument(
+        "--profile-pc",
+        action="store_true",
+        help="write low-overhead guest PC/function hot spot samples to pc_profile.jsonl",
+    )
+    parser.add_argument(
+        "--profile-pc-interval",
+        type=int,
+        default=4096,
+        help="sample one guest PC every N interpreted guest instructions",
+    )
+    parser.add_argument(
+        "--profile-pc-limit",
+        type=int,
+        help="stop collecting PC samples after this many samples",
+    )
+    parser.add_argument(
+        "--profile-pc-flush-interval",
+        type=int,
+        default=512,
+        help="append a PC profile snapshot every N new samples",
+    )
+    parser.add_argument(
+        "--profile-pc-top",
+        type=int,
+        default=80,
+        help="include this many hottest buckets in each PC profile snapshot",
     )
     parser.add_argument("--frames", type=int, default=240)
     parser.add_argument("--timeout", type=float, default=180.0)
@@ -643,6 +742,7 @@ def build_arg_parser():
     parser.add_argument("--min-screenshot-bytes", type=int, default=100)
     parser.add_argument("--min-gles-events", type=int, default=0)
     parser.add_argument("--min-native-events", type=int, default=0)
+    parser.add_argument("--min-pc-profile-samples", type=int, default=0)
     parser.add_argument("--min-sdl-draw-pngs", type=int, default=0)
     parser.add_argument(
         "--expect-run-log-contains",
@@ -828,6 +928,13 @@ def main(argv=None):
             "screenshots": screenshots,
         },
         "artifacts": collect_artifacts(out_dir),
+        "pc_profile": {
+            "enabled": args.profile_pc,
+            "interval": args.profile_pc_interval if args.profile_pc else None,
+            "limit": args.profile_pc_limit if args.profile_pc else None,
+            "flush_interval": args.profile_pc_flush_interval if args.profile_pc else None,
+            "top": args.profile_pc_top if args.profile_pc else None,
+        },
     }
     errors = []
     if startup_error is not None:
