@@ -107,7 +107,7 @@ def wait_for_ws_url(process, lines, timeout):
     raise RuntimeError(f"timed out waiting {timeout:.1f}s for SDL2 WebSocket URL")
 
 
-def wait_for_debug_milestone(client, args, timeout, journal):
+def wait_for_debug_milestone(client, args, timeout, journal, out_dir):
     targets = {
         "frames": max(0, args.wait_frames),
         "draw_elements": max(0, args.wait_draw_elements),
@@ -123,18 +123,18 @@ def wait_for_debug_milestone(client, args, timeout, journal):
         except Exception as err:
             response = {"ok": False, "error": str(err)}
         last = response
-        journal.write(
-            json.dumps(
-                {
-                    "kind": "wait_debug",
-                    "targets": targets,
-                    "response": response,
-                },
-                sort_keys=True,
-            )
-            + "\n"
-        )
-        if response.get("ok") and debug_meets_targets(response, targets):
+        milestone_met = response.get("ok") and debug_meets_targets(response, targets)
+        row = {
+            "kind": "wait_debug",
+            "targets": targets,
+            "response": response,
+        }
+        if milestone_met:
+            checkpoint = pc_profile_checkpoint(args, out_dir)
+            if checkpoint is not None:
+                row["pc_profile"] = checkpoint
+        journal.write(json.dumps(row, sort_keys=True) + "\n")
+        if milestone_met:
             return response
         time.sleep(args.wait_debug_interval)
     raise RuntimeError(
@@ -266,6 +266,37 @@ def summarize_pc_profile(path):
             if isinstance(top, list):
                 summary["top"] = top[:10]
     return summary
+
+
+def latest_pc_profile_checkpoint(path):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return None
+    latest = None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            latest = row
+    if latest is None:
+        return None
+    top = latest.get("top")
+    return {
+        "samples": latest.get("samples", 0),
+        "guest_instructions": latest.get("guest_instructions", 0),
+        "unique_buckets": latest.get("unique_buckets", 0),
+        "top": top[:5] if isinstance(top, list) else [],
+    }
+
+
+def pc_profile_checkpoint(args, out_dir):
+    if not args.profile_pc:
+        return None
+    return latest_pc_profile_checkpoint(pathlib.Path(out_dir) / "pc_profile.jsonl")
 
 
 def native_event_matches(row, needle):
@@ -407,6 +438,9 @@ def run_journal(client, steps, args, journal_path):
                 if screenshot is not None:
                     screenshots.append(screenshot)
                     entry["screenshot"] = screenshot
+            checkpoint = pc_profile_checkpoint(args, journal_path.parent)
+            if checkpoint is not None:
+                entry["pc_profile"] = checkpoint
             journal.write(json.dumps(entry, sort_keys=True) + "\n")
             entries.append(entry)
             if not ok:
@@ -886,7 +920,7 @@ def main(argv=None):
         client = ws_cli.WsClient(ws_url, timeout=args.ws_request_timeout)
         try:
             with journal_path.open("w", encoding="utf-8") as journal:
-                wait_debug = wait_for_debug_milestone(client, args, args.timeout, journal)
+                wait_debug = wait_for_debug_milestone(client, args, args.timeout, journal, out_dir)
             entries, screenshots = run_journal(client, steps, args, journal_path)
         finally:
             client.close()
