@@ -192,6 +192,20 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   visible readback gate, stop screenshot gate, zero-GL-error gate, and, for
   the resource variant, the `resource-done` native trace preset. They are
   command-line harness presets only; they do not change runtime semantics.
+- `tmp/mcpe-first-visible-draw-profile-20260517` runs the validated
+  `--first-visible-draw` milestone with low-overhead PC profiling at interval
+  65,536. It exits 0 after 503.785s, reaches the same frame-61 visible draw,
+  and records 8,281 PC samples over 542,751,356 guest instructions. The
+  function-level profile is dominated by thread 7
+  `Localization::_appendTranslations` (1,009 top-row samples), followed by
+  main-thread `bn_mul_mont` (340), `UIDefRepository::_resolveReferences`
+  (182), `operator new(unsigned int)` (88), thread 8
+  `stbi_zlib_decode_malloc_guesssize` (53), and `Json::Reader::readToken`
+  (45). This supports checking guest worker/resource text and string
+  allocation behavior before changing scheduler policy.
+- `tools/trace_query.py <trace-dir> pc-profile --symbols` now aggregates the
+  latest PC profile snapshot by `(library, symbol)` so hot functions can be
+  compared directly instead of reading individual PC rows.
 
 Local files rechecked on 2026-05-13:
 
@@ -403,6 +417,14 @@ zero host GL errors.
   721 `DrawElements`, 3,501 native resource events, all 859 preload
   callbacks, final resource callback, `onResourcesLoaded.store-23e`, and a
   visible stop screenshot.
+- `tools/mcpe_smoke.py --trace-dir tmp/mcpe-first-visible-draw-profile-20260517
+  --first-visible-draw --profile-pc --profile-pc-interval 65536
+  --profile-pc-flush-interval 256 --profile-pc-top 80` exits 0, records 61
+  swaps, 721 `DrawElements`, a visible stop screenshot, and 8,281 PC samples.
+- `tools/trace_query.py tmp/mcpe-first-visible-draw-profile-20260517 pc-profile
+  --symbols --limit 12` reports `Localization::_appendTranslations` as the
+  top aggregated symbol, then `bn_mul_mont` and
+  `UIDefRepository::_resolveReferences`.
 - `tools/mcpe_ui_smoke.py --out-dir tmp --trace-hle AInput,AMotion
   --trace-hle-limit 80 --min-gles-events 1 --expect-hle-call
   AInputQueue_getEvent --expect-hle-call AMotionEvent_getX --expect-hle-call

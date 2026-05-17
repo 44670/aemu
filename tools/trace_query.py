@@ -451,6 +451,37 @@ def format_pc_profile_entry(row: dict) -> str:
     )
 
 
+def pc_profile_symbol_name(row: dict) -> str:
+    symbol = row.get("symbol")
+    if isinstance(symbol, str) and symbol:
+        return symbol
+    pc = row.get("pc_hex")
+    return pc if isinstance(pc, str) and pc else "<unknown>"
+
+
+def print_pc_profile_symbols(rows: list[dict], limit: int) -> None:
+    symbols = Counter()
+    symbol_rows = Counter()
+    symbol_threads = {}
+    for row in rows:
+        count = row.get("count") if isinstance(row.get("count"), int) else 0
+        key = (row.get("library", "<unknown>"), pc_profile_symbol_name(row))
+        symbols[key] += count
+        symbol_rows[key] += 1
+        thread = row.get("thread_id")
+        symbol_threads.setdefault(key, Counter())[thread] += count
+    print("pc-profile-symbols:")
+    for (library, symbol), count in symbols.most_common(limit):
+        threads = ", ".join(
+            f"{thread}:{thread_count}"
+            for thread, thread_count in symbol_threads[(library, symbol)].most_common(4)
+        )
+        print(
+            f"  count={count} rows={symbol_rows[(library, symbol)]} "
+            f"library={library} symbol={symbol} threads={threads or 'none'}"
+        )
+
+
 def print_pc_profile(args) -> int:
     rows, path, invalid_trailing_rows = load_pc_profile(args)
     if not rows:
@@ -496,6 +527,8 @@ def print_pc_profile(args) -> int:
         "pc-profile-ops: "
         + (", ".join(f"{op}:{count}" for op, count in ops.most_common(12)) or "none")
     )
+    if args.symbols:
+        print_pc_profile_symbols(filtered, args.limit)
     for row in filtered[: args.limit]:
         print(format_pc_profile_entry(row))
     return 0
@@ -3364,6 +3397,7 @@ def build_parser() -> argparse.ArgumentParser:
     pc_profile.add_argument("--contains")
     pc_profile.add_argument("--library")
     pc_profile.add_argument("--thread", type=parse_u32)
+    pc_profile.add_argument("--symbols", action="store_true")
     pc_profile.add_argument("--limit", type=int, default=40)
 
     thread_summary = subparsers.add_parser(
