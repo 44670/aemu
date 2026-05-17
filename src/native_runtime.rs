@@ -31,6 +31,15 @@ const GUEST_THREAD_SWAP_SERVICE_SLICES: usize = 64;
 const MAIN_THREAD_WAIT_SPINS: usize = 1024;
 const GUEST_THREAD_STALL_SUMMARY_LIMIT: usize = 16;
 const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
+const MCPE_RUNNABLE_PTHREAD_STARTS: &[&str] = &[
+    // Evidence: MCPE Play stalls waiting on the native threadpool condvar when
+    // these guest pthreads are skipped.
+    "_ZN9crossplat10threadpool12thread_startEPv",
+    // Evidence: after the threadpool workers run, Play still stalls with only
+    // these RakNet pthreads skipped.
+    "_ZN6RakNet12RNS2_Berkley12RecvFromLoopEPv",
+    "_ZN6RakNet17UpdateNetworkLoopEPv",
+];
 const GUEST_THREAD_SERVICE_HLE: &[&str] = &[
     "pthread_create",
     "pthread_cond_signal",
@@ -1956,8 +1965,19 @@ impl NativeRuntime {
         if std::env::var_os("AEMU_RUN_ALL_PTHREADS").is_some() {
             return true;
         }
-        self.library_name_for_address(created.start & !1)
-            .map_or(true, |library| library == "libgnustl_shared.so")
+        let address = created.start & !1;
+        let Some(library) = self.library_name_for_address(address) else {
+            return true;
+        };
+        if library == "libgnustl_shared.so" {
+            return true;
+        }
+        if library == "libminecraftpe.so" {
+            return self
+                .exact_symbol_name_for_address(address)
+                .is_some_and(|(_library, symbol)| MCPE_RUNNABLE_PTHREAD_STARTS.contains(&symbol));
+        }
+        false
     }
 
     fn library_name_for_address(&self, address: u32) -> Option<&str> {
@@ -1965,6 +1985,20 @@ impl NativeRuntime {
             let end = object.memory_base.checked_add(object.memory_size)?;
             (address >= object.memory_base && address < end).then_some(object.library_name.as_str())
         })
+    }
+
+    fn exact_symbol_name_for_address(&self, address: u32) -> Option<(&str, &str)> {
+        let object = self.link.objects.iter().find(|object| {
+            object
+                .memory_base
+                .checked_add(object.memory_size)
+                .is_some_and(|end| address >= object.memory_base && address < end)
+        })?;
+        let symbol = object
+            .defined_symbols
+            .iter()
+            .find(|symbol| (symbol.address & !1) == address)?;
+        Some((object.library_name.as_str(), symbol.name.as_str()))
     }
 
     fn create_guest_thread(
@@ -5008,6 +5042,108 @@ mod tests {
         assert!(summary.contains("libminecraftpe.so+0x00b01012 Worker::run+0x12"));
         assert!(summary.contains("skipped id=13"));
         assert!(summary.contains("libminecraftpe.so+0x010cde84 ThreadStart+0x0"));
+    }
+
+    #[test]
+    fn schedules_evidence_based_mcpe_pthreads_by_default() {
+        let mcpe_object = LoadedNativeObject {
+            entry_name: "lib/armeabi-v7a/libminecraftpe.so".to_string(),
+            library_name: "libminecraftpe.so".to_string(),
+            load_bias: 0x7050_0000,
+            memory_base: 0x7150_0000,
+            memory_size: 0x0020_0000,
+            entry: 0x7150_0000,
+            needed: Vec::new(),
+            imports: Vec::new(),
+            defined_symbols: vec![
+                NativeSymbol {
+                    name: "_ZN9crossplat10threadpool12thread_startEPv".to_string(),
+                    address: 0x715c_de84,
+                    library_name: "libminecraftpe.so".to_string(),
+                },
+                NativeSymbol {
+                    name: "_ZN6RakNet17UpdateNetworkLoopEPv".to_string(),
+                    address: 0x7169_7a38,
+                    library_name: "libminecraftpe.so".to_string(),
+                },
+                NativeSymbol {
+                    name: "_ZN6RakNet12RNS2_Berkley12RecvFromLoopEPv".to_string(),
+                    address: 0x716b_a94c,
+                    library_name: "libminecraftpe.so".to_string(),
+                },
+            ],
+            relocations: Vec::new(),
+            relocation_count: 0,
+            init: None,
+            init_array: None,
+            arm_exidx: None,
+        };
+        let gnustl_object = LoadedNativeObject {
+            entry_name: "lib/armeabi-v7a/libgnustl_shared.so".to_string(),
+            library_name: "libgnustl_shared.so".to_string(),
+            load_bias: 0x7030_0000,
+            memory_base: 0x7030_0000,
+            memory_size: 0x0010_0000,
+            entry: 0x7030_0000,
+            needed: Vec::new(),
+            imports: Vec::new(),
+            defined_symbols: vec![NativeSymbol {
+                name: "_ZNSt6thread15_M_start_threadE...".to_string(),
+                address: 0x7039_11f8,
+                library_name: "libgnustl_shared.so".to_string(),
+            }],
+            relocations: Vec::new(),
+            relocation_count: 0,
+            init: None,
+            init_array: None,
+            arm_exidx: None,
+        };
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: vec![mcpe_object, gnustl_object],
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let runtime = NativeRuntime::new(report, config).unwrap();
+
+        assert!(runtime.should_run_created_pthread(CreatedPthread {
+            id: 39,
+            start: 0x715c_de85,
+            arg: 0x71bf_a0c8,
+        }));
+        assert!(runtime.should_run_created_pthread(CreatedPthread {
+            id: 7,
+            start: 0x7039_11f9,
+            arg: 0x6004_8b40,
+        }));
+        assert!(runtime.should_run_created_pthread(CreatedPthread {
+            id: 61,
+            start: 0x7169_7a39,
+            arg: 0x6462_0840,
+        }));
+        assert!(runtime.should_run_created_pthread(CreatedPthread {
+            id: 60,
+            start: 0x716b_a94d,
+            arg: 0x6462_0f40,
+        }));
+        assert!(!runtime.should_run_created_pthread(CreatedPthread {
+            id: 62,
+            start: 0x7150_1001,
+            arg: 0x6462_0840,
+        }));
     }
 
     #[test]
