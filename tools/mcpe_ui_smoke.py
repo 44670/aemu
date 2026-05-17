@@ -97,8 +97,13 @@ def wait_for_ws_url(process, lines, timeout):
     raise RuntimeError(f"timed out waiting {timeout:.1f}s for SDL2 WebSocket URL")
 
 
-def wait_for_debug_frames(client, min_frames, timeout, journal):
-    if min_frames <= 0:
+def wait_for_debug_milestone(client, args, timeout, journal):
+    targets = {
+        "frames": max(0, args.wait_frames),
+        "draw_elements": max(0, args.wait_draw_elements),
+        "readback_nonzero_rgb_pixels": max(0, args.wait_readback_rgb),
+    }
+    if all(value <= 0 for value in targets.values()):
         return None
     deadline = time.monotonic() + timeout
     last = None
@@ -112,19 +117,27 @@ def wait_for_debug_frames(client, min_frames, timeout, journal):
             json.dumps(
                 {
                     "kind": "wait_debug",
-                    "target_frames": min_frames,
+                    "targets": targets,
                     "response": response,
                 },
                 sort_keys=True,
             )
             + "\n"
         )
-        if response.get("ok") and int(response.get("frames") or 0) >= min_frames:
+        if response.get("ok") and debug_meets_targets(response, targets):
             return response
-        time.sleep(0.25)
+        time.sleep(args.wait_debug_interval)
     raise RuntimeError(
-        f"timed out waiting for debug frames >= {min_frames}; last={json.dumps(last)}"
+        "timed out waiting for debug milestone "
+        f"{json.dumps(targets, sort_keys=True)}; last={json.dumps(last, sort_keys=True)}"
     )
+
+
+def debug_meets_targets(response, targets):
+    for key, target in targets.items():
+        if target > 0 and int(response.get(key) or 0) < target:
+            return False
+    return True
 
 
 def action_json(step):
@@ -380,6 +393,15 @@ def collect_debug(entries):
     return values
 
 
+def collect_validation_debug(summary):
+    values = []
+    wait_debug = summary["journal"].get("wait_debug")
+    if isinstance(wait_debug, dict):
+        values.append(wait_debug)
+    values.extend(collect_debug(summary["journal"]["entries"]))
+    return values
+
+
 def validate_summary(args, summary):
     errors = []
     failed_steps = [entry for entry in summary["journal"]["entries"] if not entry.get("ok")]
@@ -396,6 +418,25 @@ def validate_summary(args, summary):
                 "expected first and last screenshots to differ, "
                 f"but both have sha256={screenshots[0]['sha256']}"
             )
+    for spec in args.expect_screenshot_pair_change or []:
+        try:
+            first_index, second_index = parse_screenshot_pair(spec)
+        except ValueError as err:
+            errors.append(str(err))
+            continue
+        if first_index > len(screenshots) or second_index > len(screenshots):
+            errors.append(
+                f"expected screenshot pair {spec} to exist, "
+                f"but only {len(screenshots)} screenshots were captured"
+            )
+            continue
+        first = screenshots[first_index - 1]
+        second = screenshots[second_index - 1]
+        if first["sha256"] == second["sha256"]:
+            errors.append(
+                f"expected screenshots {first_index}:{second_index} to differ, "
+                f"but both have sha256={first['sha256']}"
+            )
 
     for shot in screenshots:
         if shot["bytes"] < args.min_screenshot_bytes:
@@ -404,7 +445,7 @@ def validate_summary(args, summary):
                 f"expected at least {args.min_screenshot_bytes}"
             )
 
-    debug_values = collect_debug(summary["journal"]["entries"])
+    debug_values = collect_validation_debug(summary)
     if debug_values:
         last_debug = debug_values[-1]
         gl_errors = int(last_debug.get("gl_error_count") or 0)
@@ -467,6 +508,20 @@ def validate_summary(args, summary):
     return errors
 
 
+def parse_screenshot_pair(spec):
+    parts = spec.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(f"expected screenshot pair A:B, got {spec!r}")
+    try:
+        first = int(parts[0])
+        second = int(parts[1])
+    except ValueError as err:
+        raise ValueError(f"expected numeric screenshot pair A:B, got {spec!r}") from err
+    if first <= 0 or second <= 0:
+        raise ValueError(f"screenshot pair indices are 1-based, got {spec!r}")
+    return first, second
+
+
 def print_summary(summary):
     errors = summary["expectation_errors"]
     print(f"mcpe-ui-smoke: trace_dir={summary['trace_dir']}")
@@ -478,6 +533,14 @@ def print_summary(summary):
         f"returncode={summary['process']['returncode']} "
         f"terminated_by_harness={summary['process']['terminated_by_harness']}"
     )
+    wait_debug = summary["journal"].get("wait_debug")
+    if wait_debug:
+        print(
+            "mcpe-ui-smoke: wait_debug "
+            f"frames={wait_debug.get('frames')} "
+            f"draw_elements={wait_debug.get('draw_elements')} "
+            f"rgb={wait_debug.get('readback_nonzero_rgb_pixels')}"
+        )
     for shot in summary["journal"]["screenshots"]:
         print(
             "mcpe-ui-smoke: screenshot "
@@ -522,7 +585,21 @@ def build_arg_parser():
     parser.add_argument("--frames", type=int, default=240)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--wait-ws-timeout", type=float, default=90.0)
+    parser.add_argument(
+        "--ws-request-timeout",
+        type=float,
+        default=15.0,
+        help="WebSocket socket timeout for individual debug/screenshot/input requests",
+    )
     parser.add_argument("--wait-frames", type=int, default=1)
+    parser.add_argument("--wait-draw-elements", type=int, default=0)
+    parser.add_argument("--wait-readback-rgb", type=int, default=0)
+    parser.add_argument("--wait-debug-interval", type=float, default=0.25)
+    parser.add_argument(
+        "--first-visible-draw",
+        action="store_true",
+        help="wait for the validated first visible DrawElements/readback milestone before running the UI journal",
+    )
     parser.add_argument("--script", help="semicolon/newline separated ws_cli journal actions")
     parser.add_argument("--script-file", help="read journal actions from a file")
     parser.add_argument("--pointer-id", type=int, default=0)
@@ -580,12 +657,35 @@ def build_arg_parser():
         action="store_true",
         help="fail unless the first and last captured screenshots have different hashes",
     )
+    parser.add_argument(
+        "--expect-screenshot-pair-change",
+        action="append",
+        help="fail unless the 1-based screenshot pair A:B has different hashes",
+    )
     parser.add_argument("--echo-log", action="store_true")
     return parser
 
 
+def apply_milestone_defaults(args):
+    if not args.first_visible_draw:
+        return
+    args.frames = max(args.frames, 260)
+    args.timeout = max(args.timeout, 640.0)
+    args.ws_request_timeout = max(args.ws_request_timeout, 90.0)
+    if args.fake_time_step_nanos is None:
+        args.fake_time_step_nanos = 100_000
+    if args.guest_thread_swap_slices is None:
+        args.guest_thread_swap_slices = 256
+    args.wait_draw_elements = max(args.wait_draw_elements, 1)
+    args.wait_readback_rgb = max(args.wait_readback_rgb, 1)
+    args.min_draw_elements = max(args.min_draw_elements, 1)
+    args.min_readback_rgb = max(args.min_readback_rgb, 1)
+    args.min_screenshot_bytes = max(args.min_screenshot_bytes, 1000)
+
+
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
+    apply_milestone_defaults(args)
     if not args.apk.exists():
         raise SystemExit(f"APK not found: {args.apk}")
     if not args.binary.exists():
@@ -622,15 +722,16 @@ def main(argv=None):
     terminated_by_harness = False
     entries = []
     screenshots = []
+    wait_debug = None
     ws_url = None
     startup_lines = []
     startup_error = None
     try:
         ws_url, startup_lines = wait_for_ws_url(process, lines, args.wait_ws_timeout)
-        client = ws_cli.WsClient(ws_url)
+        client = ws_cli.WsClient(ws_url, timeout=args.ws_request_timeout)
         try:
             with journal_path.open("w", encoding="utf-8") as journal:
-                wait_for_debug_frames(client, args.wait_frames, args.timeout, journal)
+                wait_debug = wait_for_debug_milestone(client, args, args.timeout, journal)
             entries, screenshots = run_journal(client, steps, args, journal_path)
         finally:
             client.close()
@@ -667,6 +768,7 @@ def main(argv=None):
         },
         "journal": {
             "path": str(journal_path),
+            "wait_debug": wait_debug,
             "entries": entries,
             "screenshots": screenshots,
         },

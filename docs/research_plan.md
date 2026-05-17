@@ -143,8 +143,11 @@ useful, but it does not replace the browser WebGL backend.
    still reports zero host GL errors. `tools/mcpe_ui_smoke.py` now wraps SDL2
    live mode and the WebSocket harness into a one-command UI journal for
    multi-step tap/screenshot/debug checks, with default screenshots under
-   `tmp/`. Full playability still needs efficient draw-stream progression,
-   visible response to input, and audio HLE.
+   `tmp/`. It can gate the journal on visible `DrawElements`/readback progress
+   and has a verified start-screen script that taps `Not Now` after the first
+   visible draw and reaches the main menu. Full playability still needs much
+   faster cooperative guest-thread/resource scheduling, deeper menu/world
+   interaction checks, and audio HLE.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
 7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach

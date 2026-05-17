@@ -98,6 +98,7 @@ fn handle_client(mut stream: TcpStream, request_tx: Sender<WsRequest>) -> io::Re
         let response = match serde_json::from_str::<Value>(&message) {
             Ok(value) => match parse_command(&value) {
                 Ok(command) => {
+                    let timeout = response_timeout(&value);
                     let (response_tx, response_rx) = mpsc::channel();
                     if request_tx
                         .send(WsRequest {
@@ -108,7 +109,7 @@ fn handle_client(mut stream: TcpStream, request_tx: Sender<WsRequest>) -> io::Re
                     {
                         json!({"ok": false, "error": "SDL2 harness is not running"})
                     } else {
-                        response_rx.recv_timeout(Duration::from_secs(10)).unwrap_or_else(
+                        response_rx.recv_timeout(timeout).unwrap_or_else(
                             |_| json!({"ok": false, "error": "SDL2 harness response timed out"}),
                         )
                     }
@@ -119,6 +120,17 @@ fn handle_client(mut stream: TcpStream, request_tx: Sender<WsRequest>) -> io::Re
         };
         write_text_frame(&mut stream, &response.to_string())?;
     }
+}
+
+fn response_timeout(value: &Value) -> Duration {
+    let seconds = value
+        .get("timeout_seconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(10.0);
+    if !seconds.is_finite() {
+        return Duration::from_secs(10);
+    }
+    Duration::from_secs_f64(seconds.clamp(0.1, 600.0))
 }
 
 fn parse_command(value: &Value) -> Result<WsCommand, String> {

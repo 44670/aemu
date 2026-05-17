@@ -33,7 +33,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Bounded first-frame probe | `tools/mcpe_smoke.py --trace-dir tmp/mcpe-smoke-uidiv-hle-20260517 --frames 1 --timeout 120` reaches `eglSwapBuffers` at step `311218123` and exits 0 at the frame limit after moving `__aeabi_uidiv/__aeabi_uidivmod` to Rust HLE traps. | Satisfied for local ARMv7 research APK |
 | Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, framebuffer/renderbuffer, stencil, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` and `src/wasm_webgl.rs` replay the captured stream for SDL2/WebGL. Earlier SDL2 evidence submitted 744 indexed draws with nonzero RGB readback, but the current `tools/mcpe_smoke.py` live baseline records zero indexed draws and black RGB readback. | Current no-draw regression/blocker |
 | SDL2 live frames | `NativeRuntime::continue_until_hle` can resume guest execution after a stopped HLE call. With `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1`, current `run-apk-native --sdl2-live --steps 600000000` reaches first swap at step `311218123`, advances to frame limit, and reports zero host GL errors. Current 5-frame and 43-swap probes record no draw stream and black RGB readback; older heavy scheduling diagnostics reached real `DrawElements` later in the live loop but were too slow for a reliable smoke. | Live loop works; rendering progression remains blocked |
-| SDL2 WebSocket harness and input | `src/ws_harness.rs` and `tools/ws_cli.py` provide `debug`, `screenshot`, `pointer`, and `tap`. `tools/mcpe_ui_smoke.py` now launches `run-apk-native --sdl2-live --ws`, waits for the WebSocket/debug frame milestone, runs a multi-step UI journal, captures PNG screenshots under `tmp/` by default, records `journal.jsonl`, and writes `summary.json` in one command. A traced UI smoke reaches `AInputQueue_getEvent` and `AMotionEvent_getX/Y` for tap down/up at guest coordinates `427,240`. `tmp/before.png` and `tmp/after.png` are byte-identical, so input delivery is no longer the only blocker. | Harness/input bridge satisfied; not playable |
+| SDL2 WebSocket harness and input | `src/ws_harness.rs` and `tools/ws_cli.py` provide `debug`, `screenshot`, `pointer`, and `tap`. `tools/mcpe_ui_smoke.py` now launches `run-apk-native --sdl2-live --ws`, can wait for frame/draw/readback milestones before running a UI journal, captures PNG screenshots under `tmp/` by default, records `journal.jsonl`, and writes `summary.json` in one command. The current visible-start-screen gate waits for frame 61, 721 `DrawElements`, and nonzero RGB readback before tapping `Not Now`; traced input reaches `AInputQueue_getEvent` and `AMotionEvent_getX/Y`, and the screenshot transitions from the Xbox Live dialog to the main menu. | Start-screen input bridge satisfied; not playable |
 | Browser-fed APK bytes | `load_apk_native_libraries_bytes` links APK native libraries from bytes, and `HleRuntime::set_apk_bytes` lets Android asset HLE serve `AAssetManager_open` from the same byte source. | Initial browser data path |
 | Browser MCPE entrypoint | `src/wasm_api.rs` exports `runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)` for wasm builds. It runs the byte-backed APK path through constructors, `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, and `android_main` until `eglSwapBuffers`, then replays captured GLES events into a WebGL 1 canvas and returns draw/readback/error stats. `web/mcpe_first_frame.html` wires that export to a file input and canvas. | Initial browser harness path |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
@@ -468,6 +468,18 @@ zero host GL errors.
   the tap enters Android input HLE. `tmp/before.png` and `tmp/after.png` are
   identical 854x480 PNGs with SHA256
   `c2376a3f584ac29966d02410bac23da4f888ea00096b42898bb8bcb3b02850b9`.
+- `tools/mcpe_ui_smoke.py --out-dir tmp/mcpe-ui-not-now-timeout-20260517
+  --first-visible-draw --trace-hle AInput,AMotion --trace-hle-limit 80
+  --expect-hle-call AInputQueue_getEvent --expect-hle-call AMotionEvent_getX
+  --expect-hle-call AMotionEvent_getY --expect-screenshot-change --script
+  'debug; screenshot {trace_dir}/before.png; tap 280,386; wait 1.0;
+  screenshot {trace_dir}/after.png; debug'` exits 0 after 560.045s. The
+  wait gate reaches frame 61 with 721 `DrawElements` and readback RGB 35348,
+  then the tap reaches Android input HLE as down/up events at guest
+  coordinates `280,386`. The before screenshot shows the Xbox Live sign-in
+  dialog; the after screenshot shows the main menu with `Play`, `Achievements`,
+  `Options`, and `Store`. This proves start-screen button interaction after a
+  visible draw gate, not full playability.
 - `cargo run --release -- link-apk /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --all`
   reports 578 reserved HLE symbols, 906 resolved imports, and zero unresolved imports
 
@@ -483,27 +495,30 @@ run directory. The command above keeps the two comparison screenshots directly
 at `tmp/before.png` and `tmp/after.png`. The default journal waits for the first
 debug frame, captures `before.png`, sends a center tap, waits briefly, captures
 `after.png`, and records final debug stats. Use `--script` or `--script-file`
-for longer menu/navigation flows. Use `--expect-screenshot-change` only for
-future playable gates; the current known state still produces identical
-before/after loading-frame screenshots after a tap. Use `--min-readback-rgb`
-and `--min-draw-elements` when a scenario is expected to prove nonblack
-rendering or indexed draw replay. Use `--trace-hle`, `--native-event`,
+for longer menu/navigation flows.
+
+For UI actions that must not run during the blank/loading frame, use
+`--first-visible-draw` or explicit `--wait-draw-elements` and
+`--wait-readback-rgb` gates. The first-visible preset also raises the
+WebSocket request timeout because MCPE can spend more than 10 seconds inside a
+single guest execution segment near resource completion; `ws_cli.py` now sends
+that timeout as `timeout_seconds`, and `src/ws_harness.rs` honors it per
+request. Use `--expect-screenshot-change` only when the script should cause a
+real visible state transition. Use `--trace-hle`, `--native-event`,
 `--expect-native-event`, and `--dump-sdl-draws` to collect HLE/native/GLES/SDL
 draw artifacts in the same scenario summary. Use `--expect-hle-call`,
 `--expect-run-log-contains`, `--min-gles-events`, `--min-native-events`, and
 `--min-sdl-draw-pngs` to turn those artifacts into explicit regression gates.
 
-Latest result after rebuilding `target/release/aemu` with `--features sdl2`:
-the command above reaches `eglSwapBuffers` at step `365653113`, opens the
-WebSocket harness, runs six journal steps, writes `tmp/before.png` and
-`tmp/after.png` as `854x480` PNG files, and exits cleanly with zero GL errors.
-Both screenshots currently have SHA256
-`c2376a3f584ac29966d02410bac23da4f888ea00096b42898bb8bcb3b02850b9`, so the
-tap still produces no visible framebuffer change. A traced rerun with
-`--trace-hle AInput,AMotion` records 988 GLES JSONL rows and HLE input calls
-for both tap down/up in `tmp/run.log`;
-`tmp/summary.json` reports zero native events and zero SDL draw PNGs for this
-particular no-draw framebuffer state.
+Latest visible-UI result after rebuilding `target/release/aemu` with
+`--features sdl2`: `tmp/mcpe-ui-not-now-timeout-20260517` reaches
+`eglSwapBuffers` at step `311151082`, waits through 60 black/readback-zero
+frames, reaches the first visible gate at frame 61, captures a before PNG of
+the Xbox Live dialog, taps `Not Now`, captures an after PNG of the main menu,
+and exits with zero expectation errors. The final debug step reports
+`frames=67`, `draw_elements=878`, `readback_nonzero_rgb_pixels=409920`, and
+zero GL errors. This is a start-screen interaction milestone; it does not yet
+prove menu navigation into gameplay/world interaction.
 
 The input bridge is now machine-gated with:
 

@@ -16,7 +16,7 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class WsClient:
-    def __init__(self, url):
+    def __init__(self, url, timeout=15.0):
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme != "ws":
             raise ValueError("only ws:// URLs are supported")
@@ -25,7 +25,9 @@ class WsClient:
         self.path = parsed.path or "/"
         if parsed.query:
             self.path += "?" + parsed.query
-        self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        self.response_timeout = max(0.1, timeout - 1.0)
+        self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        self.sock.settimeout(timeout)
         self._handshake()
 
     def close(self):
@@ -35,6 +37,9 @@ class WsClient:
             pass
 
     def request(self, payload):
+        if isinstance(payload, dict) and "timeout_seconds" not in payload:
+            payload = dict(payload)
+            payload["timeout_seconds"] = self.response_timeout
         self._write_text(json.dumps(payload, separators=(",", ":")))
         return json.loads(self._read_text())
 
@@ -182,6 +187,15 @@ def save_screenshot(client, out):
     response = client.request({"cmd": "screenshot"})
     if not response.get("ok"):
         return response, 0
+    if "data_base64" not in response:
+        return (
+            {
+                "ok": False,
+                "error": "screenshot response missing data_base64",
+                "response": response,
+            },
+            0,
+        )
     data = base64.b64decode(response["data_base64"])
     with open(out, "wb") as file:
         file.write(data)
@@ -322,6 +336,7 @@ def cmd_journal(client, args):
 def build_parser():
     parser = argparse.ArgumentParser(description="aemu SDL2 WebSocket harness client")
     parser.add_argument("--url", default="ws://127.0.0.1:8766", help="WebSocket URL")
+    parser.add_argument("--timeout", type=float, default=15.0, help="socket timeout in seconds")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     debug = sub.add_parser("debug", help="print emulator/debug state")
@@ -364,7 +379,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    client = WsClient(args.url)
+    client = WsClient(args.url, timeout=args.timeout)
     try:
         return args.func(client, args) or 0
     finally:
