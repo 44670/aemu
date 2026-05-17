@@ -216,6 +216,12 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   `tmp/mcpe-localization-trace-20260517` confirms the profile PCs but fills an
   800-event limit quickly, so the entry-only preset is the better default for
   low-noise resource-text diagnosis.
+- The QEMU-user oracle suite now includes
+  `thumb2_localization_it_highreg_loop`, a focused Thumb-2 regression extracted
+  from the localization profile shape. It validates high-register `cmp.w`,
+  `ITT NE`, predicated `ldr.w`/`add.w`, and a backward branch against
+  qemu-user before those instructions are treated as safe under MCPE's
+  resource-text hot path.
 - `HleRuntime` now caches parsed APK ZIP entries when APK bytes are already
   resident, so repeated `AAssetManager_open` and texture/image asset reads do
   not reparse the central directory. The control run
@@ -452,6 +458,8 @@ zero host GL errors.
   --first-visible-draw` exits 0 after 501.090s with 61 swaps, 721
   `DrawElements`, and the same visible stop screenshot, so APK ZIP entry
   caching does not materially move the first-visible-draw milestone.
+- `cargo test armv7a_qemu_user_oracle_cases_match_aemu` passes with the new
+  `thumb2_localization_it_highreg_loop` case.
 - `tools/mcpe_ui_smoke.py --out-dir tmp --trace-hle AInput,AMotion
   --trace-hle-limit 80 --min-gles-events 1 --expect-hle-call
   AInputQueue_getEvent --expect-hle-call AMotionEvent_getX --expect-hle-call

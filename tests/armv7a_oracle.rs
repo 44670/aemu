@@ -333,6 +333,56 @@ fn oracle_cases() -> Vec<OracleCase> {
             coverage: &["Thumb-2", "IT", "load-store", "branch", "MCPE-regression"],
         },
         OracleCase {
+            name: "thumb2_localization_it_highreg_loop",
+            isa: GuestIsa::Thumb,
+            setup_asm: "
+                ldr r4, =oracle_probe
+                movs r0, #0
+                movs r1, #0
+                movs r2, #5
+                str r2, [r4, #4]
+                movs r2, #7
+                str r2, [r4, #8]
+                movs r2, #11
+                str r2, [r4, #12]
+                movw r8, #0
+                movw r10, #4
+            ",
+            body_asm: "
+            1:
+                cmp.w r8, #0
+                itt ne
+                ldrne.w r1, [r4, r8, lsl #2]
+                addne.w r0, r0, r1
+                add.w r8, r8, #1
+                cmp.w r8, r10
+                blt 1b
+                str.w r0, [r4]
+                bx lr
+            ",
+            data_asm: "",
+            setup_aemu: |cpu, mem, symbols| {
+                cpu.set_isa(Isa::Thumb);
+                let probe = symbol(symbols, "oracle_probe");
+                cpu.set_reg(4, probe);
+                cpu.set_reg(8, 0);
+                cpu.set_reg(10, 4);
+                for (idx, value) in [0, 5, 7, 11].into_iter().enumerate() {
+                    mem.store32(probe + (idx as u32 * 4), value).unwrap();
+                }
+            },
+            compare: compare_mask(&[0, 1], true, false, &[], &[0, 1, 2, 3]),
+            coverage: &[
+                "Thumb-2",
+                "IT",
+                "branch",
+                "integer-alu",
+                "load-store",
+                "MCPE-regression",
+                "localization-hot-loop",
+            ],
+        },
+        OracleCase {
             name: "thumb1_cond_branch_store",
             isa: GuestIsa::Thumb,
             setup_asm: "

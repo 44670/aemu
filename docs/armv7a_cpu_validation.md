@@ -89,6 +89,12 @@ The first MCPE-specific regression case is the Thumb-2 IT/fallthrough literal
 load/store loop that previously matched a fragile path in the local
 `armeabi-v7a` Minecraft PE probe.
 
+The first-visible-draw localization profile added another MCPE-specific
+regression case, `thumb2_localization_it_highreg_loop`. It covers a compact
+Thumb-2 loop shaped like the observed `Localization::_appendTranslations`
+hot path: high-register `cmp.w`, `ITT NE`, predicated `ldr.w` and `add.w`,
+high-register loop control, and a backward conditional branch.
+
 ## Adding Cases
 
 Add new cases in `tests/armv7a_oracle.rs` by defining:
