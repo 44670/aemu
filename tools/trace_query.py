@@ -480,6 +480,143 @@ def print_pc_profile(args) -> int:
     return 0
 
 
+THREAD_ACTION_RE = re.compile(r"^THREAD (?P<action>create|skip|wait|wake|abort)\b(?P<rest>.*)$")
+THREAD_SLICE_RE = re.compile(
+    r"^THREAD slice id=(?P<id>\d+) done=(?P<done>\w+) "
+    r"pc=(?P<pc>0x[0-9a-fA-F]+) (?P<isa>\w+)"
+)
+THREAD_WAIT_RE = re.compile(r"id=(?P<id>\d+) (?P<wait>.+)$")
+THREAD_WAKE_RE = re.compile(
+    r"id=(?P<id>\d+) (?:(?:cond=(?P<cond>0x[0-9a-fA-F]+) "
+    r"mutex=(?P<mutex>0x[0-9a-fA-F]+) wait=(?P<wait>\S+))|(?:mutex=(?P<wake_mutex>0x[0-9a-fA-F]+)))"
+)
+
+
+def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
+    path = native_log_path(args)
+    if not path.exists():
+        raise TraceQueryError(f"{path}: missing run log")
+    actions = Counter()
+    creates = []
+    skips = []
+    waits = []
+    wakes = []
+    aborts = []
+    slices = Counter()
+    slice_pcs = Counter()
+    line_count = 0
+    for line in path.read_text(errors="replace").splitlines():
+        if not line.startswith("THREAD "):
+            continue
+        line_count += 1
+        if match := THREAD_SLICE_RE.match(line):
+            thread = int(match.group("id"))
+            actions["slice"] += 1
+            slices[thread] += 1
+            slice_pcs[(thread, match.group("pc"), match.group("isa"))] += 1
+            continue
+        match = THREAD_ACTION_RE.match(line)
+        if not match:
+            actions["other"] += 1
+            continue
+        action = match.group("action")
+        rest = match.group("rest").strip()
+        actions[action] += 1
+        if action in ("create", "skip"):
+            values = dict(re.findall(r"([a-z_]+)=(\S+)", rest))
+            row = {
+                "raw": rest,
+                "id": int(values["id"]) if values.get("id", "").isdigit() else None,
+                "start": values.get("start"),
+                "arg": values.get("arg"),
+                "entry": values.get("entry"),
+                "entry_lib": values.get("entry_lib"),
+                "library": values.get("library"),
+                "sp": values.get("sp"),
+            }
+            (creates if action == "create" else skips).append(row)
+        elif action == "wait":
+            item = THREAD_WAIT_RE.search(rest)
+            waits.append(
+                {
+                    "raw": rest,
+                    "id": int(item.group("id")) if item else None,
+                    "wait": item.group("wait") if item else rest,
+                }
+            )
+        elif action == "wake":
+            item = THREAD_WAKE_RE.search(rest)
+            wakes.append(
+                {
+                    "raw": rest,
+                    "id": int(item.group("id")) if item else None,
+                    "cond": item.group("cond") if item else None,
+                    "mutex": (item.group("mutex") or item.group("wake_mutex")) if item else None,
+                    "wait": item.group("wait") if item else None,
+                }
+            )
+        elif action == "abort":
+            aborts.append({"raw": rest})
+    return (
+        {
+            "line_count": line_count,
+            "actions": actions,
+            "creates": creates,
+            "skips": skips,
+            "waits": waits,
+            "wakes": wakes,
+            "aborts": aborts,
+            "slices": slices,
+            "slice_pcs": slice_pcs,
+        },
+        path,
+    )
+
+
+def start_key(row: dict) -> tuple[str | None, str | None, str | None]:
+    return row.get("start"), row.get("library"), row.get("entry_lib")
+
+
+def print_thread_summary(args) -> int:
+    data, path = parse_thread_log(args)
+    print(f"thread-summary: path={path} thread_lines={data['line_count']}")
+    actions = data["actions"]
+    print(
+        "thread-actions: "
+        + (", ".join(f"{name}:{count}" for name, count in actions.most_common()) or "none")
+    )
+    if data["slices"]:
+        print(
+            "thread-slices: "
+            + ", ".join(
+                f"{thread}:{count}" for thread, count in data["slices"].most_common(args.limit)
+            )
+        )
+    created = Counter(start_key(row) for row in data["creates"])
+    skipped = Counter(start_key(row) for row in data["skips"])
+    waits = Counter(row.get("wait") for row in data["waits"])
+    wakes = Counter(
+        (row.get("cond"), row.get("mutex"), row.get("wait")) for row in data["wakes"]
+    )
+    print("thread-created-starts:")
+    for (start, library, entry_lib), count in created.most_common(args.limit):
+        print(f"  count={count} start={start} library={library} entry_lib={entry_lib}")
+    print("thread-skipped-starts:")
+    for (start, library, entry_lib), count in skipped.most_common(args.limit):
+        print(f"  count={count} start={start} library={library} entry_lib={entry_lib}")
+    print("thread-waits:")
+    for wait, count in waits.most_common(args.limit):
+        print(f"  count={count} wait={wait}")
+    print("thread-wakes:")
+    for (cond, mutex, wait), count in wakes.most_common(args.limit):
+        print(f"  count={count} cond={cond} mutex={mutex} wait={wait}")
+    if args.slice_pcs:
+        print("thread-slice-pcs:")
+        for (thread, pc, isa), count in data["slice_pcs"].most_common(args.limit):
+            print(f"  count={count} thread={thread} pc={pc} isa={isa}")
+    return 0
+
+
 def byte_sample(row: dict, source_prefix: str) -> bytes | None:
     samples = row.get("byte_samples")
     if not isinstance(samples, list):
@@ -2155,6 +2292,27 @@ def run_self_test() -> None:
         assert native_rows[0]["branch"] == "fallback"
         assert native_rows[0]["resource"] == ""
         assert native_rows[0]["gl"] == 325
+        with (root / "run.log").open("a") as log:
+            log.write(
+                "\n".join(
+                    [
+                        "THREAD create id=7 start=0x703911f9 arg=0x60048b40 entry=0x08580844 entry_lib=<unknown> sp=0x6c040000",
+                        "THREAD wait id=7 Condvar { cond: 1610911808, mutex: 1610911804 }",
+                        "THREAD wake id=7 cond=0x60049040 mutex=0x6004903c wait=Runnable",
+                        "THREAD skip id=13 start=0x715cde85 arg=0x71bfa0c8 library=libminecraftpe.so",
+                        "THREAD slice id=7 done=false pc=0x70f7c722 Thumb r0=0x00000000",
+                    ]
+                )
+                + "\n"
+            )
+        thread_args = argparse.Namespace(trace_dir=str(root), native_log=None)
+        thread_data, _thread_path = parse_thread_log(thread_args)
+        assert thread_data["actions"]["create"] == 1
+        assert thread_data["actions"]["skip"] == 1
+        assert thread_data["actions"]["wait"] == 1
+        assert thread_data["actions"]["wake"] == 1
+        assert thread_data["actions"]["slice"] == 1
+        assert thread_data["skips"][0]["library"] == "libminecraftpe.so"
         (root / "native_events.jsonl").write_text(
             json.dumps(
                 {
@@ -2898,6 +3056,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc_profile.add_argument("--thread", type=parse_u32)
     pc_profile.add_argument("--limit", type=int, default=40)
 
+    thread_summary = subparsers.add_parser(
+        "thread-summary", help="summarize AEMU_TRACE_THREADS run.log events"
+    )
+    thread_summary.add_argument("--limit", type=int, default=12)
+    thread_summary.add_argument("--slice-pcs", action="store_true")
+
     bn_mont = subparsers.add_parser(
         "bn-mont-check",
         help="check bn_mul_mont native trace rows against a host Montgomery oracle",
@@ -3001,6 +3165,8 @@ def main(argv=None) -> int:
         return print_native_event(args)
     if args.command == "pc-profile":
         return print_pc_profile(args)
+    if args.command == "thread-summary":
+        return print_thread_summary(args)
     if args.command == "bn-mont-check":
         return print_bn_mont_check(args)
     if args.command == "bn-mod-sqr-check":

@@ -306,7 +306,6 @@ pub enum HleFunctionCode {
     Strcmp,
     Strlen,
     Strncmp,
-    Uidivmod,
     Wctob,
 }
 
@@ -6310,10 +6309,6 @@ pub fn initialize_hle_symbol<M: Memory>(
             ..
         } => write_strncmp_helper(memory, address),
         HleSymbolShape::FunctionCode {
-            code: HleFunctionCode::Uidivmod,
-            ..
-        } => write_uidivmod_helper(memory, address),
-        HleSymbolShape::FunctionCode {
             code: HleFunctionCode::Wctob,
             ..
         } => write_wctob_helper(memory, address),
@@ -6449,33 +6444,6 @@ fn write_strncmp_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), H
     Ok(())
 }
 
-fn write_uidivmod_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
-    const WORDS: &[u32] = &[
-        0xe351_0000, // cmp r1, #0
-        0x03a0_0000, // moveq r0, #0
-        0x03a0_1000, // moveq r1, #0
-        0x012f_ff1e, // bxeq lr
-        0xe3a0_2000, // mov r2, #0
-        0xe3a0_3000, // mov r3, #0
-        0xe3a0_c020, // mov r12, #32
-        0xe1a0_3083, // lsl r3, r3, #1
-        0xe183_3fa0, // orr r3, r3, r0, lsr #31
-        0xe1a0_0080, // lsl r0, r0, #1
-        0xe153_0001, // cmp r3, r1
-        0x2043_3001, // subhs r3, r3, r1
-        0xe0a2_2002, // adc r2, r2, r2
-        0xe25c_c001, // subs r12, r12, #1
-        0x1aff_fff7, // bne loop
-        0xe1a0_0002, // mov r0, r2
-        0xe1a0_1003, // mov r1, r3
-        0xe12f_ff1e, // bx lr
-    ];
-    for (idx, word) in WORDS.iter().enumerate() {
-        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
-    }
-    Ok(())
-}
-
 fn write_wctob_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
     const WORDS: &[u32] = &[
         0xe350_00ff, // cmp r0, #255
@@ -6563,10 +6531,6 @@ fn hle_shape(name: &str) -> HleSymbolShape {
             code: HleFunctionCode::ReturnNull,
         },
         "strcmp" | "strlen" | "strncmp" => HleSymbolShape::Function,
-        "__aeabi_uidiv" | "__aeabi_uidivmod" => HleSymbolShape::FunctionCode {
-            size: 0x48,
-            code: HleFunctionCode::Uidivmod,
-        },
         "wctob" => HleSymbolShape::FunctionCode {
             size: 0x0c,
             code: HleFunctionCode::Wctob,
@@ -10392,16 +10356,9 @@ mod tests {
         assert_eq!(memory.load32(0x1000).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let uidivmod = describe_hle_import("__aeabi_uidivmod").unwrap();
-        assert_eq!(
-            uidivmod.shape,
-            HleSymbolShape::FunctionCode {
-                size: 0x48,
-                code: HleFunctionCode::Uidivmod,
-            }
-        );
+        assert_eq!(uidivmod.shape, HleSymbolShape::Function);
         initialize_hle_symbol(&mut memory, uidivmod, 0x1040).unwrap();
-        assert_eq!(memory.load32(0x1040).unwrap(), 0xe351_0000);
-        assert_eq!(memory.load32(0x1084).unwrap(), 0xe12f_ff1e);
+        assert_eq!(memory.load32(0x1040).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let wctob = describe_hle_import("wctob").unwrap();
         assert_eq!(
@@ -11411,6 +11368,8 @@ mod tests {
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
 
         for name in [
+            "__aeabi_uidiv",
+            "__aeabi_uidivmod",
             "__aeabi_ldivmod",
             "__aeabi_uldivmod",
             "__aeabi_i2d",
@@ -11435,6 +11394,19 @@ mod tests {
                 HleCallBehavior::Implemented
             );
         }
+
+        cpu.set_reg(0, 100);
+        cpu.set_reg(1, 9);
+        hle.dispatch("__aeabi_uidiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 11);
+
+        cpu.set_reg(0, 100);
+        cpu.set_reg(1, 9);
+        hle.dispatch("__aeabi_uidivmod", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 11);
+        assert_eq!(cpu.reg(1), 1);
 
         set_reg64(&mut cpu, 0, (-100i64) as u64);
         set_reg64(&mut cpu, 2, 9);

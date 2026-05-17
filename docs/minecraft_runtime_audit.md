@@ -30,9 +30,9 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address and linked runtime HLE entries such as `__dynamic_cast`; `run_function_with_args_until_hle` can now turn a selected HLE call into a bounded success condition. | Initial coverage |
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
-| Bounded first-frame probe | `target/release/aemu run-apk-native /mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk --abi armeabi-v7a --steps 600000000 --sdl2-live --sdl2-frames 2` reaches `eglSwapBuffers` at step `365653113` in the latest fake-time/thread-scheduling run and exits 0 at the frame limit. | Satisfied for local ARMv7 research APK |
+| Bounded first-frame probe | `tools/mcpe_smoke.py --trace-dir tmp/mcpe-smoke-uidiv-hle-20260517 --frames 1 --timeout 120` reaches `eglSwapBuffers` at step `311218123` and exits 0 at the frame limit after moving `__aeabi_uidiv/__aeabi_uidivmod` to Rust HLE traps. | Satisfied for local ARMv7 research APK |
 | Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, framebuffer/renderbuffer, stencil, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` and `src/wasm_webgl.rs` replay the captured stream for SDL2/WebGL. Earlier SDL2 evidence submitted 744 indexed draws with nonzero RGB readback, but the current `tools/mcpe_smoke.py` live baseline records zero indexed draws and black RGB readback. | Current no-draw regression/blocker |
-| SDL2 live frames | `NativeRuntime::continue_until_hle` can resume guest execution after a stopped HLE call. With `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1`, current `run-apk-native --sdl2-live --steps 600000000` reaches first swap at step `365653113`, advances to frame limit, and reports zero host GL errors. Default 64-slice scheduling still records no draw stream, while a 256-slice diagnostic reaches real `DrawElements` later in the live loop but is too slow for a long smoke. | Live loop works; rendering progression and scheduling cost blocked |
+| SDL2 live frames | `NativeRuntime::continue_until_hle` can resume guest execution after a stopped HLE call. With `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1`, current `run-apk-native --sdl2-live --steps 600000000` reaches first swap at step `311218123`, advances to frame limit, and reports zero host GL errors. Current 5-frame and 43-swap probes record no draw stream and black RGB readback; older heavy scheduling diagnostics reached real `DrawElements` later in the live loop but were too slow for a reliable smoke. | Live loop works; rendering progression remains blocked |
 | SDL2 WebSocket harness and input | `src/ws_harness.rs` and `tools/ws_cli.py` provide `debug`, `screenshot`, `pointer`, and `tap`. `tools/mcpe_ui_smoke.py` now launches `run-apk-native --sdl2-live --ws`, waits for the WebSocket/debug frame milestone, runs a multi-step UI journal, captures PNG screenshots under `tmp/` by default, records `journal.jsonl`, and writes `summary.json` in one command. A traced UI smoke reaches `AInputQueue_getEvent` and `AMotionEvent_getX/Y` for tap down/up at guest coordinates `427,240`. `tmp/before.png` and `tmp/after.png` are byte-identical, so input delivery is no longer the only blocker. | Harness/input bridge satisfied; not playable |
 | Browser-fed APK bytes | `load_apk_native_libraries_bytes` links APK native libraries from bytes, and `HleRuntime::set_apk_bytes` lets Android asset HLE serve `AAssetManager_open` from the same byte source. | Initial browser data path |
 | Browser MCPE entrypoint | `src/wasm_api.rs` exports `runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)` for wasm builds. It runs the byte-backed APK path through constructors, `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, and `android_main` until `eglSwapBuffers`, then replays captured GLES events into a WebGL 1 canvas and returns draw/readback/error stats. `web/mcpe_first_frame.html` wires that export to a file input and canvas. | Initial browser harness path |
@@ -69,6 +69,41 @@ Local profiler-first update on 2026-05-17:
   `0x012e0738..0x012e076c` and consists of `ldr`, `adds`, `umlal`, `adc`,
   `str`, `cmp`, and `bne`. A focused qemu-user oracle case now covers the
   observed `UMLAL + ADDS/ADC` pattern.
+
+Follow-up profiler/scheduler evidence on 2026-05-17:
+
+- `tools/trace_query.py <trace-dir> pc-profile` now records full Thumb-2
+  instruction words for sampled Thumb PCs and classifies hot Thumb operations
+  instead of reporting a single `thumb` bucket. `tmp/mcpe-profile-thumb-op2-20260517`
+  still times out at `android_main` with 0 swaps under profiling overhead, but
+  its top rows split UI/JSON work into `ldr`, `b`, `cmp`, `mov`, `add`, and
+  `alu` buckets. HLE trap samples are now labeled `udf` instead of a misleading
+  `ldrb`.
+- `__aeabi_uidiv` and `__aeabi_uidivmod` now use Rust HLE traps instead of the
+  old interpreted ARM division helper. In
+  `tmp/mcpe-profile-uidiv-hle-20260517`, `__aeabi_uidivmod+...` no longer
+  appears in the top PC profile, HLE-page samples fall to 510, and the top
+  guest cost returns to `bn_mul_mont` plus native UI/JSON/resource code.
+- Without PC profiling overhead,
+  `tools/mcpe_smoke.py --trace-dir tmp/mcpe-smoke-uidiv-hle-20260517 --frames 1 --timeout 120`
+  exits 0, reaches `eglSwapBuffers` at step `311218123`, records 375 GLES
+  events and one swap, but records no draw calls and black RGB readback. The
+  3-frame follow-up `tmp/mcpe-smoke-uidiv-hle-frames3-20260517` completes
+  three swaps with zero draws, and the 200-frame timeout run
+  `tmp/mcpe-smoke-uidiv-hle-frames200-20260517` reaches 43 swaps with zero
+  `DrawArrays`/`DrawElements`; the GLES event stream contains texture
+  uploads/binds and repeated swaps but no draw submissions.
+- `tools/trace_query.py <trace-dir> thread-summary` now summarizes
+  `AEMU_TRACE_THREADS` run logs. The default thread trace
+  `tmp/mcpe-thread-trace-uidiv-hle-20260517` creates three runnable
+  libgnustl wrapper threads, skips 40
+  `libminecraftpe.so` `crossplat::threadpool::thread_start(void*)` threads,
+  and records two wakes. A diagnostic `AEMU_RUN_ALL_PTHREADS=1` rerun
+  (`tmp/mcpe-thread-all-uidiv-hle-20260517`) creates those 40 MCPE threadpool
+  workers, but they all block on the same condvar and the smoke still records
+  five blank swaps with zero draws. This rules out simply running all skipped
+  pthreads as a sufficient fix and points to the need for more precise
+  resource/lifecycle wait-wake evidence.
 
 Local files rechecked on 2026-05-13:
 

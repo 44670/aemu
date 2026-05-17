@@ -710,10 +710,13 @@ fn pc_profile_isa_name(isa: u8) -> &'static str {
 fn pc_profile_op(isa: u8, instr: Option<u32>) -> Option<&'static str> {
     let instr = instr?;
     if isa == pc_profile_isa_id(Isa::Thumb) {
-        return Some("thumb");
+        return Some(pc_profile_thumb_op(instr));
     }
     if isa != pc_profile_isa_id(Isa::Arm) {
         return None;
+    }
+    if (instr & 0xfff0_00f0) == HLE_TRAP_ARM_INSTR {
+        return Some("udf");
     }
     if (instr & 0x0ff0_00f0) == 0x0040_0090 {
         return Some("umaal");
@@ -843,6 +846,174 @@ fn pc_profile_op(isa: u8, instr: Option<u32>) -> Option<&'static str> {
         });
     }
     None
+}
+
+fn pc_profile_thumb_is_32bit_prefix(instr: u16) -> bool {
+    matches!(instr & 0xf800, 0xe800 | 0xf000 | 0xf800)
+}
+
+fn pc_profile_thumb_op(instr: u32) -> &'static str {
+    if instr > 0xffff {
+        let first = (instr >> 16) as u16;
+        let second = instr as u16;
+        if (first & 0xf800) == 0xf000 && (second & 0x8000) != 0 {
+            return if second & (1 << 14) != 0 { "bl" } else { "b" };
+        }
+        if (first & 0xff00) == 0xfb00 {
+            return "mul";
+        }
+        if matches!(first & 0xfff0, 0xf800 | 0xf840 | 0xf880 | 0xf8c0) {
+            return "str";
+        }
+        if matches!(first & 0xfff0, 0xf810 | 0xf850 | 0xf890 | 0xf8d0) {
+            return "ldr";
+        }
+        if matches!(first & 0xfff0, 0xf820 | 0xf860 | 0xf8a0 | 0xf8e0) {
+            return "strh";
+        }
+        if matches!(
+            first & 0xfff0,
+            0xf830 | 0xf870 | 0xf8b0 | 0xf8f0 | 0xf910 | 0xf930 | 0xf990 | 0xf9b0
+        ) {
+            return "ldrh";
+        }
+        if matches!(first & 0xffc0, 0xe880 | 0xe900) {
+            return if first & (1 << 4) != 0 { "ldm" } else { "stm" };
+        }
+        if matches!(first & 0xfff0, 0xe8d0 | 0xe8f0) {
+            return "ldr";
+        }
+        if (first & 0xfe00) == 0xea00
+            || (first & 0xfa00) == 0xf000
+            || (first & 0xfa00) == 0xf200
+            || (first & 0xff80) == 0xfa00
+            || matches!(first & 0xfff0, 0xf340 | 0xf360 | 0xf3c0)
+        {
+            return "alu";
+        }
+        return "thumb32";
+    }
+
+    let instr = instr as u16;
+    match instr >> 13 {
+        0b000 => {
+            if instr & 0x1800 == 0x1800 {
+                if instr & (1 << 9) != 0 { "sub" } else { "add" }
+            } else {
+                "shift"
+            }
+        }
+        0b001 => match (instr >> 11) & 0x3 {
+            0 => "mov",
+            1 => "cmp",
+            2 => "add",
+            3 => "sub",
+            _ => unreachable!(),
+        },
+        0b010 => {
+            if (instr & 0xfc00) == 0x4000 {
+                match (instr >> 6) & 0xf {
+                    0 => "and",
+                    1 => "eor",
+                    2 => "lsl",
+                    3 => "lsr",
+                    4 => "asr",
+                    5 => "adc",
+                    6 => "sbc",
+                    7 => "ror",
+                    8 => "tst",
+                    9 => "rsb",
+                    10 => "cmp",
+                    11 => "cmn",
+                    12 => "orr",
+                    13 => "mul",
+                    14 => "bic",
+                    15 => "mvn",
+                    _ => unreachable!(),
+                }
+            } else if (instr & 0xfc00) == 0x4400 {
+                match (instr >> 8) & 0x3 {
+                    0 => "add",
+                    1 => "cmp",
+                    2 => "mov",
+                    3 => "bx",
+                    _ => unreachable!(),
+                }
+            } else if (instr & 0xf800) == 0x4800 {
+                "ldr"
+            } else if instr & 0x0800 == 0 {
+                "thumb"
+            } else {
+                match (instr >> 9) & 0x7 {
+                    0 => "str",
+                    1 => "strh",
+                    2 => "strb",
+                    3 => "ldrsb",
+                    4 => "ldr",
+                    5 => "ldrh",
+                    6 => "ldrb",
+                    7 => "ldrsh",
+                    _ => unreachable!(),
+                }
+            }
+        }
+        0b011 => match (instr >> 11) & 0x3 {
+            0 => "str",
+            1 => "ldr",
+            2 => "strb",
+            3 => "ldrb",
+            _ => unreachable!(),
+        },
+        0b100 => {
+            if instr & (1 << 12) == 0 {
+                if instr & (1 << 11) != 0 {
+                    "ldrh"
+                } else {
+                    "strh"
+                }
+            } else if instr & (1 << 11) != 0 {
+                "ldr"
+            } else {
+                "str"
+            }
+        }
+        0b101 => {
+            if (instr & 0xf800) == 0xa000 {
+                "add"
+            } else if (instr & 0xff00) == 0xbf00 {
+                if instr & 0x000f != 0 { "it" } else { "hint" }
+            } else if (instr & 0xfe00) == 0xb400 {
+                "push"
+            } else if (instr & 0xfe00) == 0xbc00 {
+                "pop"
+            } else if (instr & 0xff80) == 0xb000 {
+                if instr & (1 << 7) != 0 { "sub" } else { "add" }
+            } else if (instr & 0xf500) == 0xb100 {
+                "b"
+            } else if instr & (1 << 12) != 0 {
+                "thumb"
+            } else {
+                "alu"
+            }
+        }
+        0b110 => {
+            if instr & (1 << 12) == 0 {
+                if instr & (1 << 11) != 0 { "ldm" } else { "stm" }
+            } else if instr & 0x0f00 == 0x0f00 {
+                "svc"
+            } else {
+                "b"
+            }
+        }
+        0b111 => {
+            if instr & (1 << 12) == 0 {
+                "b"
+            } else {
+                "bl-prefix"
+            }
+        }
+        _ => unreachable!(),
+    }
 }
 
 impl NativeRuntime {
@@ -1000,7 +1171,17 @@ impl NativeRuntime {
             let isa = self.cpu.isa();
             let instr = match isa {
                 Isa::Arm => self.link.memory.load32(pc).ok(),
-                Isa::Thumb => self.link.memory.load16(pc).ok().map(u32::from),
+                Isa::Thumb => self.link.memory.load16(pc).ok().map(|first| {
+                    if pc_profile_thumb_is_32bit_prefix(first) {
+                        self.link
+                            .memory
+                            .load16(pc.wrapping_add(2))
+                            .map(|second| (u32::from(first) << 16) | u32::from(second))
+                            .unwrap_or(u32::from(first))
+                    } else {
+                        u32::from(first)
+                    }
+                }),
             };
             if let Some(profiler) = self.pc_profiler.as_mut() {
                 profiler.record_sample(thread_id, pc, isa, instr);
@@ -3863,6 +4044,46 @@ mod tests {
         );
         assert_eq!(
             pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(0x1aff_fff1)),
+            Some("b")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Arm), Some(HLE_TRAP_ARM_INSTR)),
+            Some("udf")
+        );
+    }
+
+    #[test]
+    fn pc_profiler_classifies_thumb_hot_path_ops() {
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0xf851_0c04)),
+            Some("ldr")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0xeb04_000b)),
+            Some("alu")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0x0000_6881)),
+            Some("ldr")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0x0000_4610)),
+            Some("mov")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0x0000_900a)),
+            Some("str")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0x0000_bf08)),
+            Some("it")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0x0000_bd70)),
+            Some("pop")
+        );
+        assert_eq!(
+            pc_profile_op(pc_profile_isa_id(Isa::Thumb), Some(0x0000_d138)),
             Some("b")
         );
     }
