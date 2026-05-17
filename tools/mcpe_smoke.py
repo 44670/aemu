@@ -1612,6 +1612,16 @@ def build_arg_parser():
     parser.add_argument("--gles-event-limit", type=int, default=50000)
     parser.add_argument("--draw-dump-limit", type=int, default=10)
     parser.add_argument(
+        "--first-visible-draw",
+        action="store_true",
+        help="apply the validated SDL2 milestone gates for the first visible DrawElements frame",
+    )
+    parser.add_argument(
+        "--first-visible-draw-resource",
+        action="store_true",
+        help="run the first-visible-draw milestone with the resource-done native trace preset",
+    )
+    parser.add_argument(
         "--stop-after-gles-draw-elements",
         type=int,
         help="stop SDL2 live execution once replayed DrawElements reaches this count",
@@ -1739,8 +1749,37 @@ def build_arg_parser():
     return parser
 
 
+def apply_milestone_defaults(args):
+    if not (args.first_visible_draw or args.first_visible_draw_resource):
+        return
+    args.frames = max(args.frames, 260)
+    args.timeout = max(args.timeout, 640 if args.first_visible_draw_resource else 560)
+    if args.fake_time_step_nanos is None:
+        args.fake_time_step_nanos = 100_000
+    if args.guest_thread_swap_slices is None:
+        args.guest_thread_swap_slices = 256
+    if args.stop_after_gles_draw_elements is None:
+        args.stop_after_gles_draw_elements = 1
+    args.min_gles_draw_elements = max(args.min_gles_draw_elements, 1)
+    args.min_readback_rgb = max(args.min_readback_rgb, 1)
+    args.require_stop_screenshot = True
+    args.min_stop_screenshot_bytes = max(args.min_stop_screenshot_bytes, 1000)
+    if args.max_gl_errors is None:
+        args.max_gl_errors = 0
+    if args.expect_stage is None:
+        args.expect_stage = "completed"
+    if args.expect_exit == "any":
+        args.expect_exit = "zero"
+    if args.first_visible_draw_resource:
+        presets = list(args.native_trace_preset or [])
+        if "resource-done" not in presets:
+            presets.append("resource-done")
+        args.native_trace_preset = presets
+
+
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
+    apply_milestone_defaults(args)
     apk = pathlib.Path(args.apk)
     binary = pathlib.Path(args.binary)
     if not apk.exists():
@@ -1868,6 +1907,10 @@ def main(argv=None):
         },
         "threads": {
             "guest_thread_swap_slices": args.guest_thread_swap_slices,
+        },
+        "milestone": {
+            "first_visible_draw": args.first_visible_draw,
+            "first_visible_draw_resource": args.first_visible_draw_resource,
         },
         "pc_profile": {
             "enabled": args.profile_pc,

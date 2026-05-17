@@ -185,6 +185,13 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   first draw at event index `14276`. This narrows the next scheduler work to
   making native resource callback draining deterministic and efficient; it is
   not evidence for broad MCPE game-method HLE.
+- The same validated command shape is now available as
+  `tools/mcpe_smoke.py --first-visible-draw` or
+  `tools/mcpe_smoke.py --first-visible-draw-resource`. These presets apply the
+  known-good fake time step, guest-thread swap slices, draw-stop condition,
+  visible readback gate, stop screenshot gate, zero-GL-error gate, and, for
+  the resource variant, the `resource-done` native trace preset. They are
+  command-line harness presets only; they do not change runtime semantics.
 
 Local files rechecked on 2026-05-13:
 
