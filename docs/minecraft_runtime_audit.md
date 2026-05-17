@@ -206,6 +206,16 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
 - `tools/trace_query.py <trace-dir> pc-profile --symbols` now aggregates the
   latest PC profile snapshot by `(library, symbol)` so hot functions can be
   compared directly instead of reading individual PC rows.
+- `tools/mcpe_smoke.py` also has narrow `localization` and `localization-hot`
+  native trace presets for the new top profile function. The entry-only
+  `tmp/mcpe-localization-entry-20260517` run exits 0 after 112.837s for one
+  swap and captures five `Localization::_appendTranslations.entry` calls with
+  C++ string arguments: `loc/en_US-pocket.lang`, `loc/en_GB-pocket.lang`,
+  `loc/de_DE-pocket.lang`, `loc/es_MX-pocket.lang`, and
+  `loc/ja_JP-pocket.lang`. The earlier hot-loop run
+  `tmp/mcpe-localization-trace-20260517` confirms the profile PCs but fills an
+  800-event limit quickly, so the entry-only preset is the better default for
+  low-noise resource-text diagnosis.
 
 Local files rechecked on 2026-05-13:
 
@@ -425,6 +435,12 @@ zero host GL errors.
   --symbols --limit 12` reports `Localization::_appendTranslations` as the
   top aggregated symbol, then `bn_mul_mont` and
   `UIDefRepository::_resolveReferences`.
+- `tools/mcpe_smoke.py --trace-dir tmp/mcpe-localization-entry-20260517
+  --frames 1 --timeout 180 --fake-time-step-nanos 100000
+  --guest-thread-swap-slices 256 --native-trace-preset localization
+  --expect-stage completed --expect-exit zero --expect-native-event
+  Localization::_appendTranslations.entry` exits 0 and captures the first five
+  localization language files without filling the native event limit.
 - `tools/mcpe_ui_smoke.py --out-dir tmp --trace-hle AInput,AMotion
   --trace-hle-limit 80 --min-gles-events 1 --expect-hle-call
   AInputQueue_getEvent --expect-hle-call AMotionEvent_getX --expect-hle-call

@@ -273,6 +273,40 @@ MCPE_NATIVE_TRACE_PRESETS = {
         ],
         "event_limit": 5000,
     },
+    "localization": {
+        "description": "trace Localization::_appendTranslations entry strings",
+        "events": [
+            (0x00A7B5B4, "Localization::_appendTranslations.entry"),
+        ],
+        "mem32": [
+            (0x00A7B5B4, "r0+0,+0x4,+0x8,+0xc"),
+            (0x00A7B5B4, "r1+0,+0x4,+0x8,+0xc"),
+        ],
+        "cxx_string": [
+            (0x00A7B5B4, "r1+0,160"),
+        ],
+        "event_limit": 200,
+    },
+    "localization-hot": {
+        "description": "trace Localization::_appendTranslations loop PCs from first-visible-draw profile",
+        "events": [
+            (0x00A7B5B4, "Localization::_appendTranslations.entry"),
+            (0x00A7B71C, "Localization::_appendTranslations.loop-branch"),
+            (0x00A7B72A, "Localization::_appendTranslations.hot-alu"),
+            (0x00A7B72E, "Localization::_appendTranslations.hot-it"),
+            (0x00A7B730, "Localization::_appendTranslations.hot-alu2"),
+            (0x00A7B87C, "Localization::_appendTranslations.hot-load"),
+            (0x00A7B882, "Localization::_appendTranslations.hot-branch"),
+        ],
+        "mem32": [
+            (0x00A7B5B4, "r0+0,+0x4,+0x8,+0xc"),
+            (0x00A7B5B4, "r1+0,+0x4,+0x8,+0xc"),
+        ],
+        "cxx_string": [
+            (0x00A7B5B4, "r1+0,160"),
+        ],
+        "event_limit": 800,
+    },
     "webtoken": {
         "description": "trace MCPE certificate WebToken creation without HLE-ing game logic",
         "events": [
