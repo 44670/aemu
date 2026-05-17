@@ -19,6 +19,19 @@ const NATIVE_MALLOC_BUMP_SYMBOL_SIZE: u32 = 0x4084;
 const FAKE_FILE_SIZE: u32 = 0x40;
 const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
 const FIRST_FAKE_FD: u32 = 3;
+const AF_INET: u32 = 2;
+const AF_INET6: u32 = 10;
+const SOCK_STREAM: u32 = 1;
+const SOCK_DGRAM: u32 = 2;
+const SOCK_TYPE_MASK: u32 = 0x0f;
+const F_GETFL: u32 = 3;
+const F_SETFL: u32 = 4;
+const EBADF: u32 = 9;
+const EAGAIN: u32 = 11;
+const EINVAL: u32 = 22;
+const POLLIN: u16 = 0x0001;
+const POLLNVAL: u16 = 0x0020;
+const POLLFD_SIZE: u32 = 8;
 const ANDROID_ARM_STAT_SIZE: u32 = 96;
 const ANDROID_S_IFREG: u32 = 0o100000;
 const ANDROID_S_IFDIR: u32 = 0o040000;
@@ -987,10 +1000,38 @@ struct FakeFile {
     offset: u32,
 }
 
+impl FakeFile {
+    fn flags(&self) -> u32 {
+        match self.kind {
+            FakeFileKind::Socket { flags, .. } => flags,
+            _ => 0,
+        }
+    }
+
+    fn set_flags(&mut self, flags: u32) {
+        if let FakeFileKind::Socket {
+            flags: socket_flags,
+            ..
+        } = &mut self.kind
+        {
+            *socket_flags = flags;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum FakeFileKind {
     Random,
-    Virtual { path: String },
+    Virtual {
+        path: String,
+    },
+    Socket {
+        domain: u32,
+        ty: u32,
+        protocol: u32,
+        flags: u32,
+    },
+    Epoll,
 }
 
 #[derive(Debug, Clone)]
@@ -1366,6 +1407,17 @@ impl HleRuntime {
             "stat" | "lstat" => self.stat_call(cpu, memory),
             "pipe" => self.pipe_call(cpu, memory),
             "poll" => self.poll_call(cpu, memory),
+            "socket" => self.socket_call(cpu, memory),
+            "bind" => self.bind_call(cpu, memory),
+            "connect" => self.connect_call(cpu, memory),
+            "setsockopt" => self.setsockopt_call(cpu, memory),
+            "fcntl" => self.fcntl_call(cpu, memory),
+            "sendto" => self.sendto_call(cpu, memory),
+            "recvfrom" => self.recvfrom_call(cpu, memory),
+            "select" => self.select_call(cpu, memory),
+            "epoll_create" => self.epoll_create_call(cpu, memory),
+            "epoll_ctl" => self.epoll_ctl_call(cpu, memory),
+            "epoll_wait" => self.epoll_wait_call(cpu, memory),
             "read" => self.read_call(cpu, memory),
             "fread" => self.fread_call(cpu, memory),
             "write" => self.write_call(cpu, memory),
@@ -2588,11 +2640,142 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
-    fn poll_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        const POLLIN: u16 = 0x0001;
-        const POLLNVAL: u16 = 0x0020;
-        const POLLFD_SIZE: u32 = 8;
+    fn socket_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let domain = cpu.reg(0);
+        let raw_ty = cpu.reg(1);
+        let protocol = cpu.reg(2);
+        let ty = raw_ty & SOCK_TYPE_MASK;
+        if !matches!(domain, AF_INET | AF_INET6) || !matches!(ty, SOCK_STREAM | SOCK_DGRAM) {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let fd = self.open_fake_fd(FakeFileKind::Socket {
+            domain,
+            ty,
+            protocol,
+            flags: raw_ty & !SOCK_TYPE_MASK,
+        });
+        Ok(self.return32(cpu, fd))
+    }
 
+    fn bind_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        self.return_socket_success(cpu, memory, cpu.reg(0))
+    }
+
+    fn connect_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        self.return_socket_success(cpu, memory, cpu.reg(0))
+    }
+
+    fn setsockopt_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        self.return_socket_success(cpu, memory, cpu.reg(0))
+    }
+
+    fn fcntl_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let cmd = cpu.reg(1);
+        let arg = cpu.reg(2);
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let result = match cmd {
+            F_GETFL => self.files[file_idx].flags(),
+            F_SETFL => {
+                self.files[file_idx].set_flags(arg);
+                0
+            }
+            _ => 0,
+        };
+        Ok(self.return32(cpu, result))
+    }
+
+    fn sendto_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let len = cpu.reg(2);
+        if self.fake_socket_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        Ok(self.return32(cpu, len))
+    }
+
+    fn recvfrom_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        if self.fake_socket_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+        } else {
+            self.set_errno(memory, EAGAIN)?;
+        }
+        Ok(self.return32(cpu, u32::MAX))
+    }
+
+    fn select_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let nfds = cpu.reg(0);
+        if nfds > 1024 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        clear_fd_set(memory, cpu.reg(1), nfds)?;
+        clear_fd_set(memory, cpu.reg(2), nfds)?;
+        clear_fd_set(memory, cpu.reg(3), nfds)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn epoll_create_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let size = cpu.reg(0) as i32;
+        if size <= 0 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let fd = self.open_fake_fd(FakeFileKind::Epoll);
+        Ok(self.return32(cpu, fd))
+    }
+
+    fn epoll_ctl_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let epfd = cpu.reg(0);
+        let fd = cpu.reg(2);
+        if self.fake_epoll_index(epfd).is_none() || self.fake_file_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn epoll_wait_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let epfd = cpu.reg(0);
+        if self.fake_epoll_index(epfd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn return_socket_success<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        fd: u32,
+    ) -> Result<(), HleError> {
+        if self.fake_socket_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn poll_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fds = cpu.reg(0);
         let nfds = cpu.reg(1);
         let timeout = cpu.reg(2) as i32;
@@ -2612,10 +2795,12 @@ impl HleRuntime {
             let events = load16(memory, entry.wrapping_add(4))?;
             let revents = if fd < 0 {
                 0
+            } else if self.fake_file_index(fd as u32).is_none() {
+                POLLNVAL
             } else if self.fake_fd_readable(fd as u32) {
                 events & POLLIN
             } else {
-                POLLNVAL
+                0
             };
             store16(memory, entry.wrapping_add(6), revents)?;
             if revents != 0 && revents != POLLNVAL {
@@ -2986,6 +3171,18 @@ impl HleRuntime {
         self.files.iter().position(|file| file.fd == fd)
     }
 
+    fn fake_socket_index(&self, fd: u32) -> Option<usize> {
+        self.files
+            .iter()
+            .position(|file| file.fd == fd && matches!(file.kind, FakeFileKind::Socket { .. }))
+    }
+
+    fn fake_epoll_index(&self, fd: u32) -> Option<usize> {
+        self.files
+            .iter()
+            .position(|file| file.fd == fd && matches!(file.kind, FakeFileKind::Epoll))
+    }
+
     fn fake_fd_readable(&self, fd: u32) -> bool {
         let Some(file_idx) = self.fake_file_index(fd) else {
             return false;
@@ -2995,6 +3192,7 @@ impl HleRuntime {
             FakeFileKind::Virtual { path } => self.virtual_file_index(path).is_some_and(|idx| {
                 self.files[file_idx].offset < self.virtual_files[idx].data.len() as u32
             }),
+            FakeFileKind::Socket { .. } | FakeFileKind::Epoll => false,
         }
     }
 
@@ -3046,6 +3244,15 @@ impl HleRuntime {
                     .unwrap_or(0);
                 fake_regular_file_stat(fake_ino_from_path(path), size)
             }
+            FakeFileKind::Socket {
+                domain,
+                ty,
+                protocol,
+                ..
+            } => fake_character_device_stat(
+                0x1000 + u64::from(file.fd) + u64::from(domain ^ ty ^ protocol),
+            ),
+            FakeFileKind::Epoll => fake_character_device_stat(0x1000 + u64::from(file.fd)),
         }
     }
 
@@ -3083,6 +3290,7 @@ impl HleRuntime {
                 self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(read as u32);
                 Ok(read as u32)
             }
+            FakeFileKind::Socket { .. } | FakeFileKind::Epoll => Ok(0),
         }
     }
 
@@ -3120,6 +3328,7 @@ impl HleRuntime {
                 self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(count);
                 Ok(count)
             }
+            FakeFileKind::Socket { .. } | FakeFileKind::Epoll => Ok(count),
         }
     }
 
@@ -6724,6 +6933,17 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "lstat"
                 | "pipe"
                 | "poll"
+                | "socket"
+                | "bind"
+                | "connect"
+                | "setsockopt"
+                | "fcntl"
+                | "sendto"
+                | "recvfrom"
+                | "select"
+                | "epoll_create"
+                | "epoll_ctl"
+                | "epoll_wait"
                 | "read"
                 | "fread"
                 | "write"
@@ -9377,6 +9597,17 @@ fn store32<M: Memory>(memory: &mut M, addr: u32, value: u32) -> Result<(), HleEr
     memory
         .store32(addr, value)
         .map_err(|err| HleError::Memory(err.to_string()))
+}
+
+fn clear_fd_set<M: Memory>(memory: &mut M, fd_set: u32, nfds: u32) -> Result<(), HleError> {
+    if fd_set == 0 || nfds == 0 {
+        return Ok(());
+    }
+    let words = nfds.saturating_add(31) / 32;
+    for word in 0..words {
+        store32(memory, fd_set.wrapping_add(word.wrapping_mul(4)), 0)?;
+    }
+    Ok(())
 }
 
 fn store64<M: Memory>(memory: &mut M, addr: u32, value: u64) -> Result<(), HleError> {
@@ -13700,6 +13931,97 @@ mod tests {
         hle.dispatch("fread", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 4);
         assert_eq!(memory.load_bytes_for_test(0x1230, 4), b"pack");
+    }
+
+    #[test]
+    fn dispatches_fake_udp_socket_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        memory.load_bytes(0x1200, b"ping").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+
+        assert_eq!(
+            describe_hle_import("socket").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+
+        cpu.set_reg(0, AF_INET);
+        cpu.set_reg(1, SOCK_DGRAM);
+        cpu.set_reg(2, 0);
+        hle.dispatch("socket", &mut cpu, &mut memory).unwrap();
+        let fd = cpu.reg(0);
+        assert_eq!(fd, FIRST_FAKE_FD);
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, F_SETFL);
+        cpu.set_reg(2, 0x800);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, F_GETFL);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0x800);
+
+        for name in ["setsockopt", "bind", "connect"] {
+            cpu.set_reg(0, fd);
+            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
+            assert_eq!(cpu.reg(0), 0, "{name}");
+        }
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1200);
+        cpu.set_reg(2, 4);
+        hle.dispatch("sendto", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1210);
+        cpu.set_reg(2, 16);
+        hle.dispatch("recvfrom", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EAGAIN);
+
+        store32(&mut memory, 0x1240, fd).unwrap();
+        store16(&mut memory, 0x1244, POLLIN).unwrap();
+        store16(&mut memory, 0x1246, 0xffff).unwrap();
+        cpu.set_reg(0, 0x1240);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load16(0x1246).unwrap(), 0);
+
+        store32(&mut memory, 0x1280, u32::MAX).unwrap();
+        cpu.set_reg(0, fd + 1);
+        cpu.set_reg(1, 0x1280);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 0);
+        hle.dispatch("select", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1280).unwrap(), 0);
+
+        cpu.set_reg(0, 1);
+        hle.dispatch("epoll_create", &mut cpu, &mut memory).unwrap();
+        let epfd = cpu.reg(0);
+        assert_eq!(epfd, fd + 1);
+
+        cpu.set_reg(0, epfd);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, fd);
+        cpu.set_reg(3, 0x12c0);
+        hle.dispatch("epoll_ctl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, epfd);
+        cpu.set_reg(1, 0x12c0);
+        cpu.set_reg(2, 4);
+        cpu.set_reg(3, 0);
+        hle.dispatch("epoll_wait", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
     }
 
     #[test]
