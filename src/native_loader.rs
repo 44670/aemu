@@ -42,7 +42,7 @@ impl Default for NativeLoadConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NativeLinkReport {
     pub apk_path: PathBuf,
     pub abi: String,
