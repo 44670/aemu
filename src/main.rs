@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--ws ADDR]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--ws ADDR]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--ws ADDR]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -515,6 +515,8 @@ struct RunApkNativeOptions {
     sdl2: bool,
     sdl2_live: bool,
     sdl2_frames: Option<u64>,
+    sdl2_stop_after_draw_elements: Option<usize>,
+    sdl2_stop_screenshot: Option<PathBuf>,
     sdl2_hold_ms: u64,
     ws_addr: Option<String>,
 }
@@ -546,6 +548,8 @@ fn parse_run_apk_native_args(
         sdl2: false,
         sdl2_live: false,
         sdl2_frames: None,
+        sdl2_stop_after_draw_elements: None,
+        sdl2_stop_screenshot: None,
         sdl2_hold_ms: 1000,
         ws_addr: None,
     };
@@ -599,6 +603,20 @@ fn parse_run_apk_native_args(
                         .parse()
                         .map_err(|_| format!("invalid --sdl2-frames value: {value}"))?,
                 );
+            }
+            "--sdl2-stop-after-draw-elements" => {
+                let value = iter.next().ok_or_else(|| {
+                    "--sdl2-stop-after-draw-elements needs a numeric value".to_string()
+                })?;
+                options.sdl2_stop_after_draw_elements = Some(value.parse().map_err(|_| {
+                    format!("invalid --sdl2-stop-after-draw-elements value: {value}")
+                })?);
+            }
+            "--sdl2-stop-screenshot" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--sdl2-stop-screenshot needs a path".to_string())?;
+                options.sdl2_stop_screenshot = Some(PathBuf::from(value));
             }
             "--ws" => {
                 options.launch = true;
@@ -692,6 +710,8 @@ fn run_apk_native(
             &mut runtime,
             max_steps,
             options.sdl2_frames,
+            options.sdl2_stop_after_draw_elements,
+            options.sdl2_stop_screenshot.as_deref(),
             options.ws_addr.as_deref(),
         )?;
     } else if options.gles_summary || options.sdl2 {
@@ -867,6 +887,8 @@ fn replay_sdl2_live_gles_frames(
     runtime: &mut aemu::native_runtime::NativeRuntime,
     max_steps_per_frame: usize,
     max_frames: Option<u64>,
+    stop_after_draw_elements: Option<usize>,
+    stop_screenshot: Option<&Path>,
     ws_addr: Option<&str>,
 ) -> Result<(), String> {
     use aemu::hle_imports::GlesEvent;
@@ -932,6 +954,27 @@ fn replay_sdl2_live_gles_frames(
                 stats.readback_nonzero_alpha_pixels,
                 stats.gl_error_count
             );
+        }
+        if stop_after_draw_elements
+            .is_some_and(|limit| limit > 0 && host.replay_stats().draw_elements >= limit)
+        {
+            let stats = host.replay_stats();
+            println!(
+                "sdl2-live: reached draw-elements limit draw_elements={} frames={} events={} payload={} readback={}x{} rgb={} alpha={} gl_errors={}",
+                stats.draw_elements,
+                frames,
+                total_events,
+                total_payload_bytes,
+                stats.readback_width,
+                stats.readback_height,
+                stats.readback_nonzero_rgb_pixels,
+                stats.readback_nonzero_alpha_pixels,
+                stats.gl_error_count
+            );
+            if let Some(path) = stop_screenshot {
+                write_sdl2_stop_screenshot(&mut host, path)?;
+            }
+            return Ok(());
         }
 
         for event in host
@@ -1060,6 +1103,31 @@ fn replay_sdl2_live_gles_frames(
 }
 
 #[cfg(feature = "sdl2")]
+fn write_sdl2_stop_screenshot(
+    host: &mut aemu::sdl_shell::Sdl2Host,
+    path: &Path,
+) -> Result<(), String> {
+    let capture = host
+        .capture_framebuffer_rgb()
+        .map_err(|err| format!("stop screenshot capture failed: {err}"))?;
+    let png = aemu::png_util::encode_rgb_png(capture.width, capture.height, &capture.rgb)
+        .map_err(|err| format!("stop screenshot PNG encode failed: {err}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("stop screenshot directory setup failed: {err}"))?;
+    }
+    std::fs::write(path, &png).map_err(|err| format!("stop screenshot write failed: {err}"))?;
+    println!(
+        "sdl2-live: stop screenshot path={} width={} height={} bytes={}",
+        path.display(),
+        capture.width,
+        capture.height,
+        png.len()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sdl2")]
 fn hle_pointer_phase(phase: aemu::host::PointerPhase) -> aemu::hle_imports::HlePointerPhase {
     match phase {
         aemu::host::PointerPhase::Down => aemu::hle_imports::HlePointerPhase::Down,
@@ -1082,6 +1150,8 @@ fn replay_sdl2_live_gles_frames(
     _runtime: &mut aemu::native_runtime::NativeRuntime,
     _max_steps_per_frame: usize,
     _max_frames: Option<u64>,
+    _stop_after_draw_elements: Option<usize>,
+    _stop_screenshot: Option<&Path>,
     _ws_addr: Option<&str>,
 ) -> Result<(), String> {
     Err("--sdl2-live requires rebuilding with --features sdl2".to_string())

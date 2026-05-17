@@ -104,6 +104,65 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   five blank swaps with zero draws. This rules out simply running all skipped
   pthreads as a sufficient fix and points to the need for more precise
   resource/lifecycle wait-wake evidence.
+- `AEMU_TRACE_THREADS` now records condition-variable wait calls and
+  signal/broadcast calls, including the condvar address and the number of
+  waiters present before each signal. The default
+  `tmp/mcpe-thread-sync-20260517` run still completes five blank swaps with
+  411 GLES events, 5 swaps, and 0 draws. It skips the 40 MCPE threadpool
+  workers, observes three `pthread_cond_wait` calls, and records two real
+  wakes; most condition signals have `waiters_before=0`.
+- The `AEMU_RUN_ALL_PTHREADS=1` comparison
+  `tmp/mcpe-thread-sync-all-20260517` creates all 40 MCPE threadpool workers,
+  but each worker runs once and blocks on
+  `pthread_cond_wait(cond=0x606cba8c, mutex=0x606cba88)`. No signal or
+  broadcast to `0x606cba8c` occurs during the five-frame run. The GLES stream
+  is only `BindTexture:162`, `TexImage2D:122`, `TexSubImage2D:122`, and
+  `SwapBuffers:5`; there are no `UseProgram`, `Clear`, `DrawArrays`, or
+  `DrawElements` events. This makes blind cooperative thread-slice tuning the
+  wrong next step: the immediate blocker is that native render/resource logic
+  reaches texture uploads and swaps but not draw submission or threadpool work
+  dispatch.
+- A lower-overhead PC profile,
+  `tools/mcpe_smoke.py --trace-dir tmp/mcpe-profile-low-20260517 --frames 5 --timeout 150 --profile-pc --profile-pc-interval 65536`,
+  still reaches the same five blank swaps and captures 5,734 samples. The
+  sampled hot paths are `bn_mul_mont`, `UIDefRepository::_resolveReferences`,
+  `Json::Reader`, `ImageUtils::savePNG`, and, on worker thread 7,
+  `Localization::_appendTranslations`. This supports investigating native
+  resource/UI preload progress and draw-gating state before changing scheduler
+  policy.
+- `tmp/mcpe-resource-done-20260517`, captured with
+  `--native-trace-preset resource-done`, records 197
+  `ResourcePackManager::preloadTextures.work-load-texture.entry` events and
+  five `GameRenderer::render.resource-ready-gate` events, but no preload
+  done-callback events and no `MinecraftClient::onResourcesLoaded`. The gate's
+  client byte window stays `0000000001000000e886046000000000`, so the
+  resource-ready byte at `client+0x23e` is still zero when the blank swaps are
+  emitted. The immediate no-draw state is therefore an unfinished native
+  resource preload path, not a proven missed MCPE threadpool wake.
+- `tools/trace_query.py <trace-dir> resource-progress` now summarizes this
+  preload gate directly from `native_events.jsonl` and `gles_events.jsonl`.
+  On the historical
+  `tmp/mcpe-smoke-swap-slices64-time0p1ms-f200` trace it reports 845 preload
+  work events, 841 done-callback entries, 200 resource gate hits, and still no
+  final callback or draw; the done counter falls from 858 to 18 but never
+  reaches zero. On the draw-reaching historical traces that did not enable
+  native resource events, it still reports GLES draw progress
+  (`DrawElements:765` at 59 swaps for
+  `tmp/mcpe-smoke-swap-slices256-time0p1ms-f260` and `DrawElements:809` at
+  229 swaps for `tmp/mcpe-smoke-swap-slices64-time0p1ms-f240`).
+- SDL2 live runs can now stop on a draw milestone with
+  `--sdl2-stop-after-draw-elements N`, exposed in `tools/mcpe_smoke.py` as
+  `--stop-after-gles-draw-elements N`. This is intended for efficient UI
+  smoke scripts that set a high frame cap but exit as soon as the first draw
+  milestone appears, instead of running until a fixed frame limit or timeout.
+  `tmp/mcpe-stop-after-draw-540-20260517` validates the path with
+  `--fake-time-step-nanos 100000 --guest-thread-swap-slices 256 --frames 260
+  --stop-after-gles-draw-elements 1`: it exits 0 after 533.409s at frame 61,
+  records `DrawElements:721`, and stops via
+  `sdl2-live: reached draw-elements limit` rather than timing out.
+  Future `mcpe_smoke.py` runs with this stop condition also pass
+  `--sdl2-stop-screenshot <trace-dir>/stop.png`, so the draw milestone leaves
+  a PNG framebuffer artifact under `./tmp/`.
 
 Local files rechecked on 2026-05-13:
 

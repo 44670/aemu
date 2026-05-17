@@ -1250,8 +1250,13 @@ impl NativeRuntime {
 
     pub fn run(&mut self, max_steps: usize) -> Result<(), NativeRuntimeError> {
         for _ in 0..max_steps {
-            if let NativeRuntimeStep::HleCall { name, args, .. } = self.step()? {
-                self.handle_thread_sync_hle(1, &name, args)?;
+            if let NativeRuntimeStep::HleCall {
+                name,
+                address,
+                args,
+            } = self.step()?
+            {
+                self.handle_thread_sync_hle(1, &name, address, args)?;
                 self.wait_main_after_hle(&name, args)?;
             }
         }
@@ -1793,7 +1798,7 @@ impl NativeRuntime {
                     address: hle_address,
                     args,
                 }) => {
-                    self.handle_thread_sync_hle(1, &name, args)?;
+                    self.handle_thread_sync_hle(1, &name, hle_address, args)?;
                     self.wait_main_after_hle(&name, args)?;
                     let should_service_threads = self.hle.has_created_pthreads()
                         || (!self.guest_threads.is_empty()
@@ -2000,8 +2005,10 @@ impl NativeRuntime {
         &mut self,
         thread_id: u32,
         name: &str,
+        address: u32,
         args: [u32; 4],
     ) -> Result<(), NativeRuntimeError> {
+        self.trace_thread_sync_hle(thread_id, name, address, args);
         match name {
             "pthread_cond_signal" => self.wake_cond_threads(args[0], false),
             "pthread_cond_broadcast" => self.wake_cond_threads(args[0], true),
@@ -2018,6 +2025,52 @@ impl NativeRuntime {
             _ => {}
         }
         Ok(())
+    }
+
+    fn trace_thread_sync_hle(&self, thread_id: u32, name: &str, address: u32, args: [u32; 4]) {
+        if std::env::var_os("AEMU_TRACE_THREADS").is_none() {
+            return;
+        }
+        match name {
+            "pthread_cond_signal" | "pthread_cond_broadcast" => {
+                let waiters = self.cond_waiter_count(args[0]);
+                eprintln!(
+                    "THREAD signal id={thread_id} name={name} pc={address:#010x} cond={:#010x} waiters_before={waiters}",
+                    args[0],
+                );
+            }
+            "pthread_cond_wait" | "pthread_cond_timedwait" => {
+                eprintln!(
+                    "THREAD condwait id={thread_id} name={name} pc={address:#010x} cond={:#010x} mutex={:#010x} timeout={:#010x}",
+                    args[0], args[1], args[2],
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn cond_waiter_count(&self, cond: u32) -> usize {
+        let main_waiter = matches!(
+            self.main_wait,
+            GuestThreadWait::Condvar {
+                cond: main_cond,
+                ..
+            } if main_cond == cond
+        );
+        usize::from(main_waiter)
+            + self
+                .guest_threads
+                .iter()
+                .filter(|thread| {
+                    matches!(
+                        thread.wait,
+                        GuestThreadWait::Condvar {
+                            cond: thread_cond,
+                            ..
+                        } if thread_cond == cond
+                    )
+                })
+                .count()
     }
 
     fn thread_wait_after_hle(
@@ -2301,7 +2354,7 @@ impl NativeRuntime {
                             self.cpu.reg(0),
                         );
                     }
-                    self.handle_thread_sync_hle(thread_id, &name, args)?;
+                    self.handle_thread_sync_hle(thread_id, &name, address, args)?;
                     if thread_id == 1 {
                         self.wait_main_after_hle(&name, args)?;
                     } else if let Some(wait) = self.thread_wait_after_hle(thread_id, &name, args) {
@@ -2440,8 +2493,12 @@ impl NativeRuntime {
             push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
             match self.step() {
                 Ok(NativeRuntimeStep::GuestInstruction) => {}
-                Ok(NativeRuntimeStep::HleCall { name, args, .. }) => {
-                    self.handle_thread_sync_hle(thread.id, &name, args)?;
+                Ok(NativeRuntimeStep::HleCall {
+                    name,
+                    address,
+                    args,
+                }) => {
+                    self.handle_thread_sync_hle(thread.id, &name, address, args)?;
                     if let Some(wait) = self.thread_wait_after_hle(thread.id, &name, args) {
                         thread.wait = wait;
                         if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
@@ -4746,7 +4803,9 @@ mod tests {
         let NativeRuntimeStep::HleCall { name, args, .. } = step else {
             panic!("expected pthread_cond_signal HLE call");
         };
-        runtime.handle_thread_sync_hle(1, &name, args).unwrap();
+        runtime
+            .handle_thread_sync_hle(1, &name, signal_addr, args)
+            .unwrap();
 
         assert_eq!(runtime.guest_threads[0].wait, GuestThreadWait::Runnable);
         runtime.service_guest_threads(4).unwrap();

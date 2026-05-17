@@ -203,10 +203,31 @@ def print_summary(args) -> int:
     native_events, native_path = load_native_events(args)
     programs = sorted({row.get("program") for row in draws if isinstance(row.get("program"), int)})
     textures = sorted({row.get("texture") for row in draws if isinstance(row.get("texture"), int)})
+    gles_kinds = Counter(row.get("kind") for row in gles_events)
+    gles_swaps = [row.get("index") for row in gles_events if row.get("kind") == "SwapBuffers"]
+    gles_draws = [
+        row.get("index")
+        for row in gles_events
+        if row.get("kind") in ("DrawArrays", "DrawElements")
+    ]
     print(f"hle_manifest={hle_manifest} rows={len(uploads)}")
     print(f"draw_manifest={draw_manifest} rows={len(draws)}")
     print(f"gles_events={gles_path} rows={len(gles_events)}")
     print(f"native_events={native_path} rows={len(native_events)}")
+    print(
+        "gles_kinds="
+        + (", ".join(f"{kind}:{count}" for kind, count in gles_kinds.most_common()) or "none")
+    )
+    print(
+        f"gles_swaps={len(gles_swaps)}"
+        f" first={gles_swaps[0] if gles_swaps else 'none'}"
+        f" last={gles_swaps[-1] if gles_swaps else 'none'}"
+    )
+    print(
+        f"gles_draws={len(gles_draws)}"
+        f" first={gles_draws[0] if gles_draws else 'none'}"
+        f" last={gles_draws[-1] if gles_draws else 'none'}"
+    )
     print(f"draw_programs={','.join(map(str, programs[:24])) or 'none'}")
     if len(programs) > 24:
         print(f"draw_programs_more={len(programs) - 24}")
@@ -480,7 +501,9 @@ def print_pc_profile(args) -> int:
     return 0
 
 
-THREAD_ACTION_RE = re.compile(r"^THREAD (?P<action>create|skip|wait|wake|abort)\b(?P<rest>.*)$")
+THREAD_ACTION_RE = re.compile(
+    r"^THREAD (?P<action>create|skip|wait|wake|abort|signal|condwait)\b(?P<rest>.*)$"
+)
 THREAD_SLICE_RE = re.compile(
     r"^THREAD slice id=(?P<id>\d+) done=(?P<done>\w+) "
     r"pc=(?P<pc>0x[0-9a-fA-F]+) (?P<isa>\w+)"
@@ -501,6 +524,8 @@ def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
     skips = []
     waits = []
     wakes = []
+    signals = []
+    condwaits = []
     aborts = []
     slices = Counter()
     slice_pcs = Counter()
@@ -555,6 +580,23 @@ def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
                     "wait": item.group("wait") if item else None,
                 }
             )
+        elif action in ("signal", "condwait"):
+            values = dict(re.findall(r"([a-z_]+)=(\S+)", rest))
+            row = {
+                "raw": rest,
+                "id": int(values["id"]) if values.get("id", "").isdigit() else None,
+                "name": values.get("name"),
+                "pc": values.get("pc"),
+                "cond": values.get("cond"),
+                "mutex": values.get("mutex"),
+                "timeout": values.get("timeout"),
+                "waiters_before": (
+                    int(values["waiters_before"])
+                    if values.get("waiters_before", "").isdigit()
+                    else None
+                ),
+            }
+            (signals if action == "signal" else condwaits).append(row)
         elif action == "abort":
             aborts.append({"raw": rest})
     return (
@@ -565,6 +607,8 @@ def parse_thread_log(args) -> tuple[dict, pathlib.Path]:
             "skips": skips,
             "waits": waits,
             "wakes": wakes,
+            "signals": signals,
+            "condwaits": condwaits,
             "aborts": aborts,
             "slices": slices,
             "slice_pcs": slice_pcs,
@@ -598,6 +642,14 @@ def print_thread_summary(args) -> int:
     wakes = Counter(
         (row.get("cond"), row.get("mutex"), row.get("wait")) for row in data["wakes"]
     )
+    signals = Counter(
+        (row.get("name"), row.get("cond"), row.get("waiters_before"))
+        for row in data["signals"]
+    )
+    condwaits = Counter(
+        (row.get("name"), row.get("cond"), row.get("mutex"))
+        for row in data["condwaits"]
+    )
     print("thread-created-starts:")
     for (start, library, entry_lib), count in created.most_common(args.limit):
         print(f"  count={count} start={start} library={library} entry_lib={entry_lib}")
@@ -610,6 +662,14 @@ def print_thread_summary(args) -> int:
     print("thread-wakes:")
     for (cond, mutex, wait), count in wakes.most_common(args.limit):
         print(f"  count={count} cond={cond} mutex={mutex} wait={wait}")
+    print("thread-cond-signals:")
+    for (name, cond, waiters_before), count in signals.most_common(args.limit):
+        print(
+            f"  count={count} name={name} cond={cond} waiters_before={waiters_before}"
+        )
+    print("thread-cond-waits:")
+    for (name, cond, mutex), count in condwaits.most_common(args.limit):
+        print(f"  count={count} name={name} cond={cond} mutex={mutex}")
     if args.slice_pcs:
         print("thread-slice-pcs:")
         for (thread, pc, isa), count in data["slice_pcs"].most_common(args.limit):
@@ -661,6 +721,156 @@ def little_int(raw: bytes, words: int) -> int:
 
 def little_hex(value: int, words: int) -> str:
     return value.to_bytes(words * 4, "little").hex()
+
+
+RESOURCE_WORK_EVENT = "ResourcePackManager::preloadTextures.work-load-texture.entry"
+RESOURCE_DONE_ENTRY_EVENT = "ResourcePackManager::preloadTextures.done-callback.entry"
+RESOURCE_DONE_LOAD_EVENT = "ResourcePackManager::preloadTextures.done-callback.load-count"
+RESOURCE_DONE_CHECK_EVENT = "ResourcePackManager::preloadTextures.done-callback.check-count"
+RESOURCE_DONE_FINAL_LOAD_EVENT = (
+    "ResourcePackManager::preloadTextures.done-callback.final-callback-load"
+)
+RESOURCE_DONE_FINAL_CALL_EVENT = (
+    "ResourcePackManager::preloadTextures.done-callback.final-callback-call"
+)
+MCPE_ON_RESOURCES_LOADED_EVENT = "MinecraftClient::onResourcesLoaded.entry"
+MCPE_ON_RESOURCES_LOADED_STORE_EVENT = "MinecraftClient::onResourcesLoaded.store-23e"
+MCPE_RENDER_RESOURCE_GATE_EVENT = "GameRenderer::render.resource-ready-gate"
+
+
+def resource_progress_summary(native_events: list[dict], gles_events: list[dict]) -> dict:
+    event_counts = Counter(row.get("event") for row in native_events)
+    gles_counts = Counter(row.get("kind") for row in gles_events)
+    rows_by_event = {}
+    for row in native_events:
+        event = row.get("event")
+        if isinstance(event, str):
+            rows_by_event.setdefault(event, []).append(row)
+    gate_rows = [
+        row for row in native_events if row.get("event") == MCPE_RENDER_RESOURCE_GATE_EVENT
+    ]
+    last_gate = gate_rows[-1] if gate_rows else None
+    gate_bytes = byte_sample(last_gate, "r7+0x238") if last_gate else None
+    ready_byte = gate_bytes[6] if gate_bytes is not None and len(gate_bytes) > 6 else None
+    done_load_values = [
+        value
+        for row in native_events
+        if row.get("event") == RESOURCE_DONE_LOAD_EVENT
+        for value in [mem32_field_value(row, "r0", "r0+0x0")]
+        if value is not None
+    ]
+    done_check_values = [
+        value
+        for row in native_events
+        if row.get("event") == RESOURCE_DONE_CHECK_EVENT
+        for value in [mem32_field_value(row, "r4", "r4+0x60")]
+        if value is not None
+    ]
+    return {
+        "event_counts": event_counts,
+        "gles_counts": gles_counts,
+        "gate_count": len(gate_rows),
+        "last_gate": last_gate,
+        "last_work": (rows_by_event.get(RESOURCE_WORK_EVENT) or [None])[-1],
+        "last_done_entry": (rows_by_event.get(RESOURCE_DONE_ENTRY_EVENT) or [None])[-1],
+        "last_done_check": (rows_by_event.get(RESOURCE_DONE_CHECK_EVENT) or [None])[-1],
+        "last_done_final_call": (rows_by_event.get(RESOURCE_DONE_FINAL_CALL_EVENT) or [None])[-1],
+        "last_on_resources_loaded": (rows_by_event.get(MCPE_ON_RESOURCES_LOADED_EVENT) or [None])[
+            -1
+        ],
+        "gate_bytes": gate_bytes,
+        "ready_byte": ready_byte,
+        "work_load": event_counts.get(RESOURCE_WORK_EVENT, 0),
+        "done_entry": event_counts.get(RESOURCE_DONE_ENTRY_EVENT, 0),
+        "done_load": event_counts.get(RESOURCE_DONE_LOAD_EVENT, 0),
+        "done_check": event_counts.get(RESOURCE_DONE_CHECK_EVENT, 0),
+        "done_final_load": event_counts.get(RESOURCE_DONE_FINAL_LOAD_EVENT, 0),
+        "done_final_call": event_counts.get(RESOURCE_DONE_FINAL_CALL_EVENT, 0),
+        "on_resources_loaded": event_counts.get(MCPE_ON_RESOURCES_LOADED_EVENT, 0),
+        "on_resources_loaded_store": event_counts.get(MCPE_ON_RESOURCES_LOADED_STORE_EVENT, 0),
+        "done_load_first": done_load_values[0] if done_load_values else None,
+        "done_load_last": done_load_values[-1] if done_load_values else None,
+        "done_load_min": min(done_load_values) if done_load_values else None,
+        "done_check_first": done_check_values[0] if done_check_values else None,
+        "done_check_last": done_check_values[-1] if done_check_values else None,
+        "done_check_min": min(done_check_values) if done_check_values else None,
+        "gles_swaps": gles_counts.get("SwapBuffers", 0),
+        "gles_draws": gles_counts.get("DrawArrays", 0) + gles_counts.get("DrawElements", 0),
+    }
+
+
+def format_resource_position(row: dict | None) -> str:
+    if not row:
+        return "none"
+    return (
+        f"step={row.get('step')}"
+        f"/gles_next={row.get('gles_next_event_index')}"
+        f"/thread={row.get('thread')}"
+    )
+
+
+def print_resource_progress(args) -> int:
+    native_events, native_path = load_native_events(args)
+    gles_events, gles_path = load_gles_events(args)
+    summary = resource_progress_summary(native_events, gles_events)
+    event_counts = summary["event_counts"]
+    gles_counts = summary["gles_counts"]
+    print(
+        f"resource-progress: native_events={native_path} rows={len(native_events)} "
+        f"gles_events={gles_path} rows={len(gles_events)}"
+    )
+    print(
+        "resource-events: "
+        f"work_load={summary['work_load']} "
+        f"done_entry={summary['done_entry']} "
+        f"done_load={summary['done_load']} "
+        f"done_check={summary['done_check']} "
+        f"done_final_load={summary['done_final_load']} "
+        f"done_final_call={summary['done_final_call']} "
+        f"onResourcesLoaded={summary['on_resources_loaded']} "
+        f"onResourcesLoadedStore={summary['on_resources_loaded_store']}"
+    )
+    print(
+        "resource-done-counter: "
+        f"load_first={summary['done_load_first']} "
+        f"load_last={summary['done_load_last']} "
+        f"load_min={summary['done_load_min']} "
+        f"check_first={summary['done_check_first']} "
+        f"check_last={summary['done_check_last']} "
+        f"check_min={summary['done_check_min']}"
+    )
+    last_gate = summary["last_gate"]
+    if last_gate:
+        gate_bytes = summary["gate_bytes"]
+        gate_hex = gate_bytes.hex() if gate_bytes is not None else "none"
+        print(
+            "resource-gate: "
+            f"count={summary['gate_count']} "
+            f"last_step={last_gate.get('step')} "
+            f"gles_next={last_gate.get('gles_next_event_index')} "
+            f"client_23c={mem32_field_value(last_gate, 'r7', 'r7+0x23c')} "
+            f"ready_byte_23e={summary['ready_byte']} "
+            f"bytes_238={gate_hex}"
+        )
+    else:
+        print("resource-gate: count=0")
+    print(
+        "resource-last: "
+        f"work={format_resource_position(summary['last_work'])} "
+        f"done_entry={format_resource_position(summary['last_done_entry'])} "
+        f"done_check={format_resource_position(summary['last_done_check'])} "
+        f"final_call={format_resource_position(summary['last_done_final_call'])} "
+        f"onResourcesLoaded={format_resource_position(summary['last_on_resources_loaded'])}"
+    )
+    print(
+        "resource-gles: "
+        + (", ".join(f"{kind}:{count}" for kind, count in gles_counts.most_common()) or "none")
+        + f" swaps={summary['gles_swaps']} draws={summary['gles_draws']}"
+    )
+    print("resource-native-events:")
+    for event, count in event_counts.most_common(args.limit):
+        print(f"  count={count} event={event}")
+    return 0
 
 
 def bn_mont_pairs(events: list[dict]) -> list[tuple[dict, dict]]:
@@ -2297,7 +2507,9 @@ def run_self_test() -> None:
                 "\n".join(
                     [
                         "THREAD create id=7 start=0x703911f9 arg=0x60048b40 entry=0x08580844 entry_lib=<unknown> sp=0x6c040000",
+                        "THREAD condwait id=7 name=pthread_cond_wait pc=0x6f000000 cond=0x60049040 mutex=0x6004903c timeout=0x00000000",
                         "THREAD wait id=7 Condvar { cond: 1610911808, mutex: 1610911804 }",
+                        "THREAD signal id=1 name=pthread_cond_signal pc=0x6f000004 cond=0x60049040 waiters_before=1",
                         "THREAD wake id=7 cond=0x60049040 mutex=0x6004903c wait=Runnable",
                         "THREAD skip id=13 start=0x715cde85 arg=0x71bfa0c8 library=libminecraftpe.so",
                         "THREAD slice id=7 done=false pc=0x70f7c722 Thumb r0=0x00000000",
@@ -2310,9 +2522,13 @@ def run_self_test() -> None:
         assert thread_data["actions"]["create"] == 1
         assert thread_data["actions"]["skip"] == 1
         assert thread_data["actions"]["wait"] == 1
+        assert thread_data["actions"]["condwait"] == 1
+        assert thread_data["actions"]["signal"] == 1
         assert thread_data["actions"]["wake"] == 1
         assert thread_data["actions"]["slice"] == 1
         assert thread_data["skips"][0]["library"] == "libminecraftpe.so"
+        assert thread_data["signals"][0]["waiters_before"] == 1
+        assert thread_data["condwaits"][0]["name"] == "pthread_cond_wait"
         (root / "native_events.jsonl").write_text(
             json.dumps(
                 {
@@ -3016,6 +3232,100 @@ def run_self_test() -> None:
             limit=4,
         )
         assert mcpe_text_texture_size_gates(native_args) == ((128, 128), (64, 32))
+        (root / "native_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "step": 10,
+                            "event": RESOURCE_WORK_EVENT,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 15,
+                            "event": RESOURCE_DONE_LOAD_EVENT,
+                            "mem32": [
+                                {
+                                    "base": "r0",
+                                    "fields": [
+                                        {"label": "r0+0x0", "value": 7},
+                                    ],
+                                }
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 16,
+                            "event": RESOURCE_DONE_CHECK_EVENT,
+                            "mem32": [
+                                {
+                                    "base": "r4",
+                                    "fields": [
+                                        {"label": "r4+0x60", "value": 7},
+                                    ],
+                                }
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "step": 20,
+                            "event": MCPE_RENDER_RESOURCE_GATE_EVENT,
+                            "gles_next_event_index": 4,
+                            "mem32": [
+                                {
+                                    "base": "r7",
+                                    "fields": [
+                                        {"label": "r7+0x23c", "value": 1},
+                                    ],
+                                }
+                            ],
+                            "byte_samples": [
+                                {
+                                    "source": "r7+0x238@0x60048600",
+                                    "hex": "0000000001000000e886046000000000",
+                                }
+                            ],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        (root / "gles_events.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"index": 4, "kind": "SwapBuffers"}, separators=(",", ":")),
+                    json.dumps({"index": 5, "kind": "DrawElements"}, separators=(",", ":")),
+                ]
+            )
+            + "\n"
+        )
+        resource_args = argparse.Namespace(
+            trace_dir=str(root),
+            native_events=None,
+            gles_events=None,
+            limit=5,
+        )
+        resource_events, _ = load_native_events(resource_args)
+        resource_gles, _ = load_gles_events(resource_args)
+        resource_summary = resource_progress_summary(resource_events, resource_gles)
+        assert resource_summary["work_load"] == 1
+        assert resource_summary["done_load"] == 1
+        assert resource_summary["done_check"] == 1
+        assert resource_summary["done_load_last"] == 7
+        assert resource_summary["done_check_last"] == 7
+        assert resource_summary["gate_count"] == 1
+        assert resource_summary["ready_byte"] == 0
+        assert resource_summary["gles_swaps"] == 1
+        assert resource_summary["gles_draws"] == 1
+        assert print_resource_progress(resource_args) == 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3061,6 +3371,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     thread_summary.add_argument("--limit", type=int, default=12)
     thread_summary.add_argument("--slice-pcs", action="store_true")
+
+    resource_progress = subparsers.add_parser(
+        "resource-progress",
+        help="summarize MCPE resource preload, ready gate, and GLES draw progress",
+    )
+    resource_progress.add_argument("--limit", type=int, default=20)
 
     bn_mont = subparsers.add_parser(
         "bn-mont-check",
@@ -3167,6 +3483,8 @@ def main(argv=None) -> int:
         return print_pc_profile(args)
     if args.command == "thread-summary":
         return print_thread_summary(args)
+    if args.command == "resource-progress":
+        return print_resource_progress(args)
     if args.command == "bn-mont-check":
         return print_bn_mont_check(args)
     if args.command == "bn-mod-sqr-check":

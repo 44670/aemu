@@ -898,6 +898,24 @@ LIVE_FRAME_LIMIT_RE = re.compile(
     r"events=(?P<events>\d+) "
     r"payload=(?P<payload>\d+)"
 )
+LIVE_DRAW_ELEMENTS_LIMIT_RE = re.compile(
+    r"^sdl2-live: reached draw-elements limit "
+    r"draw_elements=(?P<draw_elements>\d+) "
+    r"frames=(?P<frames>\d+) "
+    r"events=(?P<events>\d+) "
+    r"payload=(?P<payload>\d+)"
+    r"(?: readback=(?P<readback_width>\d+)x(?P<readback_height>\d+) "
+    r"rgb=(?P<readback_rgb>\d+) "
+    r"alpha=(?P<readback_alpha>\d+) "
+    r"gl_errors=(?P<gl_errors>\d+))?"
+)
+LIVE_STOP_SCREENSHOT_RE = re.compile(
+    r"^sdl2-live: stop screenshot "
+    r"path=(?P<path>.+?) "
+    r"width=(?P<width>\d+) "
+    r"height=(?P<height>\d+) "
+    r"bytes=(?P<bytes>\d+)"
+)
 
 
 STAGE_MARKERS = [
@@ -910,6 +928,7 @@ STAGE_MARKERS = [
     ("first_swap", "native activity reached eglSwapBuffers"),
     ("completed", "native activity launch returned"),
     ("completed", "sdl2-live: reached frame limit"),
+    ("completed", "sdl2-live: reached draw-elements limit"),
 ]
 
 
@@ -1088,6 +1107,8 @@ def parse_run_log(run_log: str):
     recent = []
     live_frames = []
     frame_limit = None
+    draw_elements_limit = None
+    stop_screenshot = None
     for line in run_log.splitlines():
         match = RECENT_PC_RE.match(line)
         if match:
@@ -1107,6 +1128,23 @@ def parse_run_log(run_log: str):
         match = LIVE_FRAME_LIMIT_RE.match(line)
         if match:
             frame_limit = {key: int(value) for key, value in match.groupdict().items()}
+            continue
+        match = LIVE_DRAW_ELEMENTS_LIMIT_RE.match(line)
+        if match:
+            draw_elements_limit = {
+                key: int(value)
+                for key, value in match.groupdict().items()
+                if value is not None
+            }
+            continue
+        match = LIVE_STOP_SCREENSHOT_RE.match(line)
+        if match:
+            stop_screenshot = {
+                "path": match.group("path"),
+                "width": int(match.group("width")),
+                "height": int(match.group("height")),
+                "bytes": int(match.group("bytes")),
+            }
 
     live = {
         "logged_frame_count": len(live_frames),
@@ -1121,6 +1159,8 @@ def parse_run_log(run_log: str):
         "max_logged_gl_errors": max((frame["gl_errors"] for frame in live_frames), default=0),
         "last_logged_frame": live_frames[-1] if live_frames else None,
         "frame_limit": frame_limit,
+        "draw_elements_limit": draw_elements_limit,
+        "stop_screenshot": stop_screenshot,
     }
 
     return {
@@ -1280,6 +1320,7 @@ def collect_artifacts(trace_dir: pathlib.Path):
     gles_path = trace_dir / "gles_events.jsonl"
     native_events_path = trace_dir / "native_events.jsonl"
     pc_profile_path = trace_dir / "pc_profile.jsonl"
+    stop_screenshot_path = trace_dir / "stop.png"
     gles = summarize_gles_events(gles_path)
     pc_profile = summarize_pc_profile(pc_profile_path)
     kind_counts = gles["kind_counts"]
@@ -1303,6 +1344,11 @@ def collect_artifacts(trace_dir: pathlib.Path):
         "sdl_draw_dir": str(draw_dir),
         "sdl_draw_png_count": len(list(draw_dir.glob("*.png"))) if draw_dir.exists() else 0,
         "sdl_draw_manifest_count": count_jsonl(draw_dir / "draw_manifest.jsonl"),
+        "stop_screenshot_png": str(stop_screenshot_path),
+        "stop_screenshot_exists": stop_screenshot_path.exists(),
+        "stop_screenshot_bytes": (
+            stop_screenshot_path.stat().st_size if stop_screenshot_path.exists() else 0
+        ),
     }
 
 
@@ -1446,6 +1492,24 @@ def print_summary(summary, expectation_errors):
             f"max_rgb={live.get('max_logged_readback_rgb')} "
             f"max_gl_errors={live.get('max_logged_gl_errors')}"
         )
+    if live.get("draw_elements_limit"):
+        draw_limit = live["draw_elements_limit"]
+        print(
+            "live_stop: "
+            f"draw_elements={draw_limit.get('draw_elements')} "
+            f"frames={draw_limit.get('frames')} "
+            f"events={draw_limit.get('events')} "
+            f"payload={draw_limit.get('payload')} "
+            f"rgb={draw_limit.get('readback_rgb')}"
+        )
+    if live.get("stop_screenshot"):
+        screenshot = live["stop_screenshot"]
+        print(
+            "stop_screenshot: "
+            f"path={screenshot.get('path')} "
+            f"size={screenshot.get('width')}x{screenshot.get('height')} "
+            f"bytes={screenshot.get('bytes')}"
+        )
     if crash:
         print(
             "crash: "
@@ -1526,6 +1590,11 @@ def build_arg_parser():
     parser.add_argument("--display", default=":0")
     parser.add_argument("--gles-event-limit", type=int, default=50000)
     parser.add_argument("--draw-dump-limit", type=int, default=10)
+    parser.add_argument(
+        "--stop-after-gles-draw-elements",
+        type=int,
+        help="stop SDL2 live execution once replayed DrawElements reaches this count",
+    )
     parser.add_argument(
         "--fake-time-step-nanos",
         type=int,
@@ -1721,6 +1790,15 @@ def main(argv=None):
         "--sdl2-frames",
         str(args.frames),
     ]
+    if args.stop_after_gles_draw_elements is not None:
+        cmd.extend(
+            [
+                "--sdl2-stop-after-draw-elements",
+                str(args.stop_after_gles_draw_elements),
+                "--sdl2-stop-screenshot",
+                str(trace_dir / "stop.png"),
+            ]
+        )
     run = run_capture(cmd, env=env, timeout=args.timeout, log_path=run_log_path)
     if args.echo_log and run["output"]:
         print(run["output"], end="")
