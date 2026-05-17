@@ -490,13 +490,17 @@ def validate_summary(args, summary):
         )
 
     run_log = None
-    if args.expect_run_log_contains or args.expect_hle_call:
+    if args.expect_run_log_contains or args.reject_run_log_contains or args.expect_hle_call:
         run_log_path = pathlib.Path(summary["process"]["run_log"])
         run_log = run_log_path.read_text(encoding="utf-8", errors="replace")
     if args.expect_run_log_contains:
         for expected in args.expect_run_log_contains:
             if expected not in run_log:
                 errors.append(f"expected run log to contain {expected!r}")
+    if args.reject_run_log_contains:
+        for rejected in args.reject_run_log_contains:
+            if rejected in run_log:
+                errors.append(f"expected run log to not contain {rejected!r}")
     if args.expect_hle_call:
         for expected in args.expect_hle_call:
             if f"name={expected}" not in run_log:
@@ -623,6 +627,11 @@ def build_arg_parser():
         "--expect-run-log-contains",
         action="append",
         help="require run.log to contain this exact substring",
+    )
+    parser.add_argument(
+        "--reject-run-log-contains",
+        action="append",
+        help="fail if run.log contains this exact substring",
     )
     parser.add_argument(
         "--expect-hle-call",
