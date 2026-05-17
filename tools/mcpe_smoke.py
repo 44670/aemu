@@ -1430,15 +1430,34 @@ def validate_expectations(args, summary):
             f"expected at least {args.min_sdl_draw_pngs} SDL draw PNGs, "
             f"got {artifacts['sdl_draw_png_count']}"
         )
-    if args.min_readback_rgb and live.get("max_logged_readback_rgb", 0) < args.min_readback_rgb:
+    live_stop = live.get("draw_elements_limit") or {}
+    max_readback_rgb = max(
+        live.get("max_logged_readback_rgb", 0) or 0,
+        live_stop.get("readback_rgb", 0) or 0,
+    )
+    max_gl_errors = max(
+        live.get("max_logged_gl_errors", 0) or 0,
+        live_stop.get("gl_errors", 0) or 0,
+    )
+    if args.min_readback_rgb and max_readback_rgb < args.min_readback_rgb:
         errors.append(
-            f"expected logged readback rgb >= {args.min_readback_rgb}, "
-            f"got {live.get('max_logged_readback_rgb', 0)}"
+            f"expected readback rgb >= {args.min_readback_rgb}, "
+            f"got {max_readback_rgb}"
         )
-    if args.max_gl_errors is not None and live.get("max_logged_gl_errors", 0) > args.max_gl_errors:
+    if args.max_gl_errors is not None and max_gl_errors > args.max_gl_errors:
         errors.append(
-            f"expected logged GL errors <= {args.max_gl_errors}, "
-            f"got {live.get('max_logged_gl_errors', 0)}"
+            f"expected GL errors <= {args.max_gl_errors}, "
+            f"got {max_gl_errors}"
+        )
+    if args.require_stop_screenshot and not artifacts["stop_screenshot_exists"]:
+        errors.append("expected stop screenshot artifact")
+    if (
+        args.min_stop_screenshot_bytes
+        and artifacts["stop_screenshot_bytes"] < args.min_stop_screenshot_bytes
+    ):
+        errors.append(
+            f"expected stop screenshot >= {args.min_stop_screenshot_bytes} bytes, "
+            f"got {artifacts['stop_screenshot_bytes']}"
         )
     if args.min_pc_profile_samples and artifacts["pc_profile_samples"] < args.min_pc_profile_samples:
         errors.append(
@@ -1461,6 +1480,8 @@ def has_expectation_gates(args) -> bool:
         or args.min_gles_draw_elements
         or args.min_sdl_draw_pngs
         or args.min_readback_rgb
+        or args.require_stop_screenshot
+        or args.min_stop_screenshot_bytes
         or args.min_pc_profile_samples
         or args.max_gl_errors is not None
     )
@@ -1706,6 +1727,12 @@ def build_arg_parser():
     parser.add_argument("--min-gles-draw-elements", type=int, default=0)
     parser.add_argument("--min-sdl-draw-pngs", type=int, default=0)
     parser.add_argument("--min-readback-rgb", type=int, default=0)
+    parser.add_argument(
+        "--require-stop-screenshot",
+        action="store_true",
+        help="require the draw-stop screenshot artifact written by --stop-after-gles-draw-elements",
+    )
+    parser.add_argument("--min-stop-screenshot-bytes", type=int, default=0)
     parser.add_argument("--min-pc-profile-samples", type=int, default=0)
     parser.add_argument("--max-gl-errors", type=int)
     parser.add_argument("--echo-log", action="store_true")

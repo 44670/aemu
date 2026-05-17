@@ -163,6 +163,16 @@ Follow-up profiler/scheduler evidence on 2026-05-17:
   Future `mcpe_smoke.py` runs with this stop condition also pass
   `--sdl2-stop-screenshot <trace-dir>/stop.png`, so the draw milestone leaves
   a PNG framebuffer artifact under `./tmp/`.
+- `tmp/mcpe-stop-after-draw-shot-20260517` validates that screenshot path and
+  the visible-readback gate. The run exits 0 after 501.771s with
+  `--fake-time-step-nanos 100000 --guest-thread-swap-slices 256 --frames 260
+  --stop-after-gles-draw-elements 1`. It reaches the draw stop at frame 61
+  with 721 `DrawElements`, first draw event index `14276`, stop readback
+  `854x480 rgb=35348 alpha=409920 gl_errors=0`, and writes
+  `tmp/mcpe-stop-after-draw-shot-20260517/stop.png` as an 854x480 RGB PNG
+  (63,017 bytes). `tools/mcpe_smoke.py` now lets future milestone scripts gate
+  this directly with `--min-readback-rgb`, `--require-stop-screenshot`, and
+  `--min-stop-screenshot-bytes`.
 
 Local files rechecked on 2026-05-13:
 
@@ -358,6 +368,12 @@ zero host GL errors.
   logged live frames are still black/no-draw through frame 180, and drawing
   begins later in the GLES stream. This confirms default 64-slice scheduling can
   eventually reach native rendering but is too slow for a reliable long smoke.
+- `tools/mcpe_smoke.py --trace-dir tmp/mcpe-stop-after-draw-shot-20260517
+  --frames 260 --timeout 560 --fake-time-step-nanos 100000
+  --guest-thread-swap-slices 256 --stop-after-gles-draw-elements 1
+  --min-gles-draw-elements 1 --expect-stage completed --expect-exit zero`
+  exits 0, records 61 swaps, 721 `DrawElements`, stop readback
+  `rgb=35348`, and writes `stop.png` as an 854x480 RGB PNG.
 - `tools/mcpe_ui_smoke.py --out-dir tmp --trace-hle AInput,AMotion
   --trace-hle-limit 80 --min-gles-events 1 --expect-hle-call
   AInputQueue_getEvent --expect-hle-call AMotionEvent_getX --expect-hle-call
