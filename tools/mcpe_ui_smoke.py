@@ -342,6 +342,8 @@ def apply_trace_env(args, out_dir, env):
     env["AEMU_TRACE_GLES_EVENTS_JSONL"] = str(out_dir / "gles_events.jsonl")
     env["AEMU_TRACE_GLES_EVENTS_MATCH"] = args.gles_event_match
     env["AEMU_TRACE_GLES_EVENTS_LIMIT"] = str(args.gles_event_limit)
+    if args.gles_event_skip is not None:
+        env["AEMU_TRACE_GLES_EVENTS_SKIP"] = str(args.gles_event_skip)
     if args.fake_time_step_nanos is not None:
         env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
     if args.fake_time_step_after_draw_nanos is not None:
@@ -381,6 +383,10 @@ def apply_trace_env(args, out_dir, env):
         env["AEMU_DUMP_SDL_DRAW_CHANGES_MATCH"] = args.sdl_draw_match
         env["AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT"] = str(args.sdl_draw_limit)
         env["AEMU_TRACE_SDL_DRAW_CHANGES"] = str(args.sdl_draw_limit)
+        if args.sdl_draw_skip is not None:
+            env["AEMU_TRACE_SDL_DRAW_CHANGES_SKIP"] = str(args.sdl_draw_skip)
+        if args.sdl_draw_all:
+            env["AEMU_TRACE_SDL_DRAW_CHANGES_ALL"] = "1"
 
 
 def summarize_env(env):
@@ -390,6 +396,7 @@ def summarize_env(env):
         "AEMU_TRACE_GLES_EVENTS_JSONL",
         "AEMU_TRACE_GLES_EVENTS_MATCH",
         "AEMU_TRACE_GLES_EVENTS_LIMIT",
+        "AEMU_TRACE_GLES_EVENTS_SKIP",
         "AEMU_FAKE_TIME_STEP_NANOS",
         "AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS",
         "AEMU_GUEST_THREAD_SWAP_SLICES",
@@ -414,6 +421,8 @@ def summarize_env(env):
         "AEMU_DUMP_SDL_DRAW_CHANGES_MATCH",
         "AEMU_DUMP_SDL_DRAW_CHANGES_LIMIT",
         "AEMU_TRACE_SDL_DRAW_CHANGES",
+        "AEMU_TRACE_SDL_DRAW_CHANGES_SKIP",
+        "AEMU_TRACE_SDL_DRAW_CHANGES_ALL",
     ]
     return {key: env.get(key) for key in keys if env.get(key) is not None}
 
@@ -827,6 +836,11 @@ def build_arg_parser():
     )
     parser.add_argument("--gles-event-match", default="SwapBuffers,UseProgram,BindTexture,DrawElements")
     parser.add_argument("--gles-event-limit", type=int, default=50000)
+    parser.add_argument(
+        "--gles-event-skip",
+        type=int,
+        help="skip GLES events before this global event index before applying match/limit",
+    )
     parser.add_argument("--trace-hle", help="set AEMU_TRACE_HLE filter")
     parser.add_argument("--trace-hle-limit", type=int)
     parser.add_argument("--trace-hle-file", action="store_true")
@@ -848,6 +862,16 @@ def build_arg_parser():
     parser.add_argument("--dump-sdl-draws", action="store_true")
     parser.add_argument("--sdl-draw-match", default="all")
     parser.add_argument("--sdl-draw-limit", type=int, default=50)
+    parser.add_argument(
+        "--sdl-draw-skip",
+        type=int,
+        help="skip this many cumulative SDL draw submissions before tracing draw changes",
+    )
+    parser.add_argument(
+        "--sdl-draw-all",
+        action="store_true",
+        help="trace unchanged default-framebuffer draws as well as changed draws",
+    )
     parser.add_argument(
         "--expect-screenshot-change",
         action="store_true",

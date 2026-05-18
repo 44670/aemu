@@ -498,12 +498,22 @@ def validate_draw_program_gates(
     manifest: list[dict],
     manifest_path: pathlib.Path,
     expect_programs: list[int],
+    require_changed_programs: list[int],
     require_sizes: list[tuple[int, int, int]],
     reject_sizes: list[tuple[int, int, int]],
 ) -> None:
     for program in expect_programs:
         if not any(row.get("program") == program for row in manifest):
             raise TraceError(f"{manifest_path}: no draw manifest rows for program{program}")
+
+    for program in require_changed_programs:
+        rows = [row for row in manifest if row.get("program") == program]
+        if not rows:
+            raise TraceError(f"{manifest_path}: no draw manifest rows for program{program}")
+        if not any((row.get("changed_pixels") or 0) > 0 for row in rows):
+            raise TraceError(
+                f"{manifest_path}: program{program} has no rows with changed_pixels > 0"
+            )
 
     for program, width, height in require_sizes:
         rows = [row for row in manifest if row.get("program") == program]
@@ -674,19 +684,28 @@ def run_check(args) -> dict:
     if args.screenshot:
         screenshot = validate_screenshot(pathlib.Path(args.screenshot), args.min_screenshot_nonzero_rgb)
     draw_dir = pathlib.Path(args.draw_dir) if args.draw_dir else root / "sdl-draw"
-    draws = load_draws(draw_dir, args.min_draw_nonzero_rgb)
-    if len(draws) < args.expect_draws:
-        raise TraceError(
-            f"{draw_dir}: found {len(draws)} draw PNGs, expected at least {args.expect_draws}"
-        )
     draw_manifest_path = draw_dir / "draw_manifest.jsonl"
     draw_manifest = read_manifest(draw_manifest_path)
+    if args.skip_draw_pngs:
+        draws = []
+        if len(draw_manifest) < args.expect_draws:
+            raise TraceError(
+                f"{draw_manifest_path}: found {len(draw_manifest)} draw manifest rows, "
+                f"expected at least {args.expect_draws}"
+            )
+    else:
+        draws = load_draws(draw_dir, args.min_draw_nonzero_rgb)
+        if len(draws) < args.expect_draws:
+            raise TraceError(
+                f"{draw_dir}: found {len(draws)} draw PNGs, expected at least {args.expect_draws}"
+            )
     if draws:
         if not draw_manifest:
             raise TraceError(f"{draw_manifest_path}: missing draw manifest")
         validate_draw_manifest(draws, draw_manifest, draw_manifest_path)
     draw_gate_enabled = (
         args.expect_draw_program
+        or args.require_draw_program_change
         or args.require_draw_texture_size
         or args.reject_draw_texture_size
     )
@@ -697,6 +716,7 @@ def run_check(args) -> dict:
             draw_manifest,
             draw_manifest_path,
             args.expect_draw_program,
+            args.require_draw_program_change,
             args.require_draw_texture_size,
             args.reject_draw_texture_size,
         )
@@ -837,7 +857,9 @@ def run_self_test() -> None:
             screenshot=None,
             min_screenshot_nonzero_rgb=1,
             detail_limit=3,
+            skip_draw_pngs=False,
             expect_draw_program=[86],
+            require_draw_program_change=[86],
             require_draw_texture_size=[],
             reject_draw_texture_size=[],
         )
@@ -868,6 +890,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="require at least one draw manifest row with this GL program id",
     )
     parser.add_argument(
+        "--require-draw-program-change",
+        type=lambda raw: int(raw, 0),
+        action="append",
+        default=[],
+        help="require at least one draw manifest row for this GL program id with changed_pixels > 0",
+    )
+    parser.add_argument(
         "--require-draw-texture-size",
         type=parse_program_size,
         action="append",
@@ -887,6 +916,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-draw-nonzero-rgb", type=int, default=1)
     parser.add_argument("--min-screenshot-nonzero-rgb", type=int, default=1)
     parser.add_argument("--detail-limit", type=int, default=5)
+    parser.add_argument(
+        "--skip-draw-pngs",
+        action="store_true",
+        help="validate draw gates from draw_manifest.jsonl without decoding every draw PNG",
+    )
     parser.add_argument("--no-require-pairs", action="store_true")
     parser.add_argument("--no-compare-raw", action="store_true")
     parser.add_argument("--json", action="store_true", help="print full JSON summary")
@@ -916,7 +950,7 @@ def main(argv=None) -> int:
             "trace_check ok: "
             f"hle={summary['hle_uploads']} sdl={summary['sdl_uploads']} "
             f"manifest={summary['manifest_rows']} pairs={summary['paired_uploads']} "
-            f"draws={summary['draws']}"
+            f"draws={summary['draws']} draw_manifest={summary['draw_manifest_rows']}"
         )
         if summary["screenshot"]:
             shot = summary["screenshot"]

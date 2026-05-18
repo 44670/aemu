@@ -252,6 +252,7 @@ struct SdlGlesReplay {
     texture_upload_dump_index: usize,
     enabled_caps: HashMap<u32, bool>,
     blend_func: (u32, u32, u32, u32),
+    cull_face_mode: u32,
     depth_func: u32,
     depth_mask: bool,
     color_mask: (bool, bool, bool, bool),
@@ -391,6 +392,7 @@ impl SdlDrawChangeTrace {
             .previous_default_framebuffer
             .as_deref()
             .map_or((0, 0), |previous| framebuffer_delta(previous, &pixels));
+        let metadata = host.draw_dump_metadata(event, &details);
         let should_record = changed_pixels != 0 || self.include_unchanged;
         let should_dump = should_record
             && self.dumped < self.dump_limit
@@ -422,6 +424,7 @@ impl SdlDrawChangeTrace {
                 width,
                 height,
                 texture_info,
+                metadata,
                 &pixels,
             )?;
         }
@@ -459,6 +462,7 @@ impl SdlDrawChangeTrace {
         width: u32,
         height: u32,
         texture_info: Option<ReplayTextureInfo>,
+        metadata: serde_json::Value,
         rgba: &[u8],
     ) -> HostResult<()> {
         let Some(dir) = self.dump_dir.as_deref() else {
@@ -496,6 +500,7 @@ impl SdlDrawChangeTrace {
             width,
             height,
             texture_info,
+            metadata,
         )?;
         self.dumped += 1;
         Ok(())
@@ -547,6 +552,7 @@ fn append_draw_dump_manifest(
     width: u32,
     height: u32,
     texture_info: Option<ReplayTextureInfo>,
+    metadata: serde_json::Value,
 ) -> HostResult<()> {
     use std::io::Write;
 
@@ -565,6 +571,7 @@ fn append_draw_dump_manifest(
         "width": width,
         "height": height,
         "png": png_path.file_name().and_then(|name| name.to_str()).unwrap_or(""),
+        "draw_trace": metadata,
     });
     if let Some(info) = texture_info {
         row["texture_width"] = serde_json::json!(info.width);
@@ -616,6 +623,7 @@ impl Sdl2Host {
             active_texture: GL_TEXTURE0,
             viewport: (0, 0, config.width as i32, config.height as i32),
             blend_func: (GL_ONE, GL_ZERO, GL_ONE, GL_ZERO),
+            cull_face_mode: GL_BACK,
             depth_func: GL_LESS,
             depth_mask: true,
             color_mask: (true, true, true, true),
@@ -1186,9 +1194,12 @@ impl Sdl2Host {
                     (self.gl.stencil_mask)(*mask);
                 }
             }
-            GlesEvent::CullFace { mode } => unsafe {
-                (self.gl.cull_face)(*mode);
-            },
+            GlesEvent::CullFace { mode } => {
+                self.replay.cull_face_mode = *mode;
+                unsafe {
+                    (self.gl.cull_face)(*mode);
+                }
+            }
             GlesEvent::PolygonOffset { factor, units } => unsafe {
                 (self.gl.polygon_offset)(f32::from_bits(*factor), f32::from_bits(*units));
             },
@@ -1825,6 +1836,135 @@ impl Sdl2Host {
         )
     }
 
+    fn draw_dump_metadata(&self, event: &GlesEvent, details: &str) -> serde_json::Value {
+        let client_attribs = event_client_attribs(event);
+        let client_attrib_payloads = client_attribs
+            .iter()
+            .map(|payload| {
+                serde_json::json!({
+                    "index": payload.index,
+                    "payload_len": payload.payload.as_ref().map_or(0, Vec::len),
+                })
+            })
+            .collect::<Vec<_>>();
+        let client_attrib_payload_bytes = client_attribs
+            .iter()
+            .map(|payload| payload.payload.as_ref().map_or(0, Vec::len))
+            .sum::<usize>();
+
+        let mut enabled_attribs = self
+            .replay
+            .enabled_vertex_attribs
+            .iter()
+            .filter_map(|(index, enabled)| enabled.then_some(*index))
+            .collect::<Vec<_>>();
+        enabled_attribs.sort_unstable();
+        let enabled_attribs = enabled_attribs
+            .into_iter()
+            .map(|index| {
+                let attrib = self.replay.vertex_attribs.get(&index).copied();
+                let client_side = self
+                    .replay
+                    .client_side_vertex_attribs
+                    .get(&index)
+                    .copied()
+                    .unwrap_or(false);
+                let buffer_len = attrib
+                    .and_then(|attrib| self.replay.buffer_data.get(&attrib.buffer))
+                    .map_or(0, Vec::len);
+                serde_json::json!({
+                    "index": index,
+                    "size": attrib.map_or(0, |attrib| attrib.size),
+                    "type": attrib.map_or(0, |attrib| attrib.ty),
+                    "normalized": attrib.is_some_and(|attrib| attrib.normalized),
+                    "stride": attrib.map_or(0, |attrib| attrib.stride),
+                    "pointer": attrib.map_or(0, |attrib| attrib.pointer),
+                    "buffer": attrib.map_or(0, |attrib| attrib.buffer),
+                    "buffer_len": buffer_len,
+                    "client_side": client_side,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let (draw_mode, draw_count, first, index_type, indices, index_payload_len, index_source) =
+            match event {
+                GlesEvent::DrawArrays {
+                    mode, first, count, ..
+                } => (
+                    Some(*mode),
+                    Some(*count),
+                    Some(*first),
+                    None,
+                    None,
+                    0usize,
+                    "none",
+                ),
+                GlesEvent::DrawElements {
+                    mode,
+                    count,
+                    ty,
+                    indices,
+                    index_payload,
+                    ..
+                } => {
+                    let source = if self.replay.bound_element_array_buffer != 0 {
+                        "buffer"
+                    } else if index_payload.is_some() {
+                        "client"
+                    } else {
+                        "missing"
+                    };
+                    (
+                        Some(*mode),
+                        Some(*count),
+                        None,
+                        Some(*ty),
+                        Some(*indices),
+                        index_payload.as_ref().map_or(0, Vec::len),
+                        source,
+                    )
+                }
+                _ => (None, None, None, None, None, 0usize, "none"),
+            };
+        let (src_rgb, dst_rgb, src_alpha, dst_alpha) = self.replay.blend_func;
+        let (red, green, blue, alpha) = self.replay.color_mask;
+        let (sx, sy, sw, sh) = self.replay.scissor;
+
+        serde_json::json!({
+            "details": details,
+            "draw_mode": draw_mode,
+            "draw_count": draw_count,
+            "draw_first": first,
+            "index_type": index_type,
+            "indices": indices,
+            "index_payload_len": index_payload_len,
+            "index_source": index_source,
+            "array_buffer": self.replay.bound_array_buffer,
+            "element_array_buffer": self.replay.bound_element_array_buffer,
+            "element_array_buffer_len": self.replay.buffer_data
+                .get(&self.replay.bound_element_array_buffer)
+                .map_or(0, Vec::len),
+            "enabled_attribs": enabled_attribs,
+            "client_attrib_payloads": client_attrib_payloads,
+            "client_attrib_payload_count": client_attribs.len(),
+            "client_attrib_payload_bytes": client_attrib_payload_bytes,
+            "state": {
+                "blend_enabled": self.cap_enabled(GL_BLEND),
+                "blend_func": [src_rgb, dst_rgb, src_alpha, dst_alpha],
+                "depth_test_enabled": self.cap_enabled(GL_DEPTH_TEST),
+                "depth_func": self.replay.depth_func,
+                "depth_mask": self.replay.depth_mask,
+                "cull_face_enabled": self.cap_enabled(GL_CULL_FACE),
+                "cull_face_mode": self.replay.cull_face_mode,
+                "scissor_test_enabled": self.cap_enabled(GL_SCISSOR_TEST),
+                "scissor": [sx, sy, sw, sh],
+                "color_mask": [red, green, blue, alpha],
+                "stencil_test_enabled": self.cap_enabled(GL_STENCIL_TEST),
+                "stencil_mask": self.replay.stencil_mask,
+            }
+        })
+    }
+
     fn describe_current_program(&self) -> String {
         let Some(program) = self.replay.programs.get(&self.replay.current_program) else {
             return "none".to_string();
@@ -1873,7 +2013,8 @@ impl Sdl2Host {
         let (front_sfail, front_dpfail, front_dppass) = self.replay.stencil_front_op;
         let (back_sfail, back_dpfail, back_dppass) = self.replay.stencil_back_op;
         format!(
-            "caps={caps} blend=0x{src_rgb:04x}/0x{dst_rgb:04x}/0x{src_alpha:04x}/0x{dst_alpha:04x} depth_func=0x{:04x} depth_mask={} color_mask={}{}{}{} scissor={sx},{sy},{sw},{sh} stencil_front=0x{front_func:04x}/{front_ref}/0x{front_mask:08x}/0x{front_sfail:04x},0x{front_dpfail:04x},0x{front_dppass:04x} stencil_back=0x{back_func:04x}/{back_ref}/0x{back_mask:08x}/0x{back_sfail:04x},0x{back_dpfail:04x},0x{back_dppass:04x} stencil_mask=0x{:08x}",
+            "caps={caps} blend=0x{src_rgb:04x}/0x{dst_rgb:04x}/0x{src_alpha:04x}/0x{dst_alpha:04x} cull_face=0x{:04x} depth_func=0x{:04x} depth_mask={} color_mask={}{}{}{} scissor={sx},{sy},{sw},{sh} stencil_front=0x{front_func:04x}/{front_ref}/0x{front_mask:08x}/0x{front_sfail:04x},0x{front_dpfail:04x},0x{front_dppass:04x} stencil_back=0x{back_func:04x}/{back_ref}/0x{back_mask:08x}/0x{back_sfail:04x},0x{back_dpfail:04x},0x{back_dppass:04x} stencil_mask=0x{:08x}",
+            self.replay.cull_face_mode,
             self.replay.depth_func,
             bool_digit(self.replay.depth_mask),
             bool_digit(red),
@@ -2367,7 +2508,6 @@ impl HostBackend for Sdl2Host {
 
     fn replay_gles_events(&mut self, events: &[GlesEvent]) -> HostResult<()> {
         unsafe {
-            (self.gl.active_texture)(GL_TEXTURE0);
             (self.gl.pixel_storei)(GL_UNPACK_ALIGNMENT, 1);
         }
         self.record_gl_errors(usize::MAX, "replay-init");
@@ -2527,12 +2667,17 @@ fn read_attrib_component(bytes: &[u8], offset: usize, ty: u32, normalized: bool)
     }
 }
 
-fn event_client_attrib_payload(event: &GlesEvent, index: u32) -> Option<&[u8]> {
+fn event_client_attribs(event: &GlesEvent) -> &[GlesClientAttribPayload] {
     let client_attribs = match event {
         GlesEvent::DrawArrays { client_attribs, .. }
         | GlesEvent::DrawElements { client_attribs, .. } => client_attribs,
-        _ => return None,
+        _ => return &[],
     };
+    client_attribs
+}
+
+fn event_client_attrib_payload(event: &GlesEvent, index: u32) -> Option<&[u8]> {
+    let client_attribs = event_client_attribs(event);
     client_attribs
         .iter()
         .find(|payload| payload.index == index)

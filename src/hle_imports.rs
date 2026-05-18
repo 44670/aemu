@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -481,6 +481,7 @@ pub struct HleRuntime {
     gl_vertex_attribs: Vec<GuestVertexAttrib>,
     gles_events: VecDeque<GlesEvent>,
     gles_event_index: usize,
+    gles_trace_event_count: usize,
     gles_texture_upload_dump_index: usize,
     next_fd: u32,
     files: Vec<FakeFile>,
@@ -1218,6 +1219,7 @@ impl HleRuntime {
             gl_vertex_attribs: Vec::new(),
             gles_events: VecDeque::new(),
             gles_event_index: 0,
+            gles_trace_event_count: 0,
             gles_texture_upload_dump_index: 0,
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
@@ -6651,15 +6653,22 @@ impl HleRuntime {
         self.gles_events.push_back(event);
     }
 
-    fn maybe_trace_gles_event(&self, event_index: usize, event: &GlesEvent) {
+    fn maybe_trace_gles_event(&mut self, event_index: usize, event: &GlesEvent) {
         let Some(path) = std::env::var_os("AEMU_TRACE_GLES_EVENTS_JSONL") else {
             return;
         };
+        let skip = std::env::var("AEMU_TRACE_GLES_EVENTS_SKIP")
+            .ok()
+            .and_then(|raw| parse_env_usize(&raw))
+            .unwrap_or(0);
+        if event_index < skip {
+            return;
+        }
         let limit = std::env::var("AEMU_TRACE_GLES_EVENTS_LIMIT")
             .ok()
             .and_then(|raw| parse_env_usize(&raw))
             .unwrap_or(usize::MAX);
-        if event_index >= limit {
+        if self.gles_trace_event_count >= limit {
             return;
         }
         let matcher = std::env::var("AEMU_TRACE_GLES_EVENTS_MATCH").ok();
@@ -6672,6 +6681,8 @@ impl HleRuntime {
         let row = self.gles_event_trace_row(event_index, event);
         if let Err(err) = append_text_file(std::path::Path::new(&path), &format!("{row}\n")) {
             eprintln!("HLE GLES event trace append failed {:?}: {err}", path);
+        } else {
+            self.gles_trace_event_count = self.gles_trace_event_count.saturating_add(1);
         }
     }
 
@@ -11644,39 +11655,55 @@ fn glsl_es2_visible_source(source: &str) -> String {
     let source = strip_glsl_comments(source);
     let mut out = String::new();
     let mut frames: Vec<GlslPreprocFrame> = Vec::new();
+    let mut defines = HashSet::new();
     for line in source.lines() {
         let trimmed = line.trim_start();
         if let Some(expr) = trimmed.strip_prefix("#ifdef") {
             let parent_active = frames.last().map_or(true, |frame| frame.active);
-            let condition_value = glsl_unknown_preproc_condition_value(expr);
+            let condition_value =
+                glsl_preproc_symbol(expr).is_some_and(|symbol| defines.contains(symbol));
             frames.push(GlslPreprocFrame {
                 parent_active,
                 condition_value,
-                known: false,
+                known: true,
                 active: parent_active && condition_value,
             });
             continue;
         }
         if let Some(expr) = trimmed.strip_prefix("#ifndef") {
             let parent_active = frames.last().map_or(true, |frame| frame.active);
-            let condition_value = !glsl_unknown_preproc_condition_value(expr);
+            let condition_value =
+                glsl_preproc_symbol(expr).is_none_or(|symbol| !defines.contains(symbol));
             frames.push(GlslPreprocFrame {
                 parent_active,
                 condition_value,
-                known: false,
+                known: true,
                 active: parent_active && condition_value,
             });
             continue;
         }
         if let Some(expr) = trimmed.strip_prefix("#if") {
             let parent_active = frames.last().map_or(true, |frame| frame.active);
-            let (known, condition_value) = glsl_es2_preproc_condition_value(expr);
+            let (known, condition_value) = glsl_preproc_condition_value(expr, &defines);
             frames.push(GlslPreprocFrame {
                 parent_active,
                 condition_value,
                 known,
                 active: parent_active && condition_value,
             });
+            continue;
+        }
+        if let Some(expr) = trimmed.strip_prefix("#elif") {
+            if let Some(frame) = frames.last_mut() {
+                if frame.known && !frame.condition_value {
+                    let (known, condition_value) = glsl_preproc_condition_value(expr, &defines);
+                    frame.known = known;
+                    frame.condition_value = condition_value;
+                    frame.active = known && frame.parent_active && condition_value;
+                } else {
+                    frame.active = false;
+                }
+            }
             continue;
         }
         if trimmed.starts_with("#else") {
@@ -11693,6 +11720,22 @@ fn glsl_es2_visible_source(source: &str) -> String {
             frames.pop();
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix("#define") {
+            if frames.last().map_or(true, |frame| frame.active) {
+                if let Some(symbol) = glsl_preproc_symbol(rest) {
+                    defines.insert(symbol.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("#undef") {
+            if frames.last().map_or(true, |frame| frame.active) {
+                if let Some(symbol) = glsl_preproc_symbol(rest) {
+                    defines.remove(symbol);
+                }
+            }
+            continue;
+        }
         if trimmed.starts_with('#') {
             continue;
         }
@@ -11704,19 +11747,144 @@ fn glsl_es2_visible_source(source: &str) -> String {
     out
 }
 
-fn glsl_unknown_preproc_condition_value(_expr: &str) -> bool {
-    true
+fn glsl_preproc_symbol(expr: &str) -> Option<&str> {
+    expr.trim()
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .find(|part| !part.is_empty())
 }
 
-fn glsl_es2_preproc_condition_value(expr: &str) -> (bool, bool) {
-    if !expr.contains("__VERSION__") {
-        return (false, true);
-    }
+fn glsl_preproc_condition_value(expr: &str, defines: &HashSet<String>) -> (bool, bool) {
     let compact: String = expr.chars().filter(|ch| !ch.is_whitespace()).collect();
-    let value = compact.contains("__VERSION__<300")
-        || compact.contains("__VERSION__<=100")
-        || compact.contains("__VERSION__==100");
-    (true, value)
+    if compact.contains("__VERSION__") {
+        let value = compact.contains("__VERSION__<300")
+            || compact.contains("__VERSION__<=100")
+            || compact.contains("__VERSION__==100");
+        return (true, value);
+    }
+    let tokens = glsl_preproc_tokens(expr);
+    if tokens.is_empty() {
+        return (true, false);
+    }
+    let mut parser = GlslPreprocExprParser::new(&tokens, defines);
+    (true, parser.parse_or())
+}
+
+fn glsl_preproc_tokens(expr: &str) -> Vec<String> {
+    let bytes = expr.as_bytes();
+    let mut tokens = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte.is_ascii_whitespace() {
+            idx += 1;
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = idx;
+            idx += 1;
+            while idx < bytes.len() && (bytes[idx].is_ascii_alphanumeric() || bytes[idx] == b'_') {
+                idx += 1;
+            }
+            tokens.push(String::from_utf8_lossy(&bytes[start..idx]).into_owned());
+            continue;
+        }
+        if byte.is_ascii_digit() {
+            let start = idx;
+            idx += 1;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            tokens.push(String::from_utf8_lossy(&bytes[start..idx]).into_owned());
+            continue;
+        }
+        if matches!(bytes.get(idx..idx + 2), Some(b"&&" | b"||")) {
+            tokens.push(String::from_utf8_lossy(&bytes[idx..idx + 2]).into_owned());
+            idx += 2;
+            continue;
+        }
+        if matches!(byte, b'!' | b'(' | b')') {
+            tokens.push((byte as char).to_string());
+        }
+        idx += 1;
+    }
+    tokens
+}
+
+struct GlslPreprocExprParser<'a> {
+    tokens: &'a [String],
+    defines: &'a HashSet<String>,
+    idx: usize,
+}
+
+impl<'a> GlslPreprocExprParser<'a> {
+    fn new(tokens: &'a [String], defines: &'a HashSet<String>) -> Self {
+        Self {
+            tokens,
+            defines,
+            idx: 0,
+        }
+    }
+
+    fn parse_or(&mut self) -> bool {
+        let mut value = self.parse_and();
+        while self.consume("||") {
+            value |= self.parse_and();
+        }
+        value
+    }
+
+    fn parse_and(&mut self) -> bool {
+        let mut value = self.parse_unary();
+        while self.consume("&&") {
+            value &= self.parse_unary();
+        }
+        value
+    }
+
+    fn parse_unary(&mut self) -> bool {
+        if self.consume("!") {
+            return !self.parse_unary();
+        }
+        if self.consume("(") {
+            let value = self.parse_or();
+            self.consume(")");
+            return value;
+        }
+        if self.consume("defined") {
+            if self.consume("(") {
+                let value = self
+                    .next()
+                    .is_some_and(|symbol| self.defines.contains(symbol));
+                self.consume(")");
+                return value;
+            }
+            return self
+                .next()
+                .is_some_and(|symbol| self.defines.contains(symbol));
+        }
+        let Some(token) = self.next() else {
+            return false;
+        };
+        if token.chars().all(|ch| ch.is_ascii_digit()) {
+            return token.parse::<u32>().unwrap_or(0) != 0;
+        }
+        self.defines.contains(token)
+    }
+
+    fn consume(&mut self, token: &str) -> bool {
+        if self.tokens.get(self.idx).is_some_and(|item| item == token) {
+            self.idx += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn next(&mut self) -> Option<&'a str> {
+        let token = self.tokens.get(self.idx)?;
+        self.idx += 1;
+        Some(token)
+    }
 }
 
 fn strip_glsl_comments(source: &str) -> String {
@@ -12165,6 +12333,69 @@ mod tests {
 
     fn test_c_string(memory: &mut MappedMemory, ptr: u32) -> String {
         load_c_string(memory, ptr, 256).unwrap()
+    }
+
+    fn active_names(active: Vec<GlesActive>) -> Vec<String> {
+        active.into_iter().map(|item| item.name).collect()
+    }
+
+    #[test]
+    fn reflects_shader_uniforms_from_actual_preprocessor_branch() {
+        let terrain_vertex = "\
+            #ifdef AS_ENTITY_RENDERER\n\
+            uniform MAT4 WORLDVIEWPROJ;\n\
+            #else\n\
+            uniform MAT4 WORLDVIEW;\n\
+            uniform MAT4 PROJ;\n\
+            #endif\n\
+            uniform POS4 CHUNK_ORIGIN_AND_SCALE;\n\
+            attribute POS4 POSITION;\n\
+            void main() {\n\
+                POS4 worldPos;\n\
+                worldPos.xyz = (POSITION.xyz * CHUNK_ORIGIN_AND_SCALE.w) + CHUNK_ORIGIN_AND_SCALE.xyz;\n\
+                worldPos.w = 1.0;\n\
+                POS4 pos = WORLDVIEW * worldPos;\n\
+                gl_Position = PROJ * pos;\n\
+            }\n";
+        let names = active_names(reflect_glsl_uniforms(&[(0, terrain_vertex)]));
+        assert!(names.contains(&"WORLDVIEW".to_string()));
+        assert!(names.contains(&"PROJ".to_string()));
+        assert!(names.contains(&"CHUNK_ORIGIN_AND_SCALE".to_string()));
+        assert!(!names.contains(&"WORLDVIEWPROJ".to_string()));
+    }
+
+    #[test]
+    fn reflects_shader_uniforms_from_defined_preprocessor_branch() {
+        let entity_vertex = "\
+            #define AS_ENTITY_RENDERER 1\n\
+            #ifdef AS_ENTITY_RENDERER\n\
+            uniform MAT4 WORLDVIEWPROJ;\n\
+            #else\n\
+            uniform MAT4 WORLDVIEW;\n\
+            uniform MAT4 PROJ;\n\
+            #endif\n\
+            attribute POS4 POSITION;\n\
+            void main() { gl_Position = WORLDVIEWPROJ * POSITION; }\n";
+        let names = active_names(reflect_glsl_uniforms(&[(0, entity_vertex)]));
+        assert!(names.contains(&"WORLDVIEWPROJ".to_string()));
+        assert!(!names.contains(&"WORLDVIEW".to_string()));
+        assert!(!names.contains(&"PROJ".to_string()));
+    }
+
+    #[test]
+    fn reflects_shader_uniforms_from_elif_branch() {
+        let fragment = "\
+            #define BLEND 1\n\
+            #if defined(ALPHA_TEST)\n\
+            uniform vec4 ALPHA_COLOR;\n\
+            #elif defined(BLEND)\n\
+            uniform vec4 BLEND_COLOR;\n\
+            #else\n\
+            uniform vec4 OPAQUE_COLOR;\n\
+            #endif\n\
+            void main() { gl_FragColor = BLEND_COLOR; }\n";
+        let names = active_names(reflect_glsl_uniforms(&[(0, fragment)]));
+        assert_eq!(names, vec!["BLEND_COLOR".to_string()]);
     }
 
     #[test]

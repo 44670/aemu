@@ -1644,6 +1644,11 @@ def build_arg_parser():
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--display", default=":0")
     parser.add_argument("--gles-event-limit", type=int, default=50000)
+    parser.add_argument(
+        "--gles-event-skip",
+        type=int,
+        help="skip GLES events before this global event index before applying match/limit",
+    )
     parser.add_argument("--draw-dump-limit", type=int, default=10)
     parser.add_argument(
         "--first-visible-draw",
@@ -1866,6 +1871,8 @@ def main(argv=None):
         "SwapBuffers,UseProgram,BindTexture,DrawElements,TexImage2D,TexSubImage2D"
     )
     env["AEMU_TRACE_GLES_EVENTS_LIMIT"] = str(args.gles_event_limit)
+    if args.gles_event_skip is not None:
+        env["AEMU_TRACE_GLES_EVENTS_SKIP"] = str(args.gles_event_skip)
     env["AEMU_TRACE_SDL_DRAW_CHANGES"] = "50"
     env["AEMU_DUMP_SDL_DRAW_CHANGES_DIR"] = str(trace_dir / "sdl-draw")
     env["AEMU_DUMP_SDL_DRAW_CHANGES_MATCH"] = "all"
