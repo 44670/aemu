@@ -89,7 +89,7 @@ impl WsRequest {
 }
 
 fn handle_client(mut stream: TcpStream, request_tx: Sender<WsRequest>) -> io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_read_timeout(None)?;
     websocket_handshake(&mut stream)?;
     loop {
         let Some(message) = read_text_frame(&mut stream)? else {

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::cell::Cell;
 use std::fmt;
 
 use crate::armv7a::{Memory, Result, Trap};
@@ -17,7 +17,9 @@ pub struct MappedMemory {
     page_table: Vec<Option<usize>>,
     pages: Vec<MappedPage>,
     mappings: Vec<MappedRange>,
-    dirty_pages: BTreeSet<u32>,
+    dirty_pages: Vec<u64>,
+    last_checked_page: Cell<usize>,
+    last_dirty_page: Cell<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +92,9 @@ impl MappedMemory {
             page_table: vec![None; PAGE_COUNT],
             pages: Vec::new(),
             mappings: Vec::new(),
-            dirty_pages: BTreeSet::new(),
+            dirty_pages: vec![0; PAGE_BITMAP_WORDS],
+            last_checked_page: Cell::new(usize::MAX),
+            last_dirty_page: Cell::new(usize::MAX),
         }
     }
 
@@ -159,12 +163,14 @@ impl MappedMemory {
     }
 
     pub fn clear_dirty_pages(&mut self) {
-        self.dirty_pages.clear();
+        self.dirty_pages.fill(0);
+        self.last_dirty_page.set(usize::MAX);
     }
 
     pub fn take_dirty_region_snapshots(&mut self) -> Vec<MappedMemoryRegionSnapshot> {
-        let pages = std::mem::take(&mut self.dirty_pages);
-        self.snapshots_for_pages(pages)
+        let pages = std::mem::replace(&mut self.dirty_pages, vec![0; PAGE_BITMAP_WORDS]);
+        self.last_dirty_page.set(usize::MAX);
+        self.snapshots_for_page_bitmap(&pages)
     }
 
     pub fn write_clean_bytes(&mut self, addr: u32, bytes: &[u8]) -> Result<()> {
@@ -204,6 +210,7 @@ impl MappedMemory {
     }
 
     fn set_page_mapped(&mut self, index: usize, mapped: bool) {
+        self.last_checked_page.set(usize::MAX);
         let mask = 1u64 << (index % 64);
         if mapped {
             self.mapped_pages[index / 64] |= mask;
@@ -215,11 +222,7 @@ impl MappedMemory {
     #[inline(always)]
     fn page_index_for_addr(&self, addr: u32) -> Result<usize> {
         let index = page_index(addr);
-        if !self.page_mapped(index) {
-            return Err(Trap::Memory(format!(
-                "address {addr:#010x} is not mapped in guest memory"
-            )));
-        }
+        self.ensure_mapped_page(index, addr)?;
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         {
             Ok(index)
@@ -230,6 +233,80 @@ impl MappedMemory {
                 "address {addr:#010x} is not mapped in guest memory"
             ))
         })
+    }
+
+    #[inline(always)]
+    fn ensure_mapped_page(&self, index: usize, addr: u32) -> Result<()> {
+        if self.last_checked_page.get() == index {
+            return Ok(());
+        }
+        if !self.page_mapped(index) {
+            return Err(Trap::Memory(format!(
+                "address {addr:#010x} is not mapped in guest memory"
+            )));
+        }
+        #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
+        if self.page_table[index].is_none() {
+            return Err(Trap::Memory(format!(
+                "address {addr:#010x} is not mapped in guest memory"
+            )));
+        }
+        self.last_checked_page.set(index);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn ensure_mapped_small(&self, addr: u32, len: u32) -> Result<()> {
+        debug_assert!((1..=4).contains(&len));
+        let first_page = page_index(addr);
+        self.ensure_mapped_page(first_page, addr)?;
+        let last_offset = (addr & (PAGE_SIZE_U32 - 1)).wrapping_add(len - 1);
+        if last_offset < PAGE_SIZE_U32 {
+            return Ok(());
+        }
+        let last_addr = addr
+            .checked_add(len - 1)
+            .ok_or_else(|| Trap::Memory(format!("memory range {addr:#010x}+{len:#x} overflows")))?;
+        let last_page = page_index(last_addr);
+        if last_page != first_page {
+            self.ensure_mapped_page(last_page, page_addr(last_page))?;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn ensure_mapped_range(&self, addr: u32, len: usize) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let len_u64 = u64::try_from(len)
+            .map_err(|_| Trap::Memory(format!("memory range {addr:#010x}+{len:#x} overflows")))?;
+        let end = u64::from(addr)
+            .checked_add(len_u64)
+            .ok_or_else(|| Trap::Memory(format!("memory range {addr:#010x}+{len:#x} overflows")))?;
+        if end > u64::from(u32::MAX) + 1 {
+            return Err(Trap::Memory(format!(
+                "memory range {addr:#010x}+{len:#x} overflows"
+            )));
+        }
+        let first_page = page_index(addr);
+        let last_page = page_index((end - 1) as u32);
+        for page in first_page..=last_page {
+            if !self.page_mapped(page) {
+                return Err(Trap::Memory(format!(
+                    "address {:#010x} is not mapped in guest memory",
+                    page_addr(page)
+                )));
+            }
+            #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
+            if self.page_table[page].is_none() {
+                return Err(Trap::Memory(format!(
+                    "address {:#010x} is not mapped in guest memory",
+                    page_addr(page)
+                )));
+            }
+        }
+        Ok(())
     }
 
     #[inline(always)]
@@ -263,6 +340,7 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn read16_checked(&self, addr: u32) -> Result<u16> {
+        self.ensure_mapped_small(addr, 2)?;
         let b0 = self.read8_checked(addr)?;
         let b1 = self.read8_checked(addr.wrapping_add(1))?;
         Ok(u16::from_le_bytes([b0, b1]))
@@ -271,6 +349,7 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn read32_checked(&self, addr: u32) -> Result<u32> {
+        self.ensure_mapped_small(addr, 4)?;
         let b0 = self.read8_checked(addr)?;
         let b1 = self.read8_checked(addr.wrapping_add(1))?;
         let b2 = self.read8_checked(addr.wrapping_add(2))?;
@@ -289,6 +368,7 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn write16_checked(&mut self, addr: u32, value: u16) -> Result<()> {
+        self.ensure_mapped_small(addr, 2)?;
         for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
             self.write8_checked(addr.wrapping_add(idx as u32), byte)?;
         }
@@ -298,6 +378,7 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn write32_checked(&mut self, addr: u32, value: u32) -> Result<()> {
+        self.ensure_mapped_small(addr, 4)?;
         for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
             self.write8_checked(addr.wrapping_add(idx as u32), byte)?;
         }
@@ -305,6 +386,7 @@ impl MappedMemory {
     }
 
     fn write_bytes(&mut self, addr: u32, bytes: &[u8], dirty: bool) -> Result<()> {
+        self.ensure_mapped_range(addr, bytes.len())?;
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         {
             unsafe {
@@ -351,26 +433,51 @@ impl MappedMemory {
         if size == 0 {
             return;
         }
-        let start = base & PAGE_MASK;
+        let start = page_index(base & PAGE_MASK);
         let end = u64::from(base).saturating_add(size as u64);
-        let mut page = start;
-        while u64::from(page) < end {
-            self.dirty_pages.insert(page);
-            match page.checked_add(PAGE_SIZE_U32) {
-                Some(next) => page = next,
-                None => break,
+        let last = page_index((end.saturating_sub(1)).min(u64::from(u32::MAX)) as u32);
+        for page in start..=last {
+            self.set_dirty_page(page);
+        }
+    }
+
+    #[inline(always)]
+    fn set_dirty_page(&mut self, page: usize) {
+        if self.last_dirty_page.get() == page {
+            return;
+        }
+        self.dirty_pages[page / 64] |= 1u64 << (page % 64);
+        self.last_dirty_page.set(page);
+    }
+
+    #[inline(always)]
+    fn mark_dirty_small(&mut self, addr: u32, len: u32) {
+        debug_assert!((1..=4).contains(&len));
+        let first_page = page_index(addr);
+        self.set_dirty_page(first_page);
+        let last_offset = (addr & (PAGE_SIZE_U32 - 1)).wrapping_add(len - 1);
+        if last_offset >= PAGE_SIZE_U32 {
+            let last_page = page_index(addr.wrapping_add(len - 1));
+            if last_page != first_page {
+                self.set_dirty_page(last_page);
             }
         }
     }
 
-    fn snapshots_for_pages(&self, pages: BTreeSet<u32>) -> Vec<MappedMemoryRegionSnapshot> {
+    fn snapshots_for_page_bitmap(&self, pages: &[u64]) -> Vec<MappedMemoryRegionSnapshot> {
         let mut snapshots = Vec::new();
-        for page in pages {
-            if let Some((base, len)) = self.mapped_span_for_page(page, PAGE_SIZE_U32) {
-                snapshots.push(MappedMemoryRegionSnapshot {
-                    base,
-                    bytes: self.read_bytes_lossy(base, len),
-                });
+        for (word_idx, mut word) in pages.iter().copied().enumerate() {
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let page = word_idx * 64 + bit;
+                let page_base = page_addr(page);
+                if let Some((base, len)) = self.mapped_span_for_page(page_base, PAGE_SIZE_U32) {
+                    snapshots.push(MappedMemoryRegionSnapshot {
+                        base,
+                        bytes: self.read_bytes_lossy(base, len),
+                    });
+                }
+                word &= word - 1;
             }
         }
         snapshots
@@ -390,6 +497,7 @@ impl Memory for MappedMemory {
     fn load8(&mut self, addr: u32) -> Result<u8> {
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         {
+            self.page_index_for_addr(addr)?;
             return Ok(unsafe { std::ptr::read(addr as usize as *const u8) });
         }
         #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
@@ -402,6 +510,7 @@ impl Memory for MappedMemory {
     fn load16(&mut self, addr: u32) -> Result<u16> {
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         {
+            self.ensure_mapped_small(addr, 2)?;
             let value = unsafe { std::ptr::read_unaligned(addr as usize as *const u16) };
             return Ok(u16::from_le(value));
         }
@@ -415,6 +524,7 @@ impl Memory for MappedMemory {
     fn load32(&mut self, addr: u32) -> Result<u32> {
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         {
+            self.ensure_mapped_small(addr, 4)?;
             let value = unsafe { std::ptr::read_unaligned(addr as usize as *const u32) };
             return Ok(u32::from_le(value));
         }
@@ -428,11 +538,12 @@ impl Memory for MappedMemory {
     fn store8(&mut self, addr: u32, value: u8) -> Result<()> {
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         unsafe {
+            self.page_index_for_addr(addr)?;
             std::ptr::write(addr as usize as *mut u8, value);
         }
         #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
         self.write8_checked(addr, value)?;
-        self.dirty_pages.insert(addr & PAGE_MASK);
+        self.set_dirty_page(page_index(addr));
         Ok(())
     }
 
@@ -440,11 +551,12 @@ impl Memory for MappedMemory {
     fn store16(&mut self, addr: u32, value: u16) -> Result<()> {
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         unsafe {
+            self.ensure_mapped_small(addr, 2)?;
             std::ptr::write_unaligned(addr as usize as *mut u16, value.to_le());
         }
         #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
         self.write16_checked(addr, value)?;
-        self.mark_dirty_range(addr, 2);
+        self.mark_dirty_small(addr, 2);
         Ok(())
     }
 
@@ -452,11 +564,12 @@ impl Memory for MappedMemory {
     fn store32(&mut self, addr: u32, value: u32) -> Result<()> {
         #[cfg(all(target_os = "linux", not(debug_assertions)))]
         unsafe {
+            self.ensure_mapped_small(addr, 4)?;
             std::ptr::write_unaligned(addr as usize as *mut u32, value.to_le());
         }
         #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
         self.write32_checked(addr, value)?;
-        self.mark_dirty_range(addr, 4);
+        self.mark_dirty_small(addr, 4);
         Ok(())
     }
 }

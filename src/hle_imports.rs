@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use flate2::read::ZlibDecoder;
+use offset_allocator::{Allocation as OffsetAllocation, Allocator as OffsetAllocator};
 
 use crate::armv7a::{Cpu, Memory};
 use crate::gles_trace::{
@@ -15,20 +16,69 @@ use crate::zip_probe::{ZipEntry, extract_parsed_zip_entry, parse_zip_entries, re
 
 pub const HLE_TRAP_ARM_INSTR: u32 = 0xe7f0_00f0;
 const NATIVE_MALLOC_BUMP_SYMBOL_SIZE: u32 = 0x4084;
+const HLE_HEAP_MAX_REGIONS: u32 = 256 * 1024;
+const HLE_HEAP_SMALL_ALIGN: u32 = 8;
+const HLE_HEAP_SMALL_MAX: u32 = 512;
+const HLE_HEAP_SMALL_CLASS_COUNT: usize = (HLE_HEAP_SMALL_MAX / HLE_HEAP_SMALL_ALIGN) as usize;
+const HLE_HEAP_SMALL_SLAB_SIZE: u32 = 64 * 1024;
 
 const FAKE_FILE_SIZE: u32 = 0x40;
+const FAKE_FILE_FLAGS_OFFSET: u32 = 0x0c;
 const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
+const BIONIC_FILE_FLAG_SRD: u16 = 0x0004;
+const BIONIC_FILE_FLAG_SWR: u16 = 0x0008;
+const BIONIC_FILE_FLAG_SRW: u16 = 0x0010;
+const BIONIC_FILE_FLAG_SEOF: u16 = 0x0020;
+const BIONIC_FILE_FLAG_SERR: u16 = 0x0040;
 const FIRST_FAKE_FD: u32 = 3;
+
+fn fake_stdio_flags_from_mode(mode: &str) -> Option<u16> {
+    let bytes = mode.as_bytes();
+    let mut flags = match bytes.first().copied()? {
+        b'r' => BIONIC_FILE_FLAG_SRD,
+        b'w' | b'a' => BIONIC_FILE_FLAG_SWR,
+        _ => return None,
+    };
+    if bytes[1..].contains(&b'+') {
+        flags = BIONIC_FILE_FLAG_SRW;
+    }
+    Some(flags)
+}
+
+const ANDROID_DIRENT_SIZE: u32 = 0x120;
+const ANDROID_DIRENT_D_INO_OFFSET: u32 = 0;
+const ANDROID_DIRENT_D_OFF_OFFSET: u32 = 8;
+const ANDROID_DIRENT_D_RECLEN_OFFSET: u32 = 16;
+const ANDROID_DIRENT_D_TYPE_OFFSET: u32 = 18;
+const ANDROID_DIRENT_D_NAME_OFFSET: u32 = 19;
+const ANDROID_DIRENT_D_NAME_SIZE: u32 = 256;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const SOCK_STREAM: u32 = 1;
 const SOCK_DGRAM: u32 = 2;
 const SOCK_TYPE_MASK: u32 = 0x0f;
+const INET_NTOA_BUFFER_SIZE: u32 = 16;
+const STRERROR_BUFFER_SIZE: u32 = 64;
+const PRINTF_OUTPUT_LIMIT: usize = 1024 * 1024;
 const F_GETFL: u32 = 3;
 const F_SETFL: u32 = 4;
+const O_ACCMODE: u32 = 0x03;
+const O_RDONLY: u32 = 0x00;
+const O_CREAT: u32 = 0x40;
+const O_TRUNC: u32 = 0x200;
+const O_APPEND: u32 = 0x400;
+const ENOENT: u32 = 2;
 const EBADF: u32 = 9;
 const EAGAIN: u32 = 11;
+const EEXIST: u32 = 17;
+const EISDIR: u32 = 21;
 const EINVAL: u32 = 22;
+const ENOSYS: u32 = 38;
+const SEEK_SET: u32 = 0;
+const SEEK_CUR: u32 = 1;
+const SEEK_END: u32 = 2;
 const POLLIN: u16 = 0x0001;
 const POLLNVAL: u16 = 0x0020;
 const POLLFD_SIZE: u32 = 8;
@@ -95,6 +145,12 @@ fn env_u64_value(name: &str, default_value: u64) -> u64 {
         .ok()
         .and_then(|raw| parse_env_u64_value(&raw))
         .unwrap_or(default_value)
+}
+
+fn optional_env_u64_value(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| parse_env_u64_value(&raw))
 }
 
 fn parse_env_u32_value(raw: &str) -> Option<u32> {
@@ -255,6 +311,7 @@ static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MCPE_RESOURCE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MCPE_INPUT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static HLE_SCANF_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static HLE_PRINTF_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
 const FAKE_TIME_STEP_NANOS: u64 = 16_666_667;
 const GLES_EVENT_LIMIT: usize = 65_536;
@@ -400,13 +457,14 @@ impl fmt::Display for HleError {
 
 impl std::error::Error for HleError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct HleRuntime {
     errno_addr: u32,
-    heap_next: u32,
+    heap_base: u32,
     heap_end: u32,
-    allocations: Vec<HleAllocation>,
-    freed: Vec<HleAllocation>,
+    heap_allocator: OffsetAllocator,
+    heap_allocations: HashMap<u32, GuestHeapAllocation>,
+    small_heap_bins: Vec<SmallHeapBin>,
     apk_path: Option<PathBuf>,
     apk_bytes: Option<Vec<u8>>,
     apk_entries: Option<Vec<ZipEntry>>,
@@ -427,6 +485,7 @@ pub struct HleRuntime {
     next_fd: u32,
     files: Vec<FakeFile>,
     virtual_files: Vec<VirtualFile>,
+    virtual_dirs: Vec<String>,
     current_pthread: u32,
     created_pthreads: VecDeque<CreatedPthread>,
     next_pthread_key: u32,
@@ -437,6 +496,7 @@ pub struct HleRuntime {
     random_state: u32,
     clock_ns: u64,
     clock_step_ns: u64,
+    clock_step_after_draw_ns: Option<u64>,
     fake_geometries: Vec<NamedGuestObject>,
     fake_texture_pairs: Vec<NamedGuestObject>,
     resource_texture_aliases: Option<Vec<(String, String)>>,
@@ -447,6 +507,9 @@ pub struct HleRuntime {
     pending_input_events: VecDeque<HleInputEvent>,
     active_input_events: Vec<HleInputEvent>,
     minecraft_input_events: VecDeque<HleMinecraftInputEvent>,
+    gles_draw_submissions: usize,
+    inet_ntoa_buffer: Option<u32>,
+    strerror_buffer: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -924,11 +987,51 @@ fn gles_event_trace_token_matches(token: &str, event: &GlesEvent) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct HleAllocation {
-    ptr: u32,
+#[derive(Clone, Copy)]
+enum GuestHeapAllocationKind {
+    Small { class_index: usize },
+    Large { allocation: OffsetAllocation },
+}
+
+#[derive(Clone, Copy)]
+struct GuestHeapAllocation {
+    kind: GuestHeapAllocationKind,
     size: u32,
     freeable: bool,
+}
+
+impl fmt::Debug for GuestHeapAllocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("GuestHeapAllocation");
+        match self.kind {
+            GuestHeapAllocationKind::Small { class_index } => {
+                debug
+                    .field("kind", &"small")
+                    .field("class_index", &class_index);
+            }
+            GuestHeapAllocationKind::Large { allocation } => {
+                debug
+                    .field("kind", &"large")
+                    .field("offset", &allocation.offset);
+            }
+        }
+        debug
+            .field("size", &self.size)
+            .field("freeable", &self.freeable)
+            .finish()
+    }
+}
+
+#[derive(Debug, Default)]
+struct SmallHeapBin {
+    free_slots: Vec<u32>,
+    slab_count: u32,
+}
+
+impl SmallHeapBin {
+    fn class_size(class_index: usize) -> u32 {
+        (class_index as u32 + 1) * HLE_HEAP_SMALL_ALIGN
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -998,6 +1101,8 @@ struct FakeFile {
     fd: u32,
     kind: FakeFileKind,
     offset: u32,
+    eof: bool,
+    error: bool,
 }
 
 impl FakeFile {
@@ -1025,6 +1130,12 @@ enum FakeFileKind {
     Virtual {
         path: String,
     },
+    Directory {
+        path: String,
+        entries: Vec<VirtualDirEntry>,
+        index: usize,
+        dirent: u32,
+    },
     Socket {
         domain: u32,
         ty: u32,
@@ -1038,6 +1149,13 @@ enum FakeFileKind {
 struct VirtualFile {
     path: String,
     data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct VirtualDirEntry {
+    name: String,
+    ty: u8,
+    ino: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1071,12 +1189,19 @@ struct FakeTime {
 
 impl HleRuntime {
     pub fn new(errno_addr: u32, heap_base: u32, heap_size: u32) -> Self {
+        let heap_end = heap_base.saturating_add(heap_size);
+        let heap_base = align_up(heap_base, 8).unwrap_or(heap_base);
+        let heap_size = heap_end.saturating_sub(heap_base);
+        let max_regions = (heap_size / (HLE_HEAP_SMALL_MAX + 1)).clamp(1024, HLE_HEAP_MAX_REGIONS);
         Self {
             errno_addr,
-            heap_next: align_up(heap_base, 8).unwrap_or(heap_base),
-            heap_end: heap_base.saturating_add(heap_size),
-            allocations: Vec::new(),
-            freed: Vec::new(),
+            heap_base,
+            heap_end,
+            heap_allocator: OffsetAllocator::with_max_allocs(heap_size, max_regions),
+            heap_allocations: HashMap::new(),
+            small_heap_bins: (0..HLE_HEAP_SMALL_CLASS_COUNT)
+                .map(|_| SmallHeapBin::default())
+                .collect(),
             apk_path: None,
             apk_bytes: None,
             apk_entries: None,
@@ -1097,6 +1222,7 @@ impl HleRuntime {
             next_fd: FIRST_FAKE_FD,
             files: Vec::new(),
             virtual_files: Vec::new(),
+            virtual_dirs: Vec::new(),
             current_pthread: 1,
             created_pthreads: VecDeque::new(),
             next_pthread_key: 0,
@@ -1107,6 +1233,9 @@ impl HleRuntime {
             random_state: 0x1234_5678,
             clock_ns: 0,
             clock_step_ns: env_u64_value("AEMU_FAKE_TIME_STEP_NANOS", FAKE_TIME_STEP_NANOS),
+            clock_step_after_draw_ns: optional_env_u64_value(
+                "AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS",
+            ),
             fake_geometries: Vec::new(),
             fake_texture_pairs: Vec::new(),
             resource_texture_aliases: None,
@@ -1117,6 +1246,9 @@ impl HleRuntime {
             pending_input_events: VecDeque::new(),
             active_input_events: Vec::new(),
             minecraft_input_events: VecDeque::new(),
+            gles_draw_submissions: 0,
+            inet_ntoa_buffer: None,
+            strerror_buffer: None,
         }
     }
 
@@ -1325,6 +1457,13 @@ impl HleRuntime {
             "strtoul" => self.strtoul(cpu, memory),
             "strtoull" => self.strtoull(cpu, memory),
             "atoi" => self.atoi(cpu, memory),
+            "snprintf" => self.snprintf_call(cpu, memory),
+            "sprintf" => self.sprintf_call(cpu, memory),
+            "vsnprintf" => self.vsnprintf_call(cpu, memory),
+            "vsprintf" => self.vsprintf_call(cpu, memory),
+            "printf" => self.printf_call(cpu, memory),
+            "fprintf" => self.fprintf_call(cpu, memory),
+            "vfprintf" => self.vfprintf_call(cpu, memory),
             "sscanf" => self.sscanf(cpu, memory),
             "isalnum" => Ok(self.return32(cpu, u32::from(ascii_isalnum(cpu.reg(0))))),
             "isspace" => Ok(self.return32(cpu, u32::from(ascii_isspace(cpu.reg(0))))),
@@ -1401,10 +1540,27 @@ impl HleRuntime {
             "fopen" => self.fopen_call(cpu, memory),
             "fdopen" => self.fdopen_call(cpu, memory),
             "fclose" => self.fclose_call(cpu, memory),
+            "fflush" => self.fflush_call(cpu, memory),
+            "feof" => self.feof_call(cpu, memory),
+            "ferror" => self.ferror_call(cpu, memory),
+            "fseek" | "fseeko" => self.fseek_call(cpu, memory),
+            "ftell" | "ftello" => self.ftell_call(cpu, memory),
             "close" => self.close_call(cpu),
             "open" => self.open_call(cpu, memory),
+            "lseek" => self.lseek_call(cpu, memory),
+            "pread" => self.pread_call(cpu, memory),
+            "access" => self.access_call(cpu, memory),
+            "mkdir" => self.mkdir_call(cpu, memory),
+            "fdatasync" | "fsync" => self.fdatasync_call(cpu, memory),
             "fstat" => self.fstat_call(cpu, memory),
             "stat" | "lstat" => self.stat_call(cpu, memory),
+            "rename" => self.rename_call(cpu, memory),
+            "unlink" => self.unlink_call(cpu, memory),
+            "remove" => self.remove_call(cpu, memory),
+            "rmdir" => self.rmdir_call(cpu, memory),
+            "opendir" => self.opendir_call(cpu, memory),
+            "readdir" => self.readdir_call(cpu, memory),
+            "closedir" => self.closedir_call(cpu, memory),
             "pipe" => self.pipe_call(cpu, memory),
             "poll" => self.poll_call(cpu, memory),
             "socket" => self.socket_call(cpu, memory),
@@ -1412,6 +1568,9 @@ impl HleRuntime {
             "connect" => self.connect_call(cpu, memory),
             "setsockopt" => self.setsockopt_call(cpu, memory),
             "fcntl" => self.fcntl_call(cpu, memory),
+            "inet_addr" => self.inet_addr_call(cpu, memory),
+            "inet_ntoa" => self.inet_ntoa_call(cpu, memory),
+            "strerror" => self.strerror_call(cpu, memory),
             "sendto" => self.sendto_call(cpu, memory),
             "recvfrom" => self.recvfrom_call(cpu, memory),
             "select" => self.select_call(cpu, memory),
@@ -2106,6 +2265,118 @@ impl HleRuntime {
         Ok(self.return32(cpu, parsed.as_i32() as u32))
     }
 
+    fn snprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let size = cpu.reg(1);
+        let format_ptr = cpu.reg(2);
+        let mut args = PrintfArgs::from_cpu(cpu, 3);
+        self.format_to_guest_buffer("snprintf", cpu, memory, dst, size, format_ptr, &mut args)
+    }
+
+    fn sprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let format_ptr = cpu.reg(1);
+        let mut args = PrintfArgs::from_cpu(cpu, 2);
+        self.format_to_guest_buffer("sprintf", cpu, memory, dst, u32::MAX, format_ptr, &mut args)
+    }
+
+    fn vsnprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let size = cpu.reg(1);
+        let format_ptr = cpu.reg(2);
+        let mut args = PrintfArgs::from_va_list(cpu.reg(3));
+        self.format_to_guest_buffer("vsnprintf", cpu, memory, dst, size, format_ptr, &mut args)
+    }
+
+    fn vsprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dst = cpu.reg(0);
+        let format_ptr = cpu.reg(1);
+        let mut args = PrintfArgs::from_va_list(cpu.reg(2));
+        self.format_to_guest_buffer(
+            "vsprintf",
+            cpu,
+            memory,
+            dst,
+            u32::MAX,
+            format_ptr,
+            &mut args,
+        )
+    }
+
+    fn printf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let format_ptr = cpu.reg(0);
+        let mut args = PrintfArgs::from_cpu(cpu, 1);
+        let output = self.format_printf_output("printf", memory, format_ptr, &mut args)?;
+        Ok(self.return32(cpu, output.len() as u32))
+    }
+
+    fn fprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        let format_ptr = cpu.reg(1);
+        let mut args = PrintfArgs::from_cpu(cpu, 2);
+        let output = self.format_printf_output("fprintf", memory, format_ptr, &mut args)?;
+        self.write_formatted_stream(memory, stream, &output)?;
+        Ok(self.return32(cpu, output.len() as u32))
+    }
+
+    fn vfprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        let format_ptr = cpu.reg(1);
+        let mut args = PrintfArgs::from_va_list(cpu.reg(2));
+        let output = self.format_printf_output("vfprintf", memory, format_ptr, &mut args)?;
+        self.write_formatted_stream(memory, stream, &output)?;
+        Ok(self.return32(cpu, output.len() as u32))
+    }
+
+    fn format_to_guest_buffer<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        dst: u32,
+        size: u32,
+        format_ptr: u32,
+        args: &mut PrintfArgs,
+    ) -> Result<(), HleError> {
+        let output = self.format_printf_output(name, memory, format_ptr, args)?;
+        write_printf_buffer(memory, dst, size, &output)?;
+        Ok(self.return32(cpu, output.len() as u32))
+    }
+
+    fn format_printf_output<M: Memory>(
+        &mut self,
+        name: &str,
+        memory: &mut M,
+        format_ptr: u32,
+        args: &mut PrintfArgs,
+    ) -> Result<Vec<u8>, HleError> {
+        let format = load_c_string_bytes(memory, format_ptr, 4096)?;
+        let output = format_printf(memory, args, &format)?;
+        trace_hle_printf(format_args!(
+            "{name} format={:?} output={:?} len={}",
+            String::from_utf8_lossy(&format),
+            String::from_utf8_lossy(&output),
+            output.len()
+        ));
+        Ok(output)
+    }
+
+    fn write_formatted_stream<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        stream: u32,
+        output: &[u8],
+    ) -> Result<(), HleError> {
+        if stream == 0 || output.is_empty() {
+            return Ok(());
+        }
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(());
+        };
+        self.write_fake_fd_bytes(fd, output);
+        Ok(())
+    }
+
     fn sscanf<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let input = load_c_string_bytes(memory, cpu.reg(0), 4096)?;
         let format = load_c_string_bytes(memory, cpu.reg(1), 512)?;
@@ -2480,7 +2751,12 @@ impl HleRuntime {
     }
 
     fn advance_clock(&mut self) -> FakeTime {
-        self.clock_ns = self.clock_ns.saturating_add(self.clock_step_ns);
+        let step_ns = if self.gles_draw_submissions == 0 {
+            self.clock_step_ns
+        } else {
+            self.clock_step_after_draw_ns.unwrap_or(self.clock_step_ns)
+        };
+        self.clock_ns = self.clock_ns.saturating_add(step_ns);
         let monotonic_secs = self.clock_ns / 1_000_000_000;
         let nsecs = (self.clock_ns % 1_000_000_000) as u32;
         FakeTime {
@@ -2491,11 +2767,29 @@ impl HleRuntime {
         }
     }
 
+    pub fn current_wall_time_ns(&self) -> u64 {
+        FAKE_TIME_BASE_SECS
+            .saturating_mul(1_000_000_000)
+            .saturating_add(self.clock_ns)
+    }
+
+    pub fn advance_wall_time_to_ns(&mut self, wall_time_ns: u64) {
+        let base_ns = FAKE_TIME_BASE_SECS.saturating_mul(1_000_000_000);
+        let Some(clock_ns) = wall_time_ns.checked_sub(base_ns) else {
+            return;
+        };
+        self.clock_ns = self.clock_ns.max(clock_ns);
+    }
+
     fn fopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        let path = load_c_string(memory, cpu.reg(0), 256)?;
+        let path = normalize_virtual_path(&load_c_string(memory, cpu.reg(0), 512)?);
         let mode = load_c_string(memory, cpu.reg(1), 16).unwrap_or_else(|_| String::new());
+        let Some(stream_flags) = fake_stdio_flags_from_mode(&mode) else {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, 0));
+        };
         if is_random_device_path(&path) {
-            let ptr = self.open_fake_stream(memory, FakeFileKind::Random)?;
+            let ptr = self.open_fake_stream(memory, FakeFileKind::Random, stream_flags)?;
             trace_hle_file(format_args!(
                 "fopen path={path:?} mode={mode:?} -> stream {ptr:#010x}"
             ));
@@ -2507,8 +2801,11 @@ impl HleRuntime {
                 self.create_virtual_file(&path, mode.contains('a'));
             }
             if wants_create || self.virtual_file_index(&path).is_some() {
-                let ptr =
-                    self.open_fake_stream(memory, FakeFileKind::Virtual { path: path.clone() })?;
+                let fd = self.open_fake_fd(FakeFileKind::Virtual { path: path.clone() });
+                if mode.contains('a') {
+                    let _ = self.seek_fake_fd(fd, 0, SEEK_END);
+                }
+                let ptr = self.alloc_fake_file(memory, fd, stream_flags)?;
                 trace_hle_file(format_args!(
                     "fopen path={path:?} mode={mode:?} -> stream {ptr:#010x}"
                 ));
@@ -2522,11 +2819,16 @@ impl HleRuntime {
 
     fn fdopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
+        let mode = load_c_string(memory, cpu.reg(1), 16).unwrap_or_else(|_| String::new());
         if fd == u32::MAX || self.fake_file_index(fd).is_none() {
             self.set_errno(memory, 9)?;
             return Ok(self.return32(cpu, 0));
         }
-        let ptr = self.alloc_fake_file(memory, fd)?;
+        let Some(stream_flags) = fake_stdio_flags_from_mode(&mode) else {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, 0));
+        };
+        let ptr = self.alloc_fake_file(memory, fd, stream_flags)?;
         Ok(self.return32(cpu, ptr))
     }
 
@@ -2540,13 +2842,134 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn fflush_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        if stream == 0 {
+            return Ok(self.return32(cpu, 0));
+        }
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if self.fake_file_index(fd).is_some() {
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, EBADF)?;
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
+    fn fseek_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        let offset = cpu.reg(1) as i32 as i64;
+        let whence = cpu.reg(2);
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        match self.seek_fake_fd(fd, offset, whence) {
+            Ok(position) => {
+                if let Some(file_idx) = self.fake_file_index(fd) {
+                    self.files[file_idx].eof = false;
+                    self.files[file_idx].error = false;
+                }
+                self.sync_fake_file_stream_flags(memory, stream, fd)?;
+                trace_hle_file(format_args!(
+                    "fseek stream={stream:#010x} fd={fd} offset={offset} whence={whence} -> {position}"
+                ));
+                Ok(self.return32(cpu, 0))
+            }
+            Err(errno) => {
+                self.set_errno(memory, errno)?;
+                trace_hle_file(format_args!(
+                    "fseek stream={stream:#010x} fd={fd} offset={offset} whence={whence} -> -1"
+                ));
+                Ok(self.return32(cpu, u32::MAX))
+            }
+        }
+    }
+
+    fn ftell_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let position = self.files[file_idx].offset;
+        trace_hle_file(format_args!(
+            "ftell stream={stream:#010x} fd={fd} -> {position}"
+        ));
+        Ok(self.return32(cpu, position))
+    }
+
+    fn feof_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET))
+            .unwrap_or_else(|_| Self::fake_file_state_flags(&self.files[file_idx]));
+        Ok(self.return32(cpu, u32::from(flags & BIONIC_FILE_FLAG_SEOF != 0)))
+    }
+
+    fn ferror_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let stream = cpu.reg(0);
+        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        let flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET))
+            .unwrap_or_else(|_| Self::fake_file_state_flags(&self.files[file_idx]));
+        Ok(self.return32(cpu, u32::from(flags & BIONIC_FILE_FLAG_SERR != 0)))
+    }
+
     fn close_call(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         self.close_fd(cpu.reg(0));
         Ok(self.return32(cpu, 0))
     }
 
+    fn lseek_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let offset = cpu.reg(1) as i32 as i64;
+        let whence = cpu.reg(2);
+        match self.seek_fake_fd(fd, offset, whence) {
+            Ok(position) => {
+                trace_hle_file(format_args!(
+                    "lseek fd={fd} offset={offset} whence={whence} -> {position}"
+                ));
+                Ok(self.return32(cpu, position))
+            }
+            Err(errno) => {
+                self.set_errno(memory, errno)?;
+                trace_hle_file(format_args!(
+                    "lseek fd={fd} offset={offset} whence={whence} -> -1"
+                ));
+                Ok(self.return32(cpu, u32::MAX))
+            }
+        }
+    }
+
+    fn fdatasync_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        if self.fake_file_index(fd).is_some() {
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, EBADF)?;
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
     fn open_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        let path = load_c_string(memory, cpu.reg(0), 256)?;
+        let path = normalize_virtual_path(&load_c_string(memory, cpu.reg(0), 512)?);
         let flags = cpu.reg(1);
         let mode = cpu.reg(2);
         if is_random_device_path(&path) {
@@ -2557,12 +2980,41 @@ impl HleRuntime {
             return Ok(self.return32(cpu, fd));
         }
         if is_virtual_storage_path(&path) {
-            let wants_create = flags & 0x40 != 0 || flags & 0x200 != 0 || flags & 0x400 != 0;
+            let wants_create = flags & O_CREAT != 0;
+            let wants_truncate = flags & O_TRUNC != 0;
+            let wants_append = flags & O_APPEND != 0;
+            if self.virtual_dir_exists(&path) {
+                if flags & O_ACCMODE == O_RDONLY && !wants_create && !wants_truncate {
+                    let normalized = normalize_virtual_dir_path(&path);
+                    let entries = self.virtual_dir_entries(&normalized);
+                    let fd = self.open_fake_fd(FakeFileKind::Directory {
+                        path: normalized,
+                        entries,
+                        index: 0,
+                        dirent: 0,
+                    });
+                    trace_hle_file(format_args!(
+                        "open path={path:?} flags={flags:#x} mode={mode:#x} -> fd {fd}"
+                    ));
+                    return Ok(self.return32(cpu, fd));
+                }
+                self.set_errno(memory, EISDIR)?;
+                trace_hle_file(format_args!(
+                    "open path={path:?} flags={flags:#x} mode={mode:#x} -> -1"
+                ));
+                return Ok(self.return32(cpu, u32::MAX));
+            }
             if wants_create {
+                self.create_virtual_file(&path, true);
+            }
+            if wants_truncate && self.virtual_file_index(&path).is_some() {
                 self.create_virtual_file(&path, false);
             }
             if wants_create || self.virtual_file_index(&path).is_some() {
                 let fd = self.open_fake_fd(FakeFileKind::Virtual { path: path.clone() });
+                if wants_append {
+                    let _ = self.seek_fake_fd(fd, 0, SEEK_END);
+                }
                 trace_hle_file(format_args!(
                     "open path={path:?} flags={flags:#x} mode={mode:#x} -> fd {fd}"
                 ));
@@ -2573,6 +3025,38 @@ impl HleRuntime {
         trace_hle_file(format_args!(
             "open path={path:?} flags={flags:#x} mode={mode:#x} -> -1"
         ));
+        Ok(self.return32(cpu, u32::MAX))
+    }
+
+    fn access_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = normalize_virtual_path(&load_c_string(memory, cpu.reg(0), 512)?);
+        let exists = is_random_device_path(&path)
+            || self.virtual_file_index(&path).is_some()
+            || self.virtual_dir_exists(&path);
+        if exists {
+            trace_hle_file(format_args!("access path={path:?} -> 0"));
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, ENOENT)?;
+            trace_hle_file(format_args!("access path={path:?} -> -1"));
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
+    fn mkdir_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = normalize_virtual_path(&load_c_string(memory, cpu.reg(0), 512)?);
+        let mode = cpu.reg(1);
+        if is_virtual_storage_path(&path) {
+            self.create_virtual_dir(&path);
+            trace_hle_file(format_args!("mkdir path={path:?} mode={mode:#o} -> 0"));
+            return Ok(self.return32(cpu, 0));
+        }
+        if self.virtual_dir_exists(&path) {
+            self.set_errno(memory, EEXIST)?;
+        } else {
+            self.set_errno(memory, ENOENT)?;
+        }
+        trace_hle_file(format_args!("mkdir path={path:?} mode={mode:#o} -> -1"));
         Ok(self.return32(cpu, u32::MAX))
     }
 
@@ -2598,7 +3082,7 @@ impl HleRuntime {
     }
 
     fn stat_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        let path = load_c_string(memory, cpu.reg(0), 256)?;
+        let path = normalize_virtual_path(&load_c_string(memory, cpu.reg(0), 512)?);
         let stat_buf = cpu.reg(1);
         if stat_buf == 0 {
             self.set_errno(memory, 14)?;
@@ -2625,6 +3109,135 @@ impl HleRuntime {
             stat.mode, stat.size
         ));
         Ok(self.return32(cpu, 0))
+    }
+
+    fn rename_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let old_path = load_c_string(memory, cpu.reg(0), 512)?;
+        let new_path = load_c_string(memory, cpu.reg(1), 512)?;
+        if self.rename_virtual_path(&old_path, &new_path) {
+            trace_hle_file(format_args!(
+                "rename old={old_path:?} new={new_path:?} -> 0"
+            ));
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, ENOENT)?;
+            trace_hle_file(format_args!(
+                "rename old={old_path:?} new={new_path:?} -> -1"
+            ));
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
+    fn unlink_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 512)?;
+        if self.remove_virtual_file(&path) {
+            trace_hle_file(format_args!("unlink path={path:?} -> 0"));
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, ENOENT)?;
+            trace_hle_file(format_args!("unlink path={path:?} -> -1"));
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
+    fn remove_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 512)?;
+        if self.remove_virtual_file(&path) || self.remove_virtual_dir(&path) {
+            trace_hle_file(format_args!("remove path={path:?} -> 0"));
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, ENOENT)?;
+            trace_hle_file(format_args!("remove path={path:?} -> -1"));
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
+    fn rmdir_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 512)?;
+        if self.remove_virtual_dir(&path) {
+            trace_hle_file(format_args!("rmdir path={path:?} -> 0"));
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, ENOENT)?;
+            trace_hle_file(format_args!("rmdir path={path:?} -> -1"));
+            Ok(self.return32(cpu, u32::MAX))
+        }
+    }
+
+    fn opendir_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let path = load_c_string(memory, cpu.reg(0), 512)?;
+        let normalized = normalize_virtual_dir_path(&path);
+        if !self.virtual_dir_exists(&normalized) {
+            self.set_errno(memory, ENOENT)?;
+            trace_hle_file(format_args!("opendir path={path:?} -> null"));
+            return Ok(self.return32(cpu, 0));
+        }
+        let dirent = self.alloc(ANDROID_DIRENT_SIZE, 8)?;
+        let entries = self.virtual_dir_entries(&normalized);
+        let fd = self.open_fake_fd(FakeFileKind::Directory {
+            path: normalized,
+            entries,
+            index: 0,
+            dirent,
+        });
+        let dir = self.alloc_fake_file(memory, fd, 0)?;
+        trace_hle_file(format_args!("opendir path={path:?} -> dir {dir:#010x}"));
+        Ok(self.return32(cpu, dir))
+    }
+
+    fn readdir_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dir = cpu.reg(0);
+        if dir == 0 {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, 0));
+        }
+        let fd = self.fake_file_fd(memory, dir)?;
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, 0));
+        };
+        let (dirent, entry) = {
+            let FakeFileKind::Directory {
+                entries,
+                index,
+                dirent,
+                ..
+            } = &mut self.files[file_idx].kind
+            else {
+                self.set_errno(memory, EBADF)?;
+                return Ok(self.return32(cpu, 0));
+            };
+            if *index >= entries.len() {
+                return Ok(self.return32(cpu, 0));
+            }
+            let entry = entries[*index].clone();
+            *index += 1;
+            (*dirent, entry)
+        };
+        write_android_dirent(memory, dirent, &entry)?;
+        trace_hle_file(format_args!(
+            "readdir dir={dir:#010x} name={:?} type={} -> {:#010x}",
+            entry.name, entry.ty, dirent
+        ));
+        Ok(self.return32(cpu, dirent))
+    }
+
+    fn closedir_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let dir = cpu.reg(0);
+        if dir == 0 {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let fd = self.fake_file_fd(memory, dir)?;
+        if self.fake_file_index(fd).is_some() {
+            self.close_fd(fd);
+            trace_hle_file(format_args!("closedir dir={dir:#010x} -> 0"));
+            Ok(self.return32(cpu, 0))
+        } else {
+            self.set_errno(memory, EBADF)?;
+            trace_hle_file(format_args!("closedir dir={dir:#010x} -> -1"));
+            Ok(self.return32(cpu, u32::MAX))
+        }
     }
 
     fn pipe_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2691,6 +3304,56 @@ impl HleRuntime {
             _ => 0,
         };
         Ok(self.return32(cpu, result))
+    }
+
+    fn inet_addr_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let text = load_c_string(memory, cpu.reg(0), 64).unwrap_or_default();
+        let value = parse_ipv4_addr(&text).unwrap_or(u32::MAX);
+        Ok(self.return32(cpu, value))
+    }
+
+    fn inet_ntoa_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let octets = cpu.reg(0).to_le_bytes();
+        let text = format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3]);
+        let ptr = match self.inet_ntoa_buffer {
+            Some(ptr) => ptr,
+            None => {
+                let ptr = self.alloc(INET_NTOA_BUFFER_SIZE, 1)?;
+                self.inet_ntoa_buffer = Some(ptr);
+                ptr
+            }
+        };
+        for offset in 0..INET_NTOA_BUFFER_SIZE {
+            store8(memory, ptr.wrapping_add(offset), 0)?;
+        }
+        for (idx, byte) in text.bytes().enumerate() {
+            store8(memory, ptr.wrapping_add(idx as u32), byte)?;
+        }
+        Ok(self.return32(cpu, ptr))
+    }
+
+    fn strerror_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let errno = cpu.reg(0);
+        let text = errno_message(errno);
+        let ptr = match self.strerror_buffer {
+            Some(ptr) => ptr,
+            None => {
+                let ptr = self.alloc(STRERROR_BUFFER_SIZE, 1)?;
+                self.strerror_buffer = Some(ptr);
+                ptr
+            }
+        };
+        for offset in 0..STRERROR_BUFFER_SIZE {
+            store8(memory, ptr.wrapping_add(offset), 0)?;
+        }
+        for (idx, byte) in text
+            .bytes()
+            .take((STRERROR_BUFFER_SIZE - 1) as usize)
+            .enumerate()
+        {
+            store8(memory, ptr.wrapping_add(idx as u32), byte)?;
+        }
+        Ok(self.return32(cpu, ptr))
     }
 
     fn sendto_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -3038,6 +3701,35 @@ impl HleRuntime {
         Ok(self.return32(cpu, read))
     }
 
+    fn pread_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let buf = cpu.reg(1);
+        let count = cpu.reg(2);
+        let offset = cpu.reg(3) as i32 as i64;
+        if fd < FIRST_FAKE_FD || buf == 0 {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if offset < 0 || offset > u32::MAX as i64 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let saved_offset = self.files[file_idx].offset;
+        self.files[file_idx].offset = offset as u32;
+        let read = self.read_fake_fd(memory, fd, buf, count)?;
+        if let Some(file_idx) = self.fake_file_index(fd) {
+            self.files[file_idx].offset = saved_offset;
+        }
+        trace_hle_file(format_args!(
+            "pread fd={fd} offset={offset} count={count} -> {read}"
+        ));
+        Ok(self.return32(cpu, read))
+    }
+
     fn fread_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let ptr = cpu.reg(0);
         let size = cpu.reg(1);
@@ -3053,6 +3745,7 @@ impl HleRuntime {
             return Ok(self.return32(cpu, 0));
         };
         let read = self.read_fake_fd(memory, fd, ptr, total)?;
+        self.sync_fake_file_stream_flags(memory, stream, fd)?;
         Ok(self.return32(cpu, read / size))
     }
 
@@ -3085,6 +3778,7 @@ impl HleRuntime {
         };
         trace_hle_write("fwrite", memory, ptr, total);
         let written = self.write_fake_fd(memory, fd, ptr, total)?;
+        self.sync_fake_file_stream_flags(memory, stream, fd)?;
         Ok(self.return32(cpu, written / size))
     }
 
@@ -3100,6 +3794,7 @@ impl HleRuntime {
             return Ok(self.return32(cpu, 0));
         };
         self.write_fake_fd(memory, fd, ptr, len)?;
+        self.sync_fake_file_stream_flags(memory, stream, fd)?;
         Ok(self.return32(cpu, 0))
     }
 
@@ -3123,6 +3818,7 @@ impl HleRuntime {
         let scratch = self.alloc(1, 1)?;
         store8(memory, scratch, ch)?;
         self.write_fake_fd(memory, fd, scratch, 1)?;
+        self.sync_fake_file_stream_flags(memory, stream, fd)?;
         Ok(self.return32(cpu, u32::from(ch)))
     }
 
@@ -3136,9 +3832,10 @@ impl HleRuntime {
         &mut self,
         memory: &mut M,
         kind: FakeFileKind,
+        flags: u16,
     ) -> Result<u32, HleError> {
         let fd = self.open_fake_fd(kind);
-        self.alloc_fake_file(memory, fd)
+        self.alloc_fake_file(memory, fd, flags)
     }
 
     fn open_fake_fd(&mut self, kind: FakeFileKind) -> u32 {
@@ -3147,17 +3844,43 @@ impl HleRuntime {
             fd,
             kind,
             offset: 0,
+            eof: false,
+            error: false,
         });
         fd
     }
 
-    fn alloc_fake_file<M: Memory>(&mut self, memory: &mut M, fd: u32) -> Result<u32, HleError> {
+    fn alloc_fake_file<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        fd: u32,
+        flags: u16,
+    ) -> Result<u32, HleError> {
         let ptr = self.alloc(FAKE_FILE_SIZE, 8)?;
         for offset in 0..FAKE_FILE_SIZE {
             store8(memory, ptr.wrapping_add(offset), 0)?;
         }
+        store16(memory, ptr.wrapping_add(FAKE_FILE_FLAGS_OFFSET), flags)?;
         store16(memory, ptr.wrapping_add(FAKE_FILE_FD_OFFSET), fd as u16)?;
         Ok(ptr)
+    }
+
+    fn sync_fake_file_stream_flags<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        stream: u32,
+        fd: u32,
+    ) -> Result<(), HleError> {
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return Ok(());
+        };
+        let base_flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET)).unwrap_or(0)
+            & !(BIONIC_FILE_FLAG_SEOF | BIONIC_FILE_FLAG_SERR);
+        store16(
+            memory,
+            stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET),
+            base_flags | Self::fake_file_state_flags(&self.files[file_idx]),
+        )
     }
 
     fn fake_file_fd<M: Memory>(&mut self, memory: &mut M, stream: u32) -> Result<u32, HleError> {
@@ -3169,6 +3892,42 @@ impl HleRuntime {
 
     fn fake_file_index(&self, fd: u32) -> Option<usize> {
         self.files.iter().position(|file| file.fd == fd)
+    }
+
+    fn fake_file_state_flags(file: &FakeFile) -> u16 {
+        (if file.eof { BIONIC_FILE_FLAG_SEOF } else { 0 })
+            | if file.error { BIONIC_FILE_FLAG_SERR } else { 0 }
+    }
+
+    fn fake_file_len(&self, file_idx: usize) -> Result<u32, u32> {
+        match &self.files[file_idx].kind {
+            FakeFileKind::Random => Ok(self.files[file_idx].offset),
+            FakeFileKind::Virtual { path } => self
+                .virtual_file_index(path)
+                .map(|idx| self.virtual_files[idx].data.len() as u32)
+                .ok_or(ENOENT),
+            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+                Err(EINVAL)
+            }
+        }
+    }
+
+    fn seek_fake_fd(&mut self, fd: u32, offset: i64, whence: u32) -> Result<u32, u32> {
+        let file_idx = self.fake_file_index(fd).ok_or(EBADF)?;
+        let base = match whence {
+            SEEK_SET => 0,
+            SEEK_CUR => i64::from(self.files[file_idx].offset),
+            SEEK_END => i64::from(self.fake_file_len(file_idx)?),
+            _ => return Err(EINVAL),
+        };
+        let position = base.checked_add(offset).ok_or(EINVAL)?;
+        if position < 0 || position > i64::from(u32::MAX) {
+            return Err(EINVAL);
+        }
+        self.files[file_idx].offset = position as u32;
+        self.files[file_idx].eof = false;
+        self.files[file_idx].error = false;
+        Ok(position as u32)
     }
 
     fn fake_socket_index(&self, fd: u32) -> Option<usize> {
@@ -3192,18 +3951,26 @@ impl HleRuntime {
             FakeFileKind::Virtual { path } => self.virtual_file_index(path).is_some_and(|idx| {
                 self.files[file_idx].offset < self.virtual_files[idx].data.len() as u32
             }),
-            FakeFileKind::Socket { .. } | FakeFileKind::Epoll => false,
+            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+                false
+            }
         }
     }
 
     fn virtual_file_index(&self, path: &str) -> Option<usize> {
+        let path = normalize_virtual_path(path);
         self.virtual_files.iter().position(|file| file.path == path)
     }
 
+    fn virtual_dir_index(&self, path: &str) -> Option<usize> {
+        let path = normalize_virtual_dir_path(&normalize_virtual_path(path));
+        self.virtual_dirs.iter().position(|dir| dir == &path)
+    }
+
     fn virtual_dir_exists(&self, path: &str) -> bool {
-        let path = path.trim_end_matches('/');
+        let path = normalize_virtual_dir_path(&normalize_virtual_path(path));
         if matches!(
-            path,
+            path.as_str(),
             "/sdcard"
                 | "/sdcard/games"
                 | "/sdcard/games/com.mojang"
@@ -3211,7 +3978,10 @@ impl HleRuntime {
         ) {
             return true;
         }
-        if !is_virtual_storage_path(path) {
+        if self.virtual_dir_index(&path).is_some() {
+            return true;
+        }
+        if !is_virtual_storage_path(&path) {
             return false;
         }
         let prefix = format!("{path}/");
@@ -3220,17 +3990,154 @@ impl HleRuntime {
             .any(|file| file.path.starts_with(&prefix))
     }
 
+    fn create_virtual_dir(&mut self, path: &str) {
+        let path = normalize_virtual_dir_path(&normalize_virtual_path(path));
+        if self.virtual_dir_index(&path).is_none() {
+            self.virtual_dirs.push(path);
+        }
+    }
+
     fn create_virtual_file(&mut self, path: &str, append: bool) {
-        if let Some(idx) = self.virtual_file_index(path) {
+        let path = normalize_virtual_path(path);
+        if let Some(idx) = self.virtual_file_index(&path) {
             if !append {
                 self.virtual_files[idx].data.clear();
             }
         } else {
             self.virtual_files.push(VirtualFile {
-                path: path.to_string(),
+                path,
                 data: Vec::new(),
             });
         }
+    }
+
+    fn remove_virtual_file(&mut self, path: &str) -> bool {
+        let path = normalize_virtual_path(path);
+        if let Some(idx) = self.virtual_file_index(&path) {
+            self.virtual_files.remove(idx);
+            self.files.retain(|file| {
+                !matches!(&file.kind, FakeFileKind::Virtual { path: file_path } if file_path == &path)
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove_virtual_dir(&mut self, path: &str) -> bool {
+        let path = normalize_virtual_dir_path(&normalize_virtual_path(path));
+        let Some(idx) = self.virtual_dir_index(&path) else {
+            return false;
+        };
+        let prefix = format!("{path}/");
+        if self
+            .virtual_files
+            .iter()
+            .any(|file| file.path.starts_with(&prefix))
+            || self
+                .virtual_dirs
+                .iter()
+                .any(|dir| dir != &path && dir.starts_with(&prefix))
+        {
+            return false;
+        }
+        self.virtual_dirs.remove(idx);
+        true
+    }
+
+    fn rename_virtual_path(&mut self, old_path: &str, new_path: &str) -> bool {
+        let old_path = normalize_virtual_path(old_path);
+        let new_path = normalize_virtual_path(new_path);
+        if !is_virtual_storage_path(&old_path) || !is_virtual_storage_path(&new_path) {
+            return false;
+        }
+        if let Some(old_idx) = self.virtual_file_index(&old_path) {
+            if let Some(new_idx) = self.virtual_file_index(&new_path) {
+                if new_idx != old_idx {
+                    self.virtual_files.remove(new_idx);
+                }
+            }
+            if let Some(old_idx) = self.virtual_file_index(&old_path) {
+                self.virtual_files[old_idx].path = new_path.clone();
+            }
+            for file in &mut self.files {
+                if let FakeFileKind::Virtual { path } = &mut file.kind {
+                    if *path == old_path {
+                        *path = new_path.clone();
+                    }
+                }
+            }
+            return true;
+        }
+        let old_dir = normalize_virtual_dir_path(&old_path);
+        if self.virtual_dir_index(&old_dir).is_none() {
+            return false;
+        }
+        let new_dir = normalize_virtual_dir_path(&new_path);
+        let old_prefix = format!("{old_dir}/");
+        let new_prefix = format!("{new_dir}/");
+        self.virtual_dirs.retain(|dir| dir != &new_dir);
+        for dir in &mut self.virtual_dirs {
+            if *dir == old_dir {
+                *dir = new_dir.clone();
+            } else if let Some(rest) = dir.strip_prefix(&old_prefix) {
+                *dir = format!("{new_prefix}{rest}");
+            }
+        }
+        for file in &mut self.virtual_files {
+            if let Some(rest) = file.path.strip_prefix(&old_prefix) {
+                file.path = format!("{new_prefix}{rest}");
+            }
+        }
+        for file in &mut self.files {
+            if let FakeFileKind::Virtual { path } | FakeFileKind::Directory { path, .. } =
+                &mut file.kind
+            {
+                if *path == old_dir {
+                    *path = new_dir.clone();
+                } else if let Some(rest) = path.strip_prefix(&old_prefix) {
+                    *path = format!("{new_prefix}{rest}");
+                }
+            }
+        }
+        true
+    }
+
+    fn virtual_dir_entries(&self, path: &str) -> Vec<VirtualDirEntry> {
+        let path = normalize_virtual_dir_path(&normalize_virtual_path(path));
+        let mut entries = BTreeMap::<String, u8>::new();
+        entries.insert(".".to_string(), DT_DIR);
+        entries.insert("..".to_string(), DT_DIR);
+        let prefix = format!("{path}/");
+        for dir in &self.virtual_dirs {
+            if let Some(rest) = dir.strip_prefix(&prefix) {
+                if let Some(name) = rest.split('/').next().filter(|name| !name.is_empty()) {
+                    entries.entry(name.to_string()).or_insert(DT_DIR);
+                }
+            }
+        }
+        for file in &self.virtual_files {
+            if let Some(rest) = file.path.strip_prefix(&prefix) {
+                if let Some(name) = rest.split('/').next().filter(|name| !name.is_empty()) {
+                    entries
+                        .entry(name.to_string())
+                        .and_modify(|ty| {
+                            if *ty != DT_DIR {
+                                *ty = DT_REG;
+                            }
+                        })
+                        .or_insert(DT_REG);
+                }
+            }
+        }
+        entries
+            .into_iter()
+            .map(|(name, ty)| VirtualDirEntry {
+                ino: fake_ino_from_path(&format!("{path}/{name}")),
+                name,
+                ty,
+            })
+            .collect()
     }
 
     fn fake_file_stat(&self, file_idx: usize) -> AndroidArmStat {
@@ -3244,6 +4151,7 @@ impl HleRuntime {
                     .unwrap_or(0);
                 fake_regular_file_stat(fake_ino_from_path(path), size)
             }
+            FakeFileKind::Directory { path, .. } => fake_directory_stat(fake_ino_from_path(path)),
             FakeFileKind::Socket {
                 domain,
                 ty,
@@ -3274,10 +4182,13 @@ impl HleRuntime {
             FakeFileKind::Random => {
                 self.fill_random(memory, buf, count)?;
                 self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(count);
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
                 Ok(count)
             }
             FakeFileKind::Virtual { path } => {
                 let Some(virtual_idx) = self.virtual_file_index(&path) else {
+                    self.files[file_idx].eof = true;
                     return Ok(0);
                 };
                 let offset = self.files[file_idx].offset as usize;
@@ -3288,9 +4199,14 @@ impl HleRuntime {
                     store8(memory, buf.wrapping_add(idx as u32), data[offset + idx])?;
                 }
                 self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(read as u32);
+                self.files[file_idx].eof = read < count as usize;
+                self.files[file_idx].error = false;
                 Ok(read as u32)
             }
-            FakeFileKind::Socket { .. } | FakeFileKind::Epoll => Ok(0),
+            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+                self.files[file_idx].error = true;
+                Ok(0)
+            }
         }
     }
 
@@ -3305,7 +4221,11 @@ impl HleRuntime {
             return Ok(count);
         };
         match self.files[file_idx].kind.clone() {
-            FakeFileKind::Random => Ok(count),
+            FakeFileKind::Random => {
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
+                Ok(count)
+            }
             FakeFileKind::Virtual { path } => {
                 let virtual_idx = if let Some(idx) = self.virtual_file_index(&path) {
                     idx
@@ -3326,9 +4246,53 @@ impl HleRuntime {
                         load8(memory, buf.wrapping_add(idx))?;
                 }
                 self.files[file_idx].offset = self.files[file_idx].offset.wrapping_add(count);
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
                 Ok(count)
             }
-            FakeFileKind::Socket { .. } | FakeFileKind::Epoll => Ok(count),
+            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+                self.files[file_idx].error = true;
+                Ok(count)
+            }
+        }
+    }
+
+    fn write_fake_fd_bytes(&mut self, fd: u32, bytes: &[u8]) -> u32 {
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            return bytes.len() as u32;
+        };
+        match self.files[file_idx].kind.clone() {
+            FakeFileKind::Random => {
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
+                bytes.len() as u32
+            }
+            FakeFileKind::Virtual { path } => {
+                let virtual_idx = if let Some(idx) = self.virtual_file_index(&path) {
+                    idx
+                } else {
+                    self.virtual_files.push(VirtualFile {
+                        path: path.clone(),
+                        data: Vec::new(),
+                    });
+                    self.virtual_files.len() - 1
+                };
+                let offset = self.files[file_idx].offset as usize;
+                let end = offset.saturating_add(bytes.len());
+                if self.virtual_files[virtual_idx].data.len() < end {
+                    self.virtual_files[virtual_idx].data.resize(end, 0);
+                }
+                self.virtual_files[virtual_idx].data[offset..end].copy_from_slice(bytes);
+                self.files[file_idx].offset =
+                    self.files[file_idx].offset.wrapping_add(bytes.len() as u32);
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
+                bytes.len() as u32
+            }
+            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+                self.files[file_idx].error = true;
+                bytes.len() as u32
+            }
         }
     }
 
@@ -5672,6 +6636,12 @@ impl HleRuntime {
     }
 
     fn push_gles_event(&mut self, event: GlesEvent) {
+        if matches!(
+            event,
+            GlesEvent::DrawArrays { .. } | GlesEvent::DrawElements { .. }
+        ) {
+            self.gles_draw_submissions = self.gles_draw_submissions.saturating_add(1);
+        }
         let event_index = self.gles_event_index;
         self.gles_event_index = self.gles_event_index.saturating_add(1);
         self.maybe_trace_gles_event(event_index, &event);
@@ -6329,139 +7299,202 @@ impl HleRuntime {
     }
 
     pub(crate) fn alloc(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
-        self.alloc_bump(size, align, false)
+        self.alloc_from_heap(size, align, false)
     }
 
     fn alloc_guest(&mut self, size: u32, align: u32) -> Result<u32, HleError> {
-        let size = size.max(1);
-        if let Some(ptr) = self.alloc_freed(size, align)? {
-            return Ok(ptr);
-        }
-        self.alloc_bump(size, align, true)
+        self.alloc_from_heap(size, align, true)
     }
 
-    fn alloc_bump(&mut self, size: u32, align: u32, freeable: bool) -> Result<u32, HleError> {
+    fn alloc_from_heap(&mut self, size: u32, align: u32, freeable: bool) -> Result<u32, HleError> {
         let size = size.max(1);
-        let start =
-            align_up(self.heap_next, align).ok_or(HleError::HeapExhausted { requested: size })?;
+        if align == 0 || !align.is_power_of_two() {
+            return Err(HleError::HeapExhausted { requested: size });
+        }
+        let heap_capacity = self.heap_end.saturating_sub(self.heap_base);
+        if heap_capacity >= HLE_HEAP_SMALL_SLAB_SIZE + HLE_HEAP_SMALL_ALIGN {
+            if let Some(class_index) = small_heap_class_index(size, align) {
+                return self.alloc_small_from_heap(size, class_index, freeable);
+            }
+        }
+        self.alloc_large_from_heap(size, align, freeable)
+    }
+
+    fn alloc_small_from_heap(
+        &mut self,
+        size: u32,
+        class_index: usize,
+        freeable: bool,
+    ) -> Result<u32, HleError> {
+        if self.small_heap_bins[class_index].free_slots.is_empty() {
+            self.grow_small_heap_bin(class_index)?;
+        }
+        let start = self.small_heap_bins[class_index]
+            .free_slots
+            .pop()
+            .ok_or(HleError::HeapExhausted { requested: size })?;
+        if self.heap_allocations.contains_key(&start) {
+            return Err(HleError::HeapExhausted { requested: size });
+        }
+        self.heap_allocations.insert(
+            start,
+            GuestHeapAllocation {
+                kind: GuestHeapAllocationKind::Small { class_index },
+                size,
+                freeable,
+            },
+        );
+        if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
+            eprintln!("HLE alloc size={size:#x} align={HLE_HEAP_SMALL_ALIGN:#x} -> {start:#010x}");
+        }
+        Ok(start)
+    }
+
+    fn grow_small_heap_bin(&mut self, class_index: usize) -> Result<(), HleError> {
+        let class_size = SmallHeapBin::class_size(class_index);
+        let allocation_size = HLE_HEAP_SMALL_SLAB_SIZE
+            .checked_add(HLE_HEAP_SMALL_ALIGN - 1)
+            .ok_or(HleError::HeapExhausted {
+                requested: class_size,
+            })?;
+        let allocation =
+            self.heap_allocator
+                .allocate(allocation_size)
+                .ok_or(HleError::HeapExhausted {
+                    requested: class_size,
+                })?;
+        let raw_addr =
+            self.heap_base
+                .checked_add(allocation.offset)
+                .ok_or(HleError::HeapExhausted {
+                    requested: class_size,
+                })?;
+        let start = align_up(raw_addr, HLE_HEAP_SMALL_ALIGN).ok_or(HleError::HeapExhausted {
+            requested: class_size,
+        })?;
+        let end = start
+            .checked_add(HLE_HEAP_SMALL_SLAB_SIZE)
+            .ok_or(HleError::HeapExhausted {
+                requested: class_size,
+            })?;
+        if end > self.heap_end {
+            self.heap_allocator.free(allocation);
+            return Err(HleError::HeapExhausted {
+                requested: class_size,
+            });
+        }
+
+        let slot_count = HLE_HEAP_SMALL_SLAB_SIZE / class_size;
+        let bin = &mut self.small_heap_bins[class_index];
+        bin.slab_count = bin.slab_count.saturating_add(1);
+        bin.free_slots.reserve(slot_count as usize);
+        for slot in (0..slot_count).rev() {
+            bin.free_slots.push(start + slot * class_size);
+        }
+        Ok(())
+    }
+
+    fn alloc_large_from_heap(
+        &mut self,
+        size: u32,
+        align: u32,
+        freeable: bool,
+    ) -> Result<u32, HleError> {
+        let padding = align
+            .checked_sub(1)
+            .ok_or(HleError::HeapExhausted { requested: size })?;
+        let allocation_size = size
+            .checked_add(padding)
+            .and_then(|size| align_up(size, HLE_HEAP_SMALL_ALIGN))
+            .ok_or(HleError::HeapExhausted { requested: size })?;
+        let allocation = self
+            .heap_allocator
+            .allocate(allocation_size)
+            .ok_or(HleError::HeapExhausted { requested: size })?;
+        let raw_offset = allocation.offset;
+        let raw_addr = self
+            .heap_base
+            .checked_add(raw_offset)
+            .ok_or(HleError::HeapExhausted { requested: size })?;
+        let start = align_up(raw_addr, align).ok_or(HleError::HeapExhausted { requested: size })?;
         let end = start
             .checked_add(size)
             .ok_or(HleError::HeapExhausted { requested: size })?;
-        if end > self.heap_end {
+        if end > self.heap_end || self.heap_allocations.contains_key(&start) {
+            self.heap_allocator.free(allocation);
             return Err(HleError::HeapExhausted { requested: size });
         }
-        self.heap_next = end;
-        self.allocations.push(HleAllocation {
-            ptr: start,
-            size,
-            freeable,
-        });
+        self.heap_allocations.insert(
+            start,
+            GuestHeapAllocation {
+                kind: GuestHeapAllocationKind::Large { allocation },
+                size,
+                freeable,
+            },
+        );
         if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
             eprintln!("HLE alloc size={size:#x} align={align:#x} -> {start:#010x}");
         }
         Ok(start)
     }
 
-    fn alloc_freed(&mut self, size: u32, align: u32) -> Result<Option<u32>, HleError> {
-        let Some((idx, start, end)) =
-            self.freed.iter().enumerate().find_map(|(idx, allocation)| {
-                let start = align_up(allocation.ptr, align)?;
-                let end = start.checked_add(size)?;
-                let block_end = allocation.ptr.checked_add(allocation.size)?;
-                (end <= block_end).then_some((idx, start, end))
-            })
-        else {
-            return Ok(None);
-        };
-        let allocation = self.freed.remove(idx);
-        let block_end = allocation
-            .ptr
-            .checked_add(allocation.size)
-            .ok_or(HleError::HeapExhausted { requested: size })?;
-        if allocation.ptr < start {
-            self.insert_free_block(HleAllocation {
-                ptr: allocation.ptr,
-                size: start - allocation.ptr,
-                freeable: true,
-            });
-        }
-        if end < block_end {
-            self.insert_free_block(HleAllocation {
-                ptr: end,
-                size: block_end - end,
-                freeable: true,
-            });
-        }
-        self.allocations.push(HleAllocation {
-            ptr: start,
-            size,
-            freeable: true,
-        });
-        if std::env::var_os("AEMU_TRACE_HLE_ALLOC").is_some() {
-            eprintln!("HLE alloc reused size={size:#x} align={align:#x} -> {start:#010x}");
-        }
-        Ok(Some(start))
-    }
-
     fn free_ptr(&mut self, ptr: u32) {
-        if ptr == 0 {
+        let Some(guest_allocation) = self.heap_allocations.get(&ptr).copied() else {
+            return;
+        };
+        if !guest_allocation.freeable {
             return;
         }
-        if let Some(idx) = self
-            .allocations
-            .iter()
-            .rposition(|allocation| allocation.ptr == ptr && allocation.freeable)
-        {
-            let allocation = self.allocations.remove(idx);
-            self.insert_free_block(allocation);
+        let guest_allocation = self
+            .heap_allocations
+            .remove(&ptr)
+            .expect("heap allocation disappeared after lookup");
+        match guest_allocation.kind {
+            GuestHeapAllocationKind::Small { class_index } => {
+                self.small_heap_bins[class_index].free_slots.push(ptr);
+            }
+            GuestHeapAllocationKind::Large { allocation } => {
+                self.heap_allocator.free(allocation);
+            }
         }
     }
 
     fn allocation_size(&self, ptr: u32) -> Option<u32> {
-        self.allocations
-            .iter()
-            .rev()
-            .find(|allocation| allocation.ptr == ptr && allocation.freeable)
+        self.heap_allocations
+            .get(&ptr)
+            .filter(|allocation| allocation.freeable)
             .map(|allocation| allocation.size)
     }
 
-    fn insert_free_block(&mut self, allocation: HleAllocation) {
-        if allocation.size == 0 {
-            return;
-        }
-        let mut idx = self
-            .freed
-            .partition_point(|block| block.ptr < allocation.ptr);
+    #[cfg(test)]
+    fn storage_report_for_test(&self) -> offset_allocator::StorageReport {
+        self.heap_allocator.storage_report()
+    }
 
-        if idx > 0 {
-            let prev_end = self.freed[idx - 1]
-                .ptr
-                .saturating_add(self.freed[idx - 1].size);
-            if prev_end >= allocation.ptr {
-                let allocation_end = allocation.ptr.saturating_add(allocation.size);
-                let merged_end = prev_end.max(allocation_end);
-                let prev = &mut self.freed[idx - 1];
-                prev.size = merged_end.saturating_sub(prev.ptr);
-                idx -= 1;
-            } else {
-                self.freed.insert(idx, allocation);
-            }
-        } else {
-            self.freed.insert(idx, allocation);
-        }
+    #[cfg(test)]
+    fn heap_allocation_count_for_test(&self) -> usize {
+        self.heap_allocations.len()
+    }
 
-        while idx + 1 < self.freed.len() {
-            let current_end = self.freed[idx].ptr.saturating_add(self.freed[idx].size);
-            let next = self.freed[idx + 1];
-            if current_end < next.ptr {
-                break;
-            }
-            let next_end = next.ptr.saturating_add(next.size);
-            self.freed[idx].size = current_end
-                .max(next_end)
-                .saturating_sub(self.freed[idx].ptr);
-            self.freed.remove(idx + 1);
-        }
+    #[cfg(test)]
+    fn allocation_record_for_test(&self, ptr: u32) -> Option<(u32, u32, bool)> {
+        self.heap_allocations.get(&ptr).map(|allocation| {
+            let offset = match allocation.kind {
+                GuestHeapAllocationKind::Small { .. } => ptr.saturating_sub(self.heap_base),
+                GuestHeapAllocationKind::Large { allocation } => allocation.offset,
+            };
+            (offset, allocation.size, allocation.freeable)
+        })
+    }
+
+    #[cfg(test)]
+    fn small_heap_slab_count_for_test(&self, class_index: usize) -> u32 {
+        self.small_heap_bins[class_index].slab_count
+    }
+
+    #[cfg(test)]
+    fn free_ptr_for_test(&mut self, ptr: u32) {
+        self.free_ptr(ptr);
     }
 
     fn alloc_c_string<M: Memory>(&mut self, memory: &mut M, value: &str) -> Result<u32, HleError> {
@@ -6767,11 +7800,7 @@ fn hle_shape(name: &str) -> HleSymbolShape {
             size: 0x1c,
             code: HleFunctionCode::Memset,
         },
-        "strerror" => HleSymbolShape::FunctionCode {
-            size: 0x08,
-            code: HleFunctionCode::ReturnNull,
-        },
-        "strcmp" | "strlen" | "strncmp" => HleSymbolShape::Function,
+        "strcmp" | "strerror" | "strlen" | "strncmp" => HleSymbolShape::Function,
         "wctob" => HleSymbolShape::FunctionCode {
             size: 0x0c,
             code: HleFunctionCode::Wctob,
@@ -6856,6 +7885,13 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "strtoul"
                 | "strtoull"
                 | "atoi"
+                | "snprintf"
+                | "sprintf"
+                | "vsnprintf"
+                | "vsprintf"
+                | "printf"
+                | "fprintf"
+                | "vfprintf"
                 | "sscanf"
                 | "isalnum"
                 | "isspace"
@@ -6940,12 +7976,31 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "AConfiguration_getLanguage"
                 | "AConfiguration_getCountry"
                 | "AConfiguration_delete"
+                | "access"
                 | "fopen"
                 | "fdopen"
+                | "fdatasync"
                 | "fclose"
+                | "feof"
+                | "ferror"
+                | "fflush"
+                | "fseek"
+                | "fseeko"
+                | "ftell"
+                | "ftello"
                 | "open"
                 | "close"
+                | "lseek"
+                | "mkdir"
+                | "opendir"
+                | "readdir"
+                | "closedir"
+                | "rename"
+                | "unlink"
+                | "remove"
+                | "rmdir"
                 | "fstat"
+                | "fsync"
                 | "stat"
                 | "lstat"
                 | "pipe"
@@ -6958,10 +8013,14 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "sendto"
                 | "recvfrom"
                 | "select"
+                | "inet_addr"
+                | "inet_ntoa"
+                | "strerror"
                 | "epoll_create"
                 | "epoll_ctl"
                 | "epoll_wait"
                 | "read"
+                | "pread"
                 | "fread"
                 | "write"
                 | "fwrite"
@@ -8887,6 +9946,491 @@ enum ScanfLength {
     LongLong,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PrintfFlags {
+    left: bool,
+    plus: bool,
+    space: bool,
+    alternate: bool,
+    zero: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PrintfArgMode {
+    CpuCall {
+        regs: [u32; 4],
+        stack: u32,
+        next_word: usize,
+    },
+    VaList {
+        next_addr: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PrintfArgs {
+    mode: PrintfArgMode,
+}
+
+impl PrintfArgs {
+    fn from_cpu(cpu: &Cpu, fixed_words: usize) -> Self {
+        Self {
+            mode: PrintfArgMode::CpuCall {
+                regs: [cpu.reg(0), cpu.reg(1), cpu.reg(2), cpu.reg(3)],
+                stack: cpu.reg(13),
+                next_word: fixed_words,
+            },
+        }
+    }
+
+    fn from_va_list(next_addr: u32) -> Self {
+        Self {
+            mode: PrintfArgMode::VaList { next_addr },
+        }
+    }
+
+    fn read_u32<M: Memory>(&mut self, memory: &mut M) -> Result<u32, HleError> {
+        match &mut self.mode {
+            PrintfArgMode::CpuCall {
+                regs,
+                stack,
+                next_word,
+            } => {
+                let word = *next_word;
+                *next_word += 1;
+                if word < 4 {
+                    Ok(regs[word])
+                } else {
+                    load32(memory, stack.wrapping_add(((word - 4) * 4) as u32))
+                }
+            }
+            PrintfArgMode::VaList { next_addr } => {
+                let value = load32(memory, *next_addr)?;
+                *next_addr = next_addr.wrapping_add(4);
+                Ok(value)
+            }
+        }
+    }
+
+    fn read_u64<M: Memory>(&mut self, memory: &mut M) -> Result<u64, HleError> {
+        match &mut self.mode {
+            PrintfArgMode::CpuCall { next_word, .. } => {
+                if *next_word % 2 != 0 {
+                    *next_word += 1;
+                }
+            }
+            PrintfArgMode::VaList { next_addr } => {
+                *next_addr = align_up(*next_addr, 8).unwrap_or(*next_addr);
+            }
+        }
+        let lo = self.read_u32(memory)? as u64;
+        let hi = self.read_u32(memory)? as u64;
+        Ok(lo | (hi << 32))
+    }
+
+    fn read_f64<M: Memory>(&mut self, memory: &mut M) -> Result<f64, HleError> {
+        Ok(f64::from_bits(self.read_u64(memory)?))
+    }
+}
+
+fn format_printf<M: Memory>(
+    memory: &mut M,
+    args: &mut PrintfArgs,
+    format: &[u8],
+) -> Result<Vec<u8>, HleError> {
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < format.len() && out.len() < PRINTF_OUTPUT_LIMIT {
+        if format[idx] != b'%' {
+            out.push(format[idx]);
+            idx += 1;
+            continue;
+        }
+
+        idx += 1;
+        if idx >= format.len() {
+            push_capped(&mut out, b"%");
+            break;
+        }
+        if format[idx] == b'%' {
+            out.push(b'%');
+            idx += 1;
+            continue;
+        }
+
+        let mut flags = PrintfFlags::default();
+        loop {
+            match format.get(idx).copied() {
+                Some(b'-') => flags.left = true,
+                Some(b'+') => flags.plus = true,
+                Some(b' ') => flags.space = true,
+                Some(b'#') => flags.alternate = true,
+                Some(b'0') => flags.zero = true,
+                _ => break,
+            }
+            idx += 1;
+        }
+
+        let (width, left_from_width, next_idx) = printf_width(memory, args, format, idx)?;
+        if left_from_width {
+            flags.left = true;
+            flags.zero = false;
+        }
+        idx = next_idx;
+        let (precision, next_idx) = printf_precision(memory, args, format, idx)?;
+        idx = next_idx;
+        let (length, next_idx) = scan_length_modifier(format, idx);
+        idx = next_idx;
+        let Some(specifier) = format.get(idx).copied() else {
+            break;
+        };
+        idx += 1;
+
+        let piece = match specifier {
+            b'd' | b'i' => {
+                let value = printf_signed_arg(memory, args, length)?;
+                format_printf_signed(value, flags, width, precision)
+            }
+            b'u' => {
+                let value = printf_unsigned_arg(memory, args, length)?;
+                format_printf_unsigned(value, 10, false, b'\0', flags, width, precision)
+            }
+            b'o' => {
+                let value = printf_unsigned_arg(memory, args, length)?;
+                format_printf_unsigned(value, 8, false, b'o', flags, width, precision)
+            }
+            b'x' | b'X' => {
+                let value = printf_unsigned_arg(memory, args, length)?;
+                format_printf_unsigned(
+                    value,
+                    16,
+                    specifier == b'X',
+                    specifier,
+                    flags,
+                    width,
+                    precision,
+                )
+            }
+            b'p' => {
+                let value = args.read_u32(memory)? as u64;
+                format_printf_pointer(value, flags, width, precision)
+            }
+            b's' => {
+                let ptr = args.read_u32(memory)?;
+                let bytes = if ptr == 0 {
+                    b"(null)".to_vec()
+                } else {
+                    load_c_string_bytes(memory, ptr, 4096)?
+                };
+                let bytes = if let Some(limit) = precision {
+                    bytes.into_iter().take(limit).collect()
+                } else {
+                    bytes
+                };
+                apply_printf_width(bytes, flags, width, b' ')
+            }
+            b'c' => {
+                let byte = args.read_u32(memory)? as u8;
+                apply_printf_width(vec![byte], flags, width, b' ')
+            }
+            b'n' => {
+                let ptr = args.read_u32(memory)?;
+                store_printf_count(memory, ptr, length, out.len() as u32)?;
+                Vec::new()
+            }
+            b'a' | b'A' | b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
+                let value = args.read_f64(memory)?;
+                format_printf_float(value, specifier, flags, width, precision)
+            }
+            _ => {
+                let mut bytes = Vec::with_capacity(2);
+                bytes.push(b'%');
+                bytes.push(specifier);
+                bytes
+            }
+        };
+        push_capped(&mut out, &piece);
+    }
+    Ok(out)
+}
+
+fn printf_width<M: Memory>(
+    memory: &mut M,
+    args: &mut PrintfArgs,
+    format: &[u8],
+    mut idx: usize,
+) -> Result<(Option<usize>, bool, usize), HleError> {
+    if format.get(idx) == Some(&b'*') {
+        idx += 1;
+        let raw = args.read_u32(memory)? as i32;
+        if raw < 0 {
+            Ok((Some(raw.unsigned_abs() as usize), true, idx))
+        } else {
+            Ok((Some(raw as usize), false, idx))
+        }
+    } else {
+        let (width, next_idx) = scan_decimal_width(format, idx);
+        Ok((width, false, next_idx))
+    }
+}
+
+fn printf_precision<M: Memory>(
+    memory: &mut M,
+    args: &mut PrintfArgs,
+    format: &[u8],
+    mut idx: usize,
+) -> Result<(Option<usize>, usize), HleError> {
+    if format.get(idx) != Some(&b'.') {
+        return Ok((None, idx));
+    }
+    idx += 1;
+    if format.get(idx) == Some(&b'*') {
+        idx += 1;
+        let raw = args.read_u32(memory)? as i32;
+        if raw < 0 {
+            Ok((None, idx))
+        } else {
+            Ok((Some(raw as usize), idx))
+        }
+    } else {
+        let (width, next_idx) = scan_decimal_width(format, idx);
+        Ok((Some(width.unwrap_or(0)), next_idx))
+    }
+}
+
+fn printf_signed_arg<M: Memory>(
+    memory: &mut M,
+    args: &mut PrintfArgs,
+    length: ScanfLength,
+) -> Result<i128, HleError> {
+    Ok(match length {
+        ScanfLength::Char => (args.read_u32(memory)? as u8 as i8) as i128,
+        ScanfLength::Short => (args.read_u32(memory)? as u16 as i16) as i128,
+        ScanfLength::None | ScanfLength::Long => (args.read_u32(memory)? as i32) as i128,
+        ScanfLength::LongLong => args.read_u64(memory)? as i64 as i128,
+    })
+}
+
+fn printf_unsigned_arg<M: Memory>(
+    memory: &mut M,
+    args: &mut PrintfArgs,
+    length: ScanfLength,
+) -> Result<u128, HleError> {
+    Ok(match length {
+        ScanfLength::Char => u128::from(args.read_u32(memory)? as u8),
+        ScanfLength::Short => u128::from(args.read_u32(memory)? as u16),
+        ScanfLength::None | ScanfLength::Long => u128::from(args.read_u32(memory)?),
+        ScanfLength::LongLong => u128::from(args.read_u64(memory)?),
+    })
+}
+
+fn format_printf_signed(
+    value: i128,
+    flags: PrintfFlags,
+    width: Option<usize>,
+    precision: Option<usize>,
+) -> Vec<u8> {
+    let negative = value < 0;
+    let magnitude = if negative {
+        value.wrapping_neg() as u128
+    } else {
+        value as u128
+    };
+    let digits = printf_digits(magnitude, 10, false, precision);
+    let sign = if negative {
+        b"-".as_slice()
+    } else if flags.plus {
+        b"+".as_slice()
+    } else if flags.space {
+        b" ".as_slice()
+    } else {
+        b"".as_slice()
+    };
+    assemble_printf_number(sign, b"", digits, flags, width, precision)
+}
+
+fn format_printf_unsigned(
+    value: u128,
+    base: u32,
+    uppercase: bool,
+    specifier: u8,
+    flags: PrintfFlags,
+    width: Option<usize>,
+    precision: Option<usize>,
+) -> Vec<u8> {
+    let mut digits = printf_digits(value, base, uppercase, precision);
+    let prefix = if flags.alternate {
+        match specifier {
+            b'o' if digits.first().copied() != Some(b'0') => b"0".as_slice(),
+            b'x' if value != 0 => b"0x".as_slice(),
+            b'X' if value != 0 => b"0X".as_slice(),
+            _ => b"".as_slice(),
+        }
+    } else {
+        b"".as_slice()
+    };
+    if value == 0 && precision == Some(0) && specifier == b'o' && flags.alternate {
+        digits.push(b'0');
+    }
+    assemble_printf_number(b"", prefix, digits, flags, width, precision)
+}
+
+fn format_printf_pointer(
+    value: u64,
+    flags: PrintfFlags,
+    width: Option<usize>,
+    precision: Option<usize>,
+) -> Vec<u8> {
+    let digits = printf_digits(u128::from(value), 16, false, precision);
+    assemble_printf_number(b"", b"0x", digits, flags, width, precision)
+}
+
+fn format_printf_float(
+    value: f64,
+    specifier: u8,
+    flags: PrintfFlags,
+    width: Option<usize>,
+    precision: Option<usize>,
+) -> Vec<u8> {
+    let precision = precision.unwrap_or(6);
+    let mut text = match specifier {
+        b'e' => format!("{value:.precision$e}"),
+        b'E' => format!("{value:.precision$E}"),
+        b'f' | b'F' => format!("{value:.precision$}"),
+        b'g' | b'G' => format!("{value:.precision$}"),
+        b'a' | b'A' => format!("{value:.precision$}"),
+        _ => value.to_string(),
+    };
+    if specifier.is_ascii_uppercase() {
+        text = text.to_ascii_uppercase();
+    }
+    if value.is_sign_positive() {
+        if flags.plus {
+            text.insert(0, '+');
+        } else if flags.space {
+            text.insert(0, ' ');
+        }
+    }
+    apply_printf_width(text.into_bytes(), flags, width, b' ')
+}
+
+fn printf_digits(value: u128, base: u32, uppercase: bool, precision: Option<usize>) -> Vec<u8> {
+    let mut digits = if precision == Some(0) && value == 0 {
+        Vec::new()
+    } else {
+        match (base, uppercase) {
+            (8, _) => format!("{value:o}").into_bytes(),
+            (10, _) => value.to_string().into_bytes(),
+            (16, false) => format!("{value:x}").into_bytes(),
+            (16, true) => format!("{value:X}").into_bytes(),
+            _ => value.to_string().into_bytes(),
+        }
+    };
+    if let Some(precision) = precision {
+        if digits.len() < precision {
+            let mut padded = vec![b'0'; precision - digits.len()];
+            padded.extend_from_slice(&digits);
+            digits = padded;
+        }
+    }
+    digits
+}
+
+fn assemble_printf_number(
+    sign: &[u8],
+    prefix: &[u8],
+    digits: Vec<u8>,
+    flags: PrintfFlags,
+    width: Option<usize>,
+    precision: Option<usize>,
+) -> Vec<u8> {
+    let base_len = sign.len() + prefix.len() + digits.len();
+    let width = width.unwrap_or(0).min(PRINTF_OUTPUT_LIMIT);
+    let pad_len = width.saturating_sub(base_len);
+    let mut out = Vec::with_capacity(width.max(base_len).min(PRINTF_OUTPUT_LIMIT));
+    if flags.left {
+        out.extend_from_slice(sign);
+        out.extend_from_slice(prefix);
+        out.extend_from_slice(&digits);
+        out.extend(std::iter::repeat(b' ').take(pad_len));
+    } else if flags.zero && precision.is_none() {
+        out.extend_from_slice(sign);
+        out.extend_from_slice(prefix);
+        out.extend(std::iter::repeat(b'0').take(pad_len));
+        out.extend_from_slice(&digits);
+    } else {
+        out.extend(std::iter::repeat(b' ').take(pad_len));
+        out.extend_from_slice(sign);
+        out.extend_from_slice(prefix);
+        out.extend_from_slice(&digits);
+    }
+    out.truncate(PRINTF_OUTPUT_LIMIT);
+    out
+}
+
+fn apply_printf_width(
+    bytes: Vec<u8>,
+    flags: PrintfFlags,
+    width: Option<usize>,
+    pad_byte: u8,
+) -> Vec<u8> {
+    let width = width.unwrap_or(0).min(PRINTF_OUTPUT_LIMIT);
+    let pad_len = width.saturating_sub(bytes.len());
+    if pad_len == 0 {
+        return bytes;
+    }
+    let mut out = Vec::with_capacity(width.min(PRINTF_OUTPUT_LIMIT));
+    if flags.left {
+        out.extend_from_slice(&bytes);
+        out.extend(std::iter::repeat(b' ').take(pad_len));
+    } else {
+        out.extend(std::iter::repeat(pad_byte).take(pad_len));
+        out.extend_from_slice(&bytes);
+    }
+    out.truncate(PRINTF_OUTPUT_LIMIT);
+    out
+}
+
+fn store_printf_count<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+    length: ScanfLength,
+    count: u32,
+) -> Result<(), HleError> {
+    match length {
+        ScanfLength::Char => store8(memory, ptr, count as u8),
+        ScanfLength::Short => store16(memory, ptr, count as u16),
+        ScanfLength::None | ScanfLength::Long => store32(memory, ptr, count),
+        ScanfLength::LongLong => store64(memory, ptr, u64::from(count)),
+    }
+}
+
+fn write_printf_buffer<M: Memory>(
+    memory: &mut M,
+    dst: u32,
+    size: u32,
+    output: &[u8],
+) -> Result<(), HleError> {
+    if dst == 0 || size == 0 {
+        return Ok(());
+    }
+    let write_len = if size == u32::MAX {
+        output.len()
+    } else {
+        output.len().min(size.saturating_sub(1) as usize)
+    };
+    for (idx, byte) in output.iter().copied().take(write_len).enumerate() {
+        store8(memory, dst.wrapping_add(idx as u32), byte)?;
+    }
+    store8(memory, dst.wrapping_add(write_len as u32), 0)?;
+    Ok(())
+}
+
+fn push_capped(out: &mut Vec<u8>, bytes: &[u8]) {
+    let room = PRINTF_OUTPUT_LIMIT.saturating_sub(out.len());
+    out.extend(bytes.iter().copied().take(room));
+}
+
 fn scan_input<M: Memory>(
     memory: &mut M,
     cpu: &Cpu,
@@ -9216,6 +10760,30 @@ fn trace_hle_scanf(args: fmt::Arguments<'_>) {
     eprintln!("HLE_SCANF {text}");
 }
 
+fn trace_hle_printf(args: fmt::Arguments<'_>) {
+    if std::env::var_os("AEMU_TRACE_HLE_PRINTF").is_none() {
+        return;
+    }
+    let text = args.to_string();
+    if let Some(needle) = std::env::var("AEMU_TRACE_HLE_PRINTF_CONTAINS")
+        .ok()
+        .filter(|needle| !needle.is_empty())
+    {
+        if !text.contains(&needle) {
+            return;
+        }
+    }
+    let count = HLE_PRINTF_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let limit = std::env::var("AEMU_TRACE_HLE_PRINTF_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(200);
+    if count >= limit {
+        return;
+    }
+    eprintln!("HLE_PRINTF {text}");
+}
+
 fn trace_c_string_lossy<M: Memory>(memory: &mut M, ptr: u32, max_len: u32) -> String {
     load_c_string(memory, ptr, max_len).unwrap_or_else(|err| format!("<{err}>"))
 }
@@ -9481,8 +11049,54 @@ fn is_random_device_path(path: &str) -> bool {
     matches!(path, "/dev/urandom" | "/dev/random")
 }
 
+fn normalize_virtual_dir_path(path: &str) -> String {
+    let normalized = normalize_virtual_path(path);
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.is_empty() {
+        normalized
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_virtual_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut previous_slash = false;
+    for ch in path.chars() {
+        if ch == '/' {
+            if !previous_slash {
+                out.push(ch);
+            }
+            previous_slash = true;
+        } else {
+            out.push(ch);
+            previous_slash = false;
+        }
+    }
+    if out.len() > 1 {
+        while out.ends_with('/') {
+            out.pop();
+        }
+    }
+    out
+}
+
 fn is_virtual_storage_path(path: &str) -> bool {
     path.starts_with("/sdcard/") || path.starts_with("/storage/") || path.starts_with("/data/data/")
+}
+
+fn errno_message(errno: u32) -> String {
+    match errno {
+        0 => "Success".to_string(),
+        ENOENT => "No such file or directory".to_string(),
+        EBADF => "Bad file descriptor".to_string(),
+        EAGAIN => "Try again".to_string(),
+        EEXIST => "File exists".to_string(),
+        EISDIR => "Is a directory".to_string(),
+        EINVAL => "Invalid argument".to_string(),
+        ENOSYS => "Function not implemented".to_string(),
+        _ => format!("Unknown error {errno}"),
+    }
 }
 
 fn fake_regular_file_stat(ino: u64, size: u64) -> AndroidArmStat {
@@ -9565,6 +11179,60 @@ fn write_android_arm_stat<M: Memory>(
     store64(memory, addr.wrapping_add(88), stat.ino)
 }
 
+fn write_android_dirent<M: Memory>(
+    memory: &mut M,
+    addr: u32,
+    entry: &VirtualDirEntry,
+) -> Result<(), HleError> {
+    for offset in 0..ANDROID_DIRENT_SIZE {
+        store8(memory, addr.wrapping_add(offset), 0)?;
+    }
+    store64(
+        memory,
+        addr.wrapping_add(ANDROID_DIRENT_D_INO_OFFSET),
+        entry.ino,
+    )?;
+    store64(
+        memory,
+        addr.wrapping_add(ANDROID_DIRENT_D_OFF_OFFSET),
+        entry.ino,
+    )?;
+    store16(
+        memory,
+        addr.wrapping_add(ANDROID_DIRENT_D_RECLEN_OFFSET),
+        ANDROID_DIRENT_SIZE as u16,
+    )?;
+    store8(
+        memory,
+        addr.wrapping_add(ANDROID_DIRENT_D_TYPE_OFFSET),
+        entry.ty,
+    )?;
+    let name_len = entry
+        .name
+        .as_bytes()
+        .len()
+        .min((ANDROID_DIRENT_D_NAME_SIZE - 1) as usize);
+    for (idx, byte) in entry
+        .name
+        .as_bytes()
+        .iter()
+        .copied()
+        .take(name_len)
+        .enumerate()
+    {
+        store8(
+            memory,
+            addr.wrapping_add(ANDROID_DIRENT_D_NAME_OFFSET + idx as u32),
+            byte,
+        )?;
+    }
+    store8(
+        memory,
+        addr.wrapping_add(ANDROID_DIRENT_D_NAME_OFFSET + name_len as u32),
+        0,
+    )
+}
+
 fn strcmp<M: Memory>(memory: &mut M, a: u32, b: u32, max_len: u32) -> Result<i32, HleError> {
     for idx in 0..max_len {
         let av = load8(memory, a.wrapping_add(idx))?;
@@ -9574,6 +11242,23 @@ fn strcmp<M: Memory>(memory: &mut M, a: u32, b: u32, max_len: u32) -> Result<i32
         }
     }
     Ok(0)
+}
+
+fn parse_ipv4_addr(text: &str) -> Option<u32> {
+    let mut octets = [0u8; 4];
+    let mut parts = text.split('.');
+    for octet in &mut octets {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let value = part.parse::<u8>().ok()?;
+        *octet = value;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(u32::from_le_bytes(octets))
 }
 
 fn load8<M: Memory>(memory: &mut M, addr: u32) -> Result<u8, HleError> {
@@ -9687,6 +11372,14 @@ fn align_up(value: u32, align: u32) -> Option<u32> {
     value
         .checked_add(align - 1)
         .map(|value| value & !(align - 1))
+}
+
+fn small_heap_class_index(size: u32, align: u32) -> Option<usize> {
+    if align > HLE_HEAP_SMALL_ALIGN || size > HLE_HEAP_SMALL_MAX {
+        return None;
+    }
+    let class_size = align_up(size.max(1), HLE_HEAP_SMALL_ALIGN)?;
+    Some((class_size / HLE_HEAP_SMALL_ALIGN - 1) as usize)
 }
 
 fn egl_query_string(name: u32) -> Option<&'static str> {
@@ -10470,41 +12163,66 @@ mod tests {
         set_reg64(cpu, reg, value.to_bits());
     }
 
-    fn free_block(ptr: u32, size: u32) -> HleAllocation {
-        HleAllocation {
-            ptr,
-            size,
-            freeable: true,
-        }
+    fn test_c_string(memory: &mut MappedMemory, ptr: u32) -> String {
+        load_c_string(memory, ptr, 256).unwrap()
     }
 
     #[test]
-    fn hle_heap_free_blocks_remain_sorted_without_full_resort() {
-        let mut hle = HleRuntime::new(0, 0x1000, 0x1000);
+    fn hle_heap_allocator_tracks_guest_addresses_and_sizes() {
+        let mut hle = HleRuntime::new(0, 0x1003, 0x1000);
 
-        hle.insert_free_block(free_block(0x1300, 0x40));
-        hle.insert_free_block(free_block(0x1100, 0x40));
-        hle.insert_free_block(free_block(0x1200, 0x40));
+        let ptr = hle.alloc_guest(3, 16).unwrap();
 
-        let blocks: Vec<(u32, u32)> = hle
-            .freed
-            .iter()
-            .map(|block| (block.ptr, block.size))
-            .collect();
-        assert_eq!(blocks, vec![(0x1100, 0x40), (0x1200, 0x40), (0x1300, 0x40)]);
+        assert_eq!(ptr & 0xf, 0);
+        assert_eq!(hle.allocation_size(ptr), Some(3));
+        assert_eq!(hle.heap_allocation_count_for_test(), 1);
+        assert_eq!(hle.allocation_record_for_test(ptr), Some((0, 3, true)));
     }
 
     #[test]
-    fn hle_heap_free_blocks_coalesce_neighbors() {
+    fn hle_heap_allocator_reuses_freed_guest_blocks() {
         let mut hle = HleRuntime::new(0, 0x1000, 0x1000);
 
-        hle.insert_free_block(free_block(0x1000, 0x20));
-        hle.insert_free_block(free_block(0x1040, 0x20));
-        hle.insert_free_block(free_block(0x1020, 0x20));
+        let first = hle.alloc_guest(0x20, 8).unwrap();
+        let second = hle.alloc_guest(0x20, 8).unwrap();
+        hle.free_ptr_for_test(first);
+        let reused = hle.alloc_guest(0x10, 8).unwrap();
 
-        assert_eq!(hle.freed.len(), 1);
-        assert_eq!(hle.freed[0].ptr, 0x1000);
-        assert_eq!(hle.freed[0].size, 0x60);
+        assert_eq!(reused, first);
+        assert_ne!(second, first);
+        assert_eq!(hle.heap_allocation_count_for_test(), 2);
+    }
+
+    #[test]
+    fn hle_heap_allocator_coalesces_freed_neighbors() {
+        let mut hle = HleRuntime::new(0, 0x1000, 0x1000);
+
+        let first = hle.alloc_guest(0x20, 8).unwrap();
+        let second = hle.alloc_guest(0x20, 8).unwrap();
+        let third = hle.alloc_guest(0x20, 8).unwrap();
+        hle.free_ptr_for_test(first);
+        hle.free_ptr_for_test(third);
+        hle.free_ptr_for_test(second);
+
+        let report = hle.storage_report_for_test();
+        assert!(report.largest_free_region >= 0x60);
+        assert_eq!(hle.heap_allocation_count_for_test(), 0);
+    }
+
+    #[test]
+    fn hle_heap_small_allocator_reuses_slots_without_region_per_allocation() {
+        let mut hle = HleRuntime::new(0, 0x1000, 0x2_0000);
+        let class_index = small_heap_class_index(0x28, 8).unwrap();
+
+        let first = hle.alloc_guest(0x28, 8).unwrap();
+        let second = hle.alloc_guest(0x28, 8).unwrap();
+        hle.free_ptr_for_test(first);
+        let reused = hle.alloc_guest(0x28, 8).unwrap();
+
+        assert_eq!(reused, first);
+        assert_ne!(second, first);
+        assert_eq!(hle.small_heap_slab_count_for_test(class_index), 1);
+        assert_eq!(hle.heap_allocation_count_for_test(), 2);
     }
 
     #[test]
@@ -10696,16 +12414,9 @@ mod tests {
         assert_eq!(memory.load32(0x10c0).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let strerror = describe_hle_import("strerror").unwrap();
-        assert_eq!(
-            strerror.shape,
-            HleSymbolShape::FunctionCode {
-                size: 0x08,
-                code: HleFunctionCode::ReturnNull,
-            }
-        );
+        assert_eq!(strerror.shape, HleSymbolShape::Function);
         initialize_hle_symbol(&mut memory, strerror, 0x10d0).unwrap();
-        assert_eq!(memory.load32(0x10d0).unwrap(), 0xe3a0_0000);
-        assert_eq!(memory.load32(0x10d4).unwrap(), 0xe12f_ff1e);
+        assert_eq!(memory.load32(0x10d0).unwrap(), HLE_TRAP_ARM_INSTR);
 
         let strlen = describe_hle_import("strlen").unwrap();
         assert_eq!(strlen.shape, HleSymbolShape::Function);
@@ -11879,6 +13590,27 @@ mod tests {
     }
 
     #[test]
+    fn fake_time_can_switch_step_after_first_gles_draw() {
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        hle.clock_step_ns = 100;
+        hle.clock_step_after_draw_ns = Some(1_000_000);
+
+        assert_eq!(hle.advance_clock().nsecs, 100);
+        hle.push_gles_event(GlesEvent::Clear { mask: 0x4100 });
+        assert_eq!(hle.advance_clock().nsecs, 200);
+        assert_eq!(hle.gles_draw_submissions, 0);
+
+        hle.push_gles_event(GlesEvent::DrawArrays {
+            mode: 0x0004,
+            first: 0,
+            count: 3,
+            client_attribs: Vec::new(),
+        });
+        assert_eq!(hle.gles_draw_submissions, 1);
+        assert_eq!(hle.advance_clock().nsecs, 1_000_200);
+    }
+
+    #[test]
     fn dispatches_pthread_identity_and_specific_data() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
@@ -12214,6 +13946,86 @@ mod tests {
         let dup = cpu.reg(0);
         assert_ne!(dup, 0);
         assert_eq!(load_c_string(&mut memory, dup, 16).unwrap(), "AlphaBeta");
+    }
+
+    #[test]
+    fn dispatches_printf_hle_calls_with_arm_varargs() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x5000).unwrap();
+        memory.load_bytes(0x1100, b"/MANIFEST-%06llu\0").unwrap();
+        memory.load_bytes(0x1120, b"%s/%02X/%d/%u/%c/%%\0").unwrap();
+        memory.load_bytes(0x1140, b"%llu\0").unwrap();
+        memory.load_bytes(0x1160, b"stone\0").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(13, 0x3000);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x4000, 0x800);
+
+        for name in [
+            "snprintf",
+            "sprintf",
+            "vsnprintf",
+            "vsprintf",
+            "printf",
+            "fprintf",
+            "vfprintf",
+        ] {
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Implemented
+            );
+        }
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 32);
+        cpu.set_reg(2, 0x1100);
+        cpu.set_reg(3, 0xdead_beef);
+        memory.store32(0x3000, 1).unwrap();
+        memory.store32(0x3004, 0).unwrap();
+        hle.dispatch("snprintf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 16);
+        assert_eq!(test_c_string(&mut memory, 0x1200), "/MANIFEST-000001");
+
+        cpu.set_reg(0, 0x1240);
+        cpu.set_reg(1, 0x1140);
+        set_reg64(&mut cpu, 2, 12_345_678_901);
+        hle.dispatch("sprintf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 11);
+        assert_eq!(test_c_string(&mut memory, 0x1240), "12345678901");
+
+        memory.store32(0x3014, 0xfeed_face).unwrap();
+        memory.store32(0x3018, 7).unwrap();
+        memory.store32(0x301c, 0).unwrap();
+        cpu.set_reg(0, 0x1280);
+        cpu.set_reg(1, 32);
+        cpu.set_reg(2, 0x1100);
+        cpu.set_reg(3, 0x3014);
+        hle.dispatch("vsnprintf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 16);
+        assert_eq!(test_c_string(&mut memory, 0x1280), "/MANIFEST-000007");
+
+        memory.store32(0x3020, 0x1160).unwrap();
+        memory.store32(0x3024, 0xab).unwrap();
+        memory.store32(0x3028, (-12i32) as u32).unwrap();
+        memory.store32(0x302c, 34).unwrap();
+        memory.store32(0x3030, u32::from(b'Z')).unwrap();
+        cpu.set_reg(0, 0x12c0);
+        cpu.set_reg(1, 64);
+        cpu.set_reg(2, 0x1120);
+        cpu.set_reg(3, 0x3020);
+        hle.dispatch("vsnprintf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(test_c_string(&mut memory, 0x12c0), "stone/AB/-12/34/Z/%");
+
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 8);
+        cpu.set_reg(2, 0x1100);
+        cpu.set_reg(3, 0);
+        memory.store32(0x3000, 42).unwrap();
+        memory.store32(0x3004, 0).unwrap();
+        hle.dispatch("snprintf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 16);
+        assert_eq!(test_c_string(&mut memory, 0x1300), "/MANIFE");
     }
 
     #[test]
@@ -14026,6 +15838,30 @@ mod tests {
             assert_eq!(cpu.reg(0), 0, "{name}");
         }
 
+        assert_eq!(
+            describe_hle_import("inet_ntoa").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        cpu.set_reg(0, u32::from_le_bytes([127, 0, 0, 1]));
+        hle.dispatch("inet_ntoa", &mut cpu, &mut memory).unwrap();
+        let first_ntoa = cpu.reg(0);
+        assert_eq!(
+            load_c_string(&mut memory, first_ntoa, INET_NTOA_BUFFER_SIZE).unwrap(),
+            "127.0.0.1"
+        );
+        cpu.set_reg(0, 0);
+        hle.dispatch("inet_ntoa", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), first_ntoa);
+        assert_eq!(
+            load_c_string(&mut memory, first_ntoa, INET_NTOA_BUFFER_SIZE).unwrap(),
+            "0.0.0.0"
+        );
+
+        memory.load_bytes(0x1300, b"192.168.1.5\0").unwrap();
+        cpu.set_reg(0, 0x1300);
+        hle.dispatch("inet_addr", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::from_le_bytes([192, 168, 1, 5]));
+
         cpu.set_reg(0, fd);
         cpu.set_reg(1, 0x1200);
         cpu.set_reg(2, 4);
@@ -14076,6 +15912,378 @@ mod tests {
         cpu.set_reg(3, 0);
         hle.dispatch("epoll_wait", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn dispatches_virtual_file_seek_and_pread_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        memory
+            .load_bytes(
+                0x1200,
+                b"/sdcard/games/com.mojang/minecraftWorlds/TestWorld/db/CURRENT\0",
+            )
+            .unwrap();
+        memory.load_bytes(0x1300, b"abcdef").unwrap();
+        memory.load_bytes(0x1320, b"w\0").unwrap();
+        memory.load_bytes(0x1328, b"r\0").unwrap();
+        memory.load_bytes(0x1330, b"!\0").unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        for name in [
+            "lseek", "pread", "fflush", "fseek", "ftell", "feof", "ferror",
+        ] {
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Implemented,
+                "{name}"
+            );
+        }
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0x1320);
+        hle.dispatch("fopen", &mut cpu, &mut memory).unwrap();
+        let writable = cpu.reg(0);
+        assert_ne!(writable, 0);
+
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 6);
+        cpu.set_reg(3, writable);
+        hle.dispatch("fwrite", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 6);
+
+        cpu.set_reg(0, writable);
+        hle.dispatch("fflush", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, writable);
+        hle.dispatch("ftell", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 6);
+
+        cpu.set_reg(0, writable);
+        hle.dispatch("fclose", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0x1328);
+        hle.dispatch("fopen", &mut cpu, &mut memory).unwrap();
+        let readable = cpu.reg(0);
+        assert_ne!(readable, 0);
+
+        cpu.set_reg(0, readable);
+        cpu.set_reg(1, 2);
+        cpu.set_reg(2, SEEK_SET);
+        hle.dispatch("fseek", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1340);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 2);
+        cpu.set_reg(3, readable);
+        hle.dispatch("fread", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 2);
+        assert_eq!(memory.load_bytes_for_test(0x1340, 2), b"cd");
+
+        cpu.set_reg(0, readable);
+        hle.dispatch("ftell", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+
+        cpu.set_reg(0, readable);
+        hle.dispatch("feof", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, readable);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, SEEK_SET);
+        hle.dispatch("fseek", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, 0x1380);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 8);
+        cpu.set_reg(3, readable);
+        hle.dispatch("fread", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 6);
+        assert_eq!(memory.load_bytes_for_test(0x1380, 6), b"abcdef");
+        assert_ne!(
+            memory.load16(readable + FAKE_FILE_FLAGS_OFFSET).unwrap() & BIONIC_FILE_FLAG_SEOF,
+            0
+        );
+        assert_eq!(
+            memory.load16(readable + FAKE_FILE_FLAGS_OFFSET).unwrap() & BIONIC_FILE_FLAG_SERR,
+            0
+        );
+        cpu.set_reg(0, readable);
+        hle.dispatch("feof", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        cpu.set_reg(0, readable);
+        hle.dispatch("ferror", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, readable);
+        cpu.set_reg(1, 4);
+        cpu.set_reg(2, SEEK_SET);
+        hle.dispatch("fseek", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(
+            memory.load16(readable + FAKE_FILE_FLAGS_OFFSET).unwrap() & BIONIC_FILE_FLAG_SEOF,
+            0
+        );
+        cpu.set_reg(0, readable);
+        hle.dispatch("feof", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        let fd = u32::from(
+            memory
+                .load16(readable.wrapping_add(FAKE_FILE_FD_OFFSET))
+                .unwrap(),
+        );
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1350);
+        cpu.set_reg(2, 3);
+        cpu.set_reg(3, 1);
+        hle.dispatch("pread", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 3);
+        assert_eq!(memory.load_bytes_for_test(0x1350, 3), b"bcd");
+
+        cpu.set_reg(0, readable);
+        hle.dispatch("ftell", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, (-1i32) as u32);
+        cpu.set_reg(2, SEEK_END);
+        hle.dispatch("lseek", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 5);
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1360);
+        cpu.set_reg(2, 1);
+        hle.dispatch("read", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load_bytes_for_test(0x1360, 1), b"f");
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 99);
+        hle.dispatch("lseek", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EINVAL);
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, O_CREAT | O_APPEND);
+        cpu.set_reg(2, 0o644);
+        hle.dispatch("open", &mut cpu, &mut memory).unwrap();
+        let append_fd = cpu.reg(0);
+        assert_ne!(append_fd, u32::MAX);
+        cpu.set_reg(0, append_fd);
+        cpu.set_reg(1, 0x1330);
+        cpu.set_reg(2, 1);
+        hle.dispatch("write", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        cpu.set_reg(0, append_fd);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, SEEK_SET);
+        hle.dispatch("lseek", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, append_fd);
+        cpu.set_reg(1, 0x1370);
+        cpu.set_reg(2, 7);
+        hle.dispatch("read", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 7);
+        assert_eq!(memory.load_bytes_for_test(0x1370, 7), b"abcdef!");
+    }
+
+    #[test]
+    fn dispatches_virtual_storage_directory_and_strerror_hle_calls() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        memory
+            .load_bytes(
+                0x1200,
+                b"/sdcard/games/com.mojang/minecraftpe/minecraftWorlds\0",
+            )
+            .unwrap();
+        memory
+            .load_bytes(
+                0x1280,
+                b"/sdcard/games/com.mojang/minecraftpe/minecraftWorlds/level.dat\0",
+            )
+            .unwrap();
+        memory
+            .load_bytes(
+                0x1300,
+                b"/sdcard/games/com.mojang/minecraftWorlds//TestWorld/db/MANIFEST-tmp\0",
+            )
+            .unwrap();
+        memory
+            .load_bytes(
+                0x1380,
+                b"/sdcard/games/com.mojang/minecraftWorlds/TestWorld/db/CURRENT\0",
+            )
+            .unwrap();
+        memory
+            .load_bytes(
+                0x1400,
+                b"/sdcard/games/com.mojang/minecraftWorlds/TestWorld/db\0",
+            )
+            .unwrap();
+        memory.load_bytes(0x1500, b"MANIFEST-000001\n").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        assert_eq!(
+            describe_hle_import("mkdir").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        assert_eq!(
+            describe_hle_import("strerror").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        assert_eq!(
+            describe_hle_import("fdatasync").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        assert_eq!(
+            describe_hle_import("rename").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        assert_eq!(
+            describe_hle_import("opendir").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0);
+        hle.dispatch("access", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), ENOENT);
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0o755);
+        hle.dispatch("mkdir", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1200);
+        cpu.set_reg(1, 0);
+        hle.dispatch("access", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1280);
+        cpu.set_reg(1, 0x42);
+        cpu.set_reg(2, 0o644);
+        hle.dispatch("open", &mut cpu, &mut memory).unwrap();
+        let fd = cpu.reg(0);
+        assert_ne!(fd, u32::MAX);
+        cpu.set_reg(0, fd);
+        hle.dispatch("fdatasync", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1400);
+        cpu.set_reg(1, 0o755);
+        hle.dispatch("mkdir", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1400);
+        cpu.set_reg(1, O_RDONLY);
+        cpu.set_reg(2, 0);
+        hle.dispatch("open", &mut cpu, &mut memory).unwrap();
+        let db_dir_fd = cpu.reg(0);
+        assert_ne!(db_dir_fd, u32::MAX);
+        cpu.set_reg(0, db_dir_fd);
+        cpu.set_reg(1, 0x1280);
+        hle.dispatch("fstat", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(
+            memory.load32(0x1280 + 16).unwrap() & ANDROID_S_IFDIR,
+            ANDROID_S_IFDIR
+        );
+        cpu.set_reg(0, db_dir_fd);
+        hle.dispatch("fsync", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, db_dir_fd);
+        hle.dispatch("close", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 0x42);
+        cpu.set_reg(2, 0o644);
+        hle.dispatch("open", &mut cpu, &mut memory).unwrap();
+        let manifest_fd = cpu.reg(0);
+        assert_ne!(manifest_fd, u32::MAX);
+
+        cpu.set_reg(0, manifest_fd);
+        cpu.set_reg(1, 0x1500);
+        cpu.set_reg(2, 16);
+        hle.dispatch("write", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 16);
+
+        cpu.set_reg(0, 0x1300);
+        cpu.set_reg(1, 0x1380);
+        hle.dispatch("rename", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1380);
+        cpu.set_reg(1, 0x1280);
+        hle.dispatch("stat", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1280 + 44).unwrap(), 16);
+
+        cpu.set_reg(0, 0x1400);
+        hle.dispatch("opendir", &mut cpu, &mut memory).unwrap();
+        let dir = cpu.reg(0);
+        assert_ne!(dir, 0);
+        let mut saw_current = false;
+        for _ in 0..8 {
+            cpu.set_reg(0, dir);
+            hle.dispatch("readdir", &mut cpu, &mut memory).unwrap();
+            let entry = cpu.reg(0);
+            if entry == 0 {
+                break;
+            }
+            let name = load_c_string(
+                &mut memory,
+                entry.wrapping_add(ANDROID_DIRENT_D_NAME_OFFSET),
+                ANDROID_DIRENT_D_NAME_SIZE,
+            )
+            .unwrap();
+            if name == "CURRENT" {
+                saw_current = true;
+            }
+        }
+        assert!(saw_current);
+        cpu.set_reg(0, dir);
+        hle.dispatch("closedir", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1380);
+        hle.dispatch("unlink", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, 0x1380);
+        cpu.set_reg(1, 0);
+        hle.dispatch("access", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+
+        cpu.set_reg(0, ENOENT);
+        hle.dispatch("strerror", &mut cpu, &mut memory).unwrap();
+        let first = cpu.reg(0);
+        assert_eq!(
+            load_c_string(&mut memory, first, STRERROR_BUFFER_SIZE).unwrap(),
+            "No such file or directory"
+        );
+
+        cpu.set_reg(0, ENOSYS);
+        hle.dispatch("strerror", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), first);
+        assert_eq!(
+            load_c_string(&mut memory, first, STRERROR_BUFFER_SIZE).unwrap(),
+            "Function not implemented"
+        );
     }
 
     #[test]

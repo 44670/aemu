@@ -344,8 +344,14 @@ def apply_trace_env(args, out_dir, env):
     env["AEMU_TRACE_GLES_EVENTS_LIMIT"] = str(args.gles_event_limit)
     if args.fake_time_step_nanos is not None:
         env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
+    if args.fake_time_step_after_draw_nanos is not None:
+        env["AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS"] = str(args.fake_time_step_after_draw_nanos)
     if args.guest_thread_swap_slices is not None:
         env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
+    if args.main_thread_wait_idle_spins is not None:
+        env["AEMU_MAIN_THREAD_WAIT_IDLE_SPINS"] = str(args.main_thread_wait_idle_spins)
+    if args.main_thread_wait_slice_steps is not None:
+        env["AEMU_MAIN_THREAD_WAIT_SLICE_STEPS"] = str(args.main_thread_wait_slice_steps)
     if args.profile_pc:
         env["AEMU_PROFILE_PC_JSONL"] = str(out_dir / "pc_profile.jsonl")
         env["AEMU_PROFILE_PC_INTERVAL"] = str(args.profile_pc_interval)
@@ -385,7 +391,10 @@ def summarize_env(env):
         "AEMU_TRACE_GLES_EVENTS_MATCH",
         "AEMU_TRACE_GLES_EVENTS_LIMIT",
         "AEMU_FAKE_TIME_STEP_NANOS",
+        "AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS",
         "AEMU_GUEST_THREAD_SWAP_SLICES",
+        "AEMU_MAIN_THREAD_WAIT_IDLE_SPINS",
+        "AEMU_MAIN_THREAD_WAIT_SLICE_STEPS",
         "AEMU_PROFILE_PC_JSONL",
         "AEMU_PROFILE_PC_INTERVAL",
         "AEMU_PROFILE_PC_FLUSH_INTERVAL",
@@ -461,7 +470,7 @@ def terminate_process(process, timeout=5):
 
 
 def build_emulator_cmd(args, ws_addr):
-    return [
+    cmd = [
         str(args.binary),
         "run-apk-native",
         str(args.apk),
@@ -475,6 +484,9 @@ def build_emulator_cmd(args, ws_addr):
         "--ws",
         ws_addr,
     ]
+    if not args.respect_host_quit:
+        cmd.append("--sdl2-ignore-host-quit")
+    return cmd
 
 
 def collect_debug(entries):
@@ -707,9 +719,24 @@ def build_arg_parser():
         help="set AEMU_FAKE_TIME_STEP_NANOS for Android time HLE diagnostics",
     )
     parser.add_argument(
+        "--fake-time-step-after-draw-nanos",
+        type=int,
+        help="set AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS after GLES draw submissions start",
+    )
+    parser.add_argument(
         "--guest-thread-swap-slices",
         type=int,
         help="set AEMU_GUEST_THREAD_SWAP_SLICES for frame-boundary guest worker scheduling",
+    )
+    parser.add_argument(
+        "--main-thread-wait-idle-spins",
+        type=int,
+        help="set AEMU_MAIN_THREAD_WAIT_IDLE_SPINS for deadlock detection while the main guest thread waits",
+    )
+    parser.add_argument(
+        "--main-thread-wait-slice-steps",
+        type=int,
+        help="set AEMU_MAIN_THREAD_WAIT_SLICE_STEPS for guest worker scheduling while the main guest thread waits",
     )
     parser.add_argument(
         "--profile-pc",
@@ -767,6 +794,11 @@ def build_arg_parser():
         "--keep-running-until-exit",
         action="store_true",
         help="wait for --sdl2-frames process exit instead of terminating after the journal",
+    )
+    parser.add_argument(
+        "--respect-host-quit",
+        action="store_true",
+        help="allow SDL2 Quit/Escape events to stop the emulator during the scripted journal",
     )
     parser.add_argument("--expect-frames", type=int, default=1)
     parser.add_argument("--max-gl-errors", type=int, default=0)
@@ -864,6 +896,8 @@ def apply_milestone_defaults(args):
         args.fake_time_step_nanos = 100_000
     if args.guest_thread_swap_slices is None:
         args.guest_thread_swap_slices = 256
+    if args.main_thread_wait_slice_steps is None:
+        args.main_thread_wait_slice_steps = 65536
     args.wait_draw_elements = max(args.wait_draw_elements, 1)
     args.wait_readback_rgb = max(args.wait_readback_rgb, 1)
     args.min_draw_elements = max(args.min_draw_elements, 1)

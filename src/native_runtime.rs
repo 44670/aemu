@@ -21,6 +21,10 @@ const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
 const THREAD_RETURN_SENTINEL: u32 = 0xffff_fff8;
+const KUSER_CMPXCHG64: u32 = 0xffff_0f60;
+const KUSER_MEMORY_BARRIER: u32 = 0xffff_0fa0;
+const KUSER_CMPXCHG: u32 = 0xffff_0fc0;
+const KUSER_GET_TLS: u32 = 0xffff_0fe0;
 const RUN_FUNCTION_TRACE_LEN: usize = 24;
 const GUEST_THREAD_TRACE_LEN: usize = 128;
 const GUEST_THREAD_STACK_SIZE: u32 = 0x0004_0000;
@@ -28,9 +32,10 @@ const GUEST_THREAD_STACK_ALIGN: u32 = 8;
 const GUEST_THREAD_SLICE_STEPS: usize = 4096;
 const GUEST_THREAD_SERVICE_INTERVAL: usize = 50_000;
 const GUEST_THREAD_SWAP_SERVICE_SLICES: usize = 64;
-const MAIN_THREAD_WAIT_SPINS: usize = 1024;
+const MAIN_THREAD_WAIT_IDLE_SPINS: usize = 1024;
 const GUEST_THREAD_STALL_SUMMARY_LIMIT: usize = 16;
 const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
+const PTHREAD_ETIMEDOUT: u32 = 110;
 const MCPE_RUNNABLE_PTHREAD_STARTS: &[&str] = &[
     // Evidence: MCPE Play stalls waiting on the native threadpool condvar when
     // these guest pthreads are skipped.
@@ -298,6 +303,7 @@ enum JniFunction {
     GetStringUtfChars,
     ReleaseStringUtfChars,
     GetArrayLength,
+    GetObjectArrayElement,
     GetIntArrayElements,
     ReleaseIntArrayElements,
     GetJavaVm,
@@ -326,13 +332,47 @@ struct GuestThread {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GuestThreadWait {
     Runnable,
-    Condvar { cond: u32, mutex: u32 },
-    Mutex { mutex: u32 },
+    Condvar {
+        cond: u32,
+        mutex: u32,
+        timeout: Option<GuestCondvarTimeout>,
+    },
+    Mutex {
+        mutex: u32,
+    },
 }
 
 impl GuestThreadWait {
     fn is_runnable(self) -> bool {
         matches!(self, Self::Runnable)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestCondvarTimeout {
+    absolute_wall_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MainThreadWaitPolicy {
+    idle_spin_limit: Option<usize>,
+    slice_steps: usize,
+}
+
+impl MainThreadWaitPolicy {
+    fn from_env() -> Self {
+        let idle_spin_limit = match parse_usize_env("AEMU_MAIN_THREAD_WAIT_IDLE_SPINS") {
+            Some(0) => None,
+            Some(value) => Some(value),
+            None => Some(MAIN_THREAD_WAIT_IDLE_SPINS),
+        };
+        let slice_steps = parse_usize_env("AEMU_MAIN_THREAD_WAIT_SLICE_STEPS")
+            .filter(|steps| *steps != 0)
+            .unwrap_or(GUEST_THREAD_SLICE_STEPS);
+        Self {
+            idle_spin_limit,
+            slice_steps,
+        }
     }
 }
 
@@ -1125,6 +1165,9 @@ impl NativeRuntime {
         let isa_before = self.cpu.isa();
         let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
         self.maybe_bridge_minecraft_resources_loaded(pc_before)?;
+        if let Some(step) = self.dispatch_kuser_helper(pc_before, args_before)? {
+            return Ok(step);
+        }
         if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
             self.dispatch_runtime_hle(trap)?;
             return Ok(NativeRuntimeStep::HleCall {
@@ -1174,6 +1217,96 @@ impl NativeRuntime {
                 source: err,
             }),
         }
+    }
+
+    fn dispatch_kuser_helper(
+        &mut self,
+        pc: u32,
+        args: [u32; 4],
+    ) -> Result<Option<NativeRuntimeStep>, NativeRuntimeError> {
+        let name = match pc {
+            KUSER_CMPXCHG64 => "__kuser_cmpxchg64",
+            KUSER_MEMORY_BARRIER => "__kuser_memory_barrier",
+            KUSER_CMPXCHG => "__kuser_cmpxchg",
+            KUSER_GET_TLS => "__kuser_get_tls",
+            _ => return Ok(None),
+        };
+
+        match pc {
+            KUSER_MEMORY_BARRIER => {}
+            KUSER_GET_TLS => {
+                self.cpu.set_reg(0, self.cpu.cp15_tpidruro);
+            }
+            KUSER_CMPXCHG => {
+                let old_value = self.cpu.reg(0);
+                let new_value = self.cpu.reg(1);
+                let ptr = self.cpu.reg(2);
+                let current = self.kuser_load32(name, ptr)?;
+                let success = current == old_value;
+                if success {
+                    self.kuser_store32(name, ptr, new_value)?;
+                }
+                self.cpu.cpsr.c = success;
+                self.cpu.set_reg(0, if success { 0 } else { u32::MAX });
+            }
+            KUSER_CMPXCHG64 => {
+                let old_ptr = self.cpu.reg(0);
+                let new_ptr = self.cpu.reg(1);
+                let ptr = self.cpu.reg(2);
+                let old_value = self.kuser_load64(name, old_ptr)?;
+                let new_value = self.kuser_load64(name, new_ptr)?;
+                let current = self.kuser_load64(name, ptr)?;
+                let success = current == old_value;
+                if success {
+                    self.kuser_store64(name, ptr, new_value)?;
+                }
+                self.cpu.cpsr.c = success;
+                self.cpu.set_reg(0, if success { 0 } else { u32::MAX });
+            }
+            _ => unreachable!(),
+        }
+
+        self.cpu.branch_exchange(self.cpu.reg(14));
+        Ok(Some(NativeRuntimeStep::HleCall {
+            name: name.to_string(),
+            address: pc,
+            args,
+        }))
+    }
+
+    fn kuser_load32(&mut self, helper: &str, addr: u32) -> Result<u32, NativeRuntimeError> {
+        self.link
+            .memory
+            .load32(addr)
+            .map_err(|err| NativeRuntimeError::Memory(format!("{helper} failed: {err}")))
+    }
+
+    fn kuser_store32(
+        &mut self,
+        helper: &str,
+        addr: u32,
+        value: u32,
+    ) -> Result<(), NativeRuntimeError> {
+        self.link
+            .memory
+            .store32(addr, value)
+            .map_err(|err| NativeRuntimeError::Memory(format!("{helper} failed: {err}")))
+    }
+
+    fn kuser_load64(&mut self, helper: &str, addr: u32) -> Result<u64, NativeRuntimeError> {
+        let lo = u64::from(self.kuser_load32(helper, addr)?);
+        let hi = u64::from(self.kuser_load32(helper, addr.wrapping_add(4))?);
+        Ok(lo | (hi << 32))
+    }
+
+    fn kuser_store64(
+        &mut self,
+        helper: &str,
+        addr: u32,
+        value: u64,
+    ) -> Result<(), NativeRuntimeError> {
+        self.kuser_store32(helper, addr, value as u32)?;
+        self.kuser_store32(helper, addr.wrapping_add(4), (value >> 32) as u32)
     }
 
     fn profile_guest_pc(&mut self, thread_id: u32) {
@@ -1510,6 +1643,10 @@ impl NativeRuntime {
         )?;
         let get_array_length =
             self.write_runtime_trap("JNI GetArrayLength", JniFunction::GetArrayLength)?;
+        let get_object_array_element = self.write_runtime_trap(
+            "JNI GetObjectArrayElement",
+            JniFunction::GetObjectArrayElement,
+        )?;
         let get_int_array_elements =
             self.write_runtime_trap("JNI GetIntArrayElements", JniFunction::GetIntArrayElements)?;
         let release_int_array_elements = self.write_runtime_trap(
@@ -1576,6 +1713,7 @@ impl NativeRuntime {
         self.store_runtime32(env_vtable.wrapping_add(0x2a4), get_string_utf_chars)?; // GetStringUTFChars
         self.store_runtime32(env_vtable.wrapping_add(0x2a8), release_string_utf_chars)?; // ReleaseStringUTFChars
         self.store_runtime32(env_vtable.wrapping_add(0x2ac), get_array_length)?; // GetArrayLength
+        self.store_runtime32(env_vtable.wrapping_add(0x2b4), get_object_array_element)?; // GetObjectArrayElement
         self.store_runtime32(env_vtable.wrapping_add(0x2ec), get_int_array_elements)?; // GetIntArrayElements
         self.store_runtime32(env_vtable.wrapping_add(0x30c), release_int_array_elements)?; // ReleaseIntArrayElements
         self.store_runtime32(env_vtable.wrapping_add(0x36c), get_java_vm)?; // GetJavaVM
@@ -1669,7 +1807,6 @@ impl NativeRuntime {
         max_steps: usize,
         stop_hle_name: Option<&str>,
     ) -> Result<NativeRuntimeFunctionExit, NativeRuntimeError> {
-        let mut tail = VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN);
         let trace_ranges = parse_trace_pc_ranges();
         let trace_mem32 = parse_trace_mem32_specs();
         let trace_mem32_deref = parse_trace_mem32_deref_specs();
@@ -1693,13 +1830,19 @@ impl NativeRuntime {
         let mut trace_mem32_deref_count = 0usize;
         let mut trace_cxx_string_count = 0usize;
         let mut trace_hle_count = 0usize;
+        let collect_tail = std::env::var_os("AEMU_TRACE_TAIL").is_some();
+        let mut tail = if collect_tail {
+            VecDeque::with_capacity(RUN_FUNCTION_TRACE_LEN)
+        } else {
+            VecDeque::new()
+        };
         for step_idx in 0..max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
                 self.flush_pc_profile();
                 return Ok(NativeRuntimeFunctionExit::Returned);
             }
             self.profile_guest_pc(1);
-            if tail.len() == RUN_FUNCTION_TRACE_LEN {
+            if collect_tail && tail.len() == RUN_FUNCTION_TRACE_LEN {
                 tail.pop_front();
             }
             if trace_step_interval.is_some_and(|interval| step_idx != 0 && step_idx % interval == 0)
@@ -1798,11 +1941,13 @@ impl NativeRuntime {
                     );
                 }
             }
-            tail.push_back(NativeRuntimeTraceEntry {
-                pc: self.cpu.pc(),
-                isa: self.cpu.isa(),
-                regs: core::array::from_fn(|idx| self.cpu.reg(idx)),
-            });
+            if collect_tail {
+                tail.push_back(NativeRuntimeTraceEntry {
+                    pc: self.cpu.pc(),
+                    isa: self.cpu.isa(),
+                    regs: core::array::from_fn(|idx| self.cpu.reg(idx)),
+                });
+            }
             match self.step() {
                 Ok(NativeRuntimeStep::GuestInstruction) => {}
                 Ok(NativeRuntimeStep::HleCall {
@@ -1873,9 +2018,11 @@ impl NativeRuntime {
         })
     }
 
-    fn service_guest_threads(&mut self, slice_steps: usize) -> Result<(), NativeRuntimeError> {
+    fn service_guest_threads(&mut self, slice_steps: usize) -> Result<usize, NativeRuntimeError> {
         self.drain_created_pthreads()?;
+        self.expire_timed_waits();
         let runnable = self.guest_threads.len();
+        let mut serviced = 0usize;
         for _ in 0..runnable {
             let Some(mut thread) = self.guest_threads.pop_front() else {
                 break;
@@ -1884,13 +2031,14 @@ impl NativeRuntime {
                 self.guest_threads.push_back(thread);
                 continue;
             }
+            serviced += 1;
             let done = self.run_guest_thread_slice(&mut thread, slice_steps)?;
             self.drain_created_pthreads()?;
             if !done {
                 self.guest_threads.push_back(thread);
             }
         }
-        Ok(())
+        Ok(serviced)
     }
 
     fn service_guest_threads_at_stop_hle(&mut self, name: &str) -> Result<(), NativeRuntimeError> {
@@ -2123,20 +2271,161 @@ impl NativeRuntime {
         thread_id: u32,
         name: &str,
         args: [u32; 4],
-    ) -> Option<GuestThreadWait> {
-        match name {
+    ) -> Result<Option<GuestThreadWait>, NativeRuntimeError> {
+        let wait = match name {
             "pthread_mutex_lock" if args[0] != 0 => (!self
                 .lock_mutex_for_thread(thread_id, args[0]))
             .then_some(GuestThreadWait::Mutex { mutex: args[0] }),
-            "pthread_cond_wait" | "pthread_cond_timedwait" if args[0] != 0 => {
+            "pthread_cond_wait" if args[0] != 0 => {
                 self.unlock_mutex_for_thread(thread_id, args[1]);
                 Some(GuestThreadWait::Condvar {
                     cond: args[0],
                     mutex: args[1],
+                    timeout: None,
+                })
+            }
+            "pthread_cond_timedwait" if args[0] != 0 => {
+                self.unlock_mutex_for_thread(thread_id, args[1]);
+                Some(GuestThreadWait::Condvar {
+                    cond: args[0],
+                    mutex: args[1],
+                    timeout: Some(self.guest_condvar_timeout(args[2])?),
                 })
             }
             _ => None,
+        };
+        Ok(wait)
+    }
+
+    fn guest_condvar_timeout(
+        &mut self,
+        abstime: u32,
+    ) -> Result<GuestCondvarTimeout, NativeRuntimeError> {
+        if abstime == 0 {
+            return Ok(GuestCondvarTimeout {
+                absolute_wall_ns: self.hle.current_wall_time_ns(),
+            });
         }
+        let secs = u64::from(
+            self.link
+                .memory
+                .load32(abstime)
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?,
+        );
+        let nsecs = u64::from(
+            self.link
+                .memory
+                .load32(abstime.wrapping_add(4))
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?,
+        );
+        let absolute_wall_ns = secs
+            .saturating_mul(1_000_000_000)
+            .saturating_add(nsecs.min(999_999_999));
+        Ok(GuestCondvarTimeout { absolute_wall_ns })
+    }
+
+    fn expire_timed_waits(&mut self) {
+        let now = self.hle.current_wall_time_ns();
+        if let GuestThreadWait::Condvar {
+            mutex,
+            timeout: Some(timeout),
+            ..
+        } = self.main_wait
+        {
+            if now >= timeout.absolute_wall_ns {
+                self.cpu.set_reg(0, PTHREAD_ETIMEDOUT);
+                self.main_wait = if mutex == 0 || self.lock_mutex_for_thread(1, mutex) {
+                    GuestThreadWait::Runnable
+                } else {
+                    GuestThreadWait::Mutex { mutex }
+                };
+                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                    eprintln!(
+                        "THREAD timeout id=1 mutex={mutex:#010x} wait={:?}",
+                        self.main_wait
+                    );
+                }
+            }
+        }
+
+        for idx in 0..self.guest_threads.len() {
+            let wait = self.guest_threads[idx].wait;
+            let GuestThreadWait::Condvar {
+                mutex,
+                timeout: Some(timeout),
+                ..
+            } = wait
+            else {
+                continue;
+            };
+            if now < timeout.absolute_wall_ns {
+                continue;
+            }
+            let thread_id = self.guest_threads[idx].id;
+            self.guest_threads[idx].cpu.set_reg(0, PTHREAD_ETIMEDOUT);
+            self.guest_threads[idx].wait =
+                if mutex == 0 || self.lock_mutex_for_thread(thread_id, mutex) {
+                    GuestThreadWait::Runnable
+                } else {
+                    GuestThreadWait::Mutex { mutex }
+                };
+            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                eprintln!(
+                    "THREAD timeout id={} mutex={mutex:#010x} wait={:?}",
+                    thread_id, self.guest_threads[idx].wait
+                );
+            }
+        }
+    }
+
+    fn advance_to_next_timed_wait_if_idle(&mut self) -> bool {
+        if self.main_wait.is_runnable()
+            || self.hle.has_created_pthreads()
+            || self
+                .guest_threads
+                .iter()
+                .any(|thread| thread.wait.is_runnable())
+        {
+            return false;
+        }
+        let next_timeout = self.next_timed_wait_wall_ns();
+        if let Some(wall_ns) = next_timeout {
+            self.hle.advance_wall_time_to_ns(wall_ns);
+            self.expire_timed_waits();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn has_runnable_guest_work(&self) -> bool {
+        self.hle.has_created_pthreads()
+            || self
+                .guest_threads
+                .iter()
+                .any(|thread| thread.wait.is_runnable())
+    }
+
+    fn next_timed_wait_wall_ns(&self) -> Option<u64> {
+        let mut next = match self.main_wait {
+            GuestThreadWait::Condvar {
+                timeout: Some(timeout),
+                ..
+            } => Some(timeout.absolute_wall_ns),
+            _ => None,
+        };
+        for thread in &self.guest_threads {
+            if let GuestThreadWait::Condvar {
+                timeout: Some(timeout),
+                ..
+            } = thread.wait
+            {
+                next = Some(next.map_or(timeout.absolute_wall_ns, |best| {
+                    best.min(timeout.absolute_wall_ns)
+                }));
+            }
+        }
+        next
     }
 
     fn wait_main_after_hle(
@@ -2144,14 +2433,25 @@ impl NativeRuntime {
         name: &str,
         args: [u32; 4],
     ) -> Result<(), NativeRuntimeError> {
-        let Some(wait) = self.thread_wait_after_hle(1, name, args) else {
+        self.wait_main_after_hle_with_policy(name, args, MainThreadWaitPolicy::from_env())
+    }
+
+    fn wait_main_after_hle_with_policy(
+        &mut self,
+        name: &str,
+        args: [u32; 4],
+        policy: MainThreadWaitPolicy,
+    ) -> Result<(), NativeRuntimeError> {
+        let Some(wait) = self.thread_wait_after_hle(1, name, args)? else {
             return Ok(());
         };
         self.main_wait = wait;
         if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
             eprintln!("THREAD wait id=1 {:?}", self.main_wait);
         }
-        for _ in 0..MAIN_THREAD_WAIT_SPINS {
+        let mut idle_spins = 0usize;
+        loop {
+            self.expire_timed_waits();
             if self.main_wait.is_runnable() {
                 return Ok(());
             }
@@ -2159,7 +2459,25 @@ impl NativeRuntime {
             if self.main_wait.is_runnable() {
                 return Ok(());
             }
-            self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+            let serviced = self.service_guest_threads(policy.slice_steps)?;
+            if self.main_wait.is_runnable() {
+                return Ok(());
+            }
+            let advanced_time = self.advance_to_next_timed_wait_if_idle();
+            if self.main_wait.is_runnable() {
+                return Ok(());
+            }
+            if serviced != 0 || self.has_runnable_guest_work() || advanced_time {
+                idle_spins = 0;
+                continue;
+            }
+            idle_spins = idle_spins.saturating_add(1);
+            if policy
+                .idle_spin_limit
+                .is_some_and(|limit| idle_spins >= limit)
+            {
+                break;
+            }
         }
         let summary = self.guest_thread_stall_summary();
         for line in summary.lines() {
@@ -2279,6 +2597,7 @@ impl NativeRuntime {
         if let GuestThreadWait::Condvar {
             cond: main_cond,
             mutex,
+            ..
         } = self.main_wait
         {
             if main_cond == cond {
@@ -2303,6 +2622,7 @@ impl NativeRuntime {
             if let GuestThreadWait::Condvar {
                 cond: thread_cond,
                 mutex,
+                ..
             } = wait
             {
                 if thread_cond != cond {
@@ -2507,7 +2827,7 @@ impl NativeRuntime {
                     self.handle_thread_sync_hle(thread_id, &name, address, args)?;
                     if thread_id == 1 {
                         self.wait_main_after_hle(&name, args)?;
-                    } else if let Some(wait) = self.thread_wait_after_hle(thread_id, &name, args) {
+                    } else if let Some(wait) = self.thread_wait_after_hle(thread_id, &name, args)? {
                         return Err(NativeRuntimeError::Memory(format!(
                             "pthread_once init routine for thread {thread_id} blocked on {wait:?}"
                         )));
@@ -2545,6 +2865,8 @@ impl NativeRuntime {
         let previous_thread = self.hle.current_pthread();
         self.hle.set_current_pthread(thread.id);
         let mut result = Ok(false);
+        let collect_tail = std::env::var_os("AEMU_TRACE_THREADS").is_some()
+            || std::env::var_os("AEMU_TRACE_TAIL").is_some();
         for step_idx in 0..max_steps {
             if self.cpu.pc() == THREAD_RETURN_SENTINEL {
                 result = Ok(true);
@@ -2640,7 +2962,9 @@ impl NativeRuntime {
                     );
                 }
             }
-            push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
+            if collect_tail {
+                push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
+            }
             match self.step() {
                 Ok(NativeRuntimeStep::GuestInstruction) => {}
                 Ok(NativeRuntimeStep::HleCall {
@@ -2649,7 +2973,7 @@ impl NativeRuntime {
                     args,
                 }) => {
                     self.handle_thread_sync_hle(thread.id, &name, address, args)?;
-                    if let Some(wait) = self.thread_wait_after_hle(thread.id, &name, args) {
+                    if let Some(wait) = self.thread_wait_after_hle(thread.id, &name, args)? {
                         thread.wait = wait;
                         if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
                             eprintln!("THREAD wait id={} {wait:?}", thread.id);
@@ -2959,6 +3283,7 @@ impl NativeRuntime {
                 self.cpu.reg(1)
             }
             JniFunction::GetArrayLength => self.jni_array_len()?,
+            JniFunction::GetObjectArrayElement => self.jni_object_array_element()?,
             JniFunction::GetIntArrayElements => self.jni_int_array_elements()?,
             JniFunction::ReleaseIntArrayElements => 0,
             JniFunction::GetJavaVm => {
@@ -3003,6 +3328,12 @@ impl NativeRuntime {
         if matches!(method_name.as_str(), "_getImageData" | "getImageData") {
             return self.call_jni_get_image_data();
         }
+        if method_name == "getBroadcastAddresses" && method_sig == "()[Ljava/lang/String;" {
+            return self.call_jni_string_array(&["255.255.255.255"]);
+        }
+        if method_sig == "()[Ljava/lang/String;" {
+            return self.call_jni_string_array(&[]);
+        }
         let value = match method_name.as_str() {
             "getLocale" => "en_US",
             "getDeviceModel" | "getDeviceModelName" => "AEMU",
@@ -3017,6 +3348,29 @@ impl NativeRuntime {
             _ => return Ok(0),
         };
         self.write_guest_c_string(value)
+    }
+
+    fn call_jni_string_array(&mut self, values: &[&str]) -> Result<u32, NativeRuntimeError> {
+        let count = u32::try_from(values.len()).map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let bytes = count
+            .checked_add(1)
+            .and_then(|words| words.checked_mul(4))
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        let array = self.alloc_guest_zeroed(bytes, 4)?;
+        self.store_runtime32(array, count)?;
+        for (idx, value) in values.iter().enumerate() {
+            let string = self.write_guest_c_string(value)?;
+            let offset = 4u32
+                .checked_add(
+                    u32::try_from(idx)
+                        .map_err(|_| NativeRuntimeError::AddressOverflow)?
+                        .checked_mul(4)
+                        .ok_or(NativeRuntimeError::AddressOverflow)?,
+                )
+                .ok_or(NativeRuntimeError::AddressOverflow)?;
+            self.store_runtime32(array.wrapping_add(offset), string)?;
+        }
+        Ok(array)
     }
 
     fn call_jni_get_image_data(&mut self) -> Result<u32, NativeRuntimeError> {
@@ -3076,6 +3430,19 @@ impl NativeRuntime {
             return Ok(0);
         }
         self.load_runtime32(array)
+    }
+
+    fn jni_object_array_element(&mut self) -> Result<u32, NativeRuntimeError> {
+        let array = self.cpu.reg(1);
+        let index = self.cpu.reg(2);
+        if array == 0 {
+            return Ok(0);
+        }
+        let len = self.load_runtime32(array)?;
+        if index >= len {
+            return Ok(0);
+        }
+        self.load_runtime32(array.wrapping_add(4).wrapping_add(index.wrapping_mul(4)))
     }
 
     fn jni_int_array_elements(&mut self) -> Result<u32, NativeRuntimeError> {
@@ -4449,6 +4816,133 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_arm_kuser_memory_barrier_without_mapping_high_page() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(KUSER_MEMORY_BARRIER);
+        runtime.cpu.set_reg(14, 0x4000_0101);
+
+        let step = runtime.step().unwrap();
+
+        assert_eq!(
+            step,
+            NativeRuntimeStep::HleCall {
+                name: "__kuser_memory_barrier".to_string(),
+                address: KUSER_MEMORY_BARRIER,
+                args: [0, 0, 0, 0],
+            }
+        );
+        assert_eq!(runtime.cpu.pc(), 0x4000_0100);
+        assert_eq!(runtime.cpu.isa(), Isa::Thumb);
+    }
+
+    #[test]
+    fn dispatches_arm_kuser_tls_and_compare_exchange_helpers() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x4000_0000, 0x1000).unwrap();
+        memory.store32(0x4000_0100, 0xaaaa_5555).unwrap();
+        memory.store32(0x4000_0200, 0x3333_4444).unwrap();
+        memory.store32(0x4000_0204, 0x1111_2222).unwrap();
+        memory.store32(0x4000_0210, 0x7777_8888).unwrap();
+        memory.store32(0x4000_0214, 0x5555_6666).unwrap();
+        memory.store32(0x4000_0220, 0x3333_4444).unwrap();
+        memory.store32(0x4000_0224, 0x1111_2222).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(KUSER_GET_TLS);
+        runtime.cpu.set_reg(14, 0x6000_0000);
+        runtime.step().unwrap();
+        assert_eq!(runtime.cpu.reg(0), 0x5000_2000);
+        assert_eq!(runtime.cpu.pc(), 0x6000_0000);
+
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(KUSER_CMPXCHG);
+        runtime.cpu.set_reg(0, 0xaaaa_5555);
+        runtime.cpu.set_reg(1, 0xbbbb_6666);
+        runtime.cpu.set_reg(2, 0x4000_0100);
+        runtime.cpu.set_reg(14, 0x6000_0000);
+        runtime.step().unwrap();
+        assert_eq!(runtime.cpu.reg(0), 0);
+        assert!(runtime.cpu.cpsr.c);
+        assert_eq!(
+            runtime.link.memory.load32(0x4000_0100).unwrap(),
+            0xbbbb_6666
+        );
+
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(KUSER_CMPXCHG);
+        runtime.cpu.set_reg(0, 0xaaaa_5555);
+        runtime.cpu.set_reg(1, 0xcccc_7777);
+        runtime.cpu.set_reg(2, 0x4000_0100);
+        runtime.cpu.set_reg(14, 0x6000_0000);
+        runtime.step().unwrap();
+        assert_eq!(runtime.cpu.reg(0), u32::MAX);
+        assert!(!runtime.cpu.cpsr.c);
+        assert_eq!(
+            runtime.link.memory.load32(0x4000_0100).unwrap(),
+            0xbbbb_6666
+        );
+
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(KUSER_CMPXCHG64);
+        runtime.cpu.set_reg(0, 0x4000_0200);
+        runtime.cpu.set_reg(1, 0x4000_0210);
+        runtime.cpu.set_reg(2, 0x4000_0220);
+        runtime.cpu.set_reg(14, 0x6000_0000);
+        runtime.step().unwrap();
+        assert_eq!(runtime.cpu.reg(0), 0);
+        assert!(runtime.cpu.cpsr.c);
+        assert_eq!(
+            runtime.link.memory.load32(0x4000_0220).unwrap(),
+            0x7777_8888
+        );
+        assert_eq!(
+            runtime.link.memory.load32(0x4000_0224).unwrap(),
+            0x5555_6666
+        );
+    }
+
+    #[test]
     fn run_function_can_stop_on_named_hle_call() {
         let hle_address = 0x6f00_0000;
         let mut memory = MappedMemory::new();
@@ -4941,7 +5435,11 @@ mod tests {
         assert_eq!(runtime.guest_threads.len(), 1);
         assert_eq!(
             runtime.guest_threads[0].wait,
-            GuestThreadWait::Condvar { cond, mutex }
+            GuestThreadWait::Condvar {
+                cond,
+                mutex,
+                timeout: None
+            }
         );
         assert_eq!(runtime.guest_threads[0].cpu.pc(), THREAD_RETURN_SENTINEL);
 
@@ -4960,6 +5458,140 @@ mod tests {
         assert_eq!(runtime.guest_threads[0].wait, GuestThreadWait::Runnable);
         runtime.service_guest_threads(4).unwrap();
         assert!(runtime.guest_threads.is_empty());
+    }
+
+    #[test]
+    fn main_cond_wait_keeps_servicing_runnable_guest_worker() {
+        let worker_addr = 0x4000_0100;
+        let signal_addr = worker_addr + 8;
+        let cond = 0x6000_0100;
+        let mutex = 0x6000_0200;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x4000_0000, 0x1000).unwrap();
+        memory.store32(worker_addr, 0xe254_4001).unwrap(); // subs r4, r4, #1
+        memory.store32(worker_addr + 4, 0x1aff_fffd).unwrap(); // bne worker_addr
+        memory.store32(signal_addr, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![HleSymbol {
+                name: "pthread_cond_signal".to_string(),
+                address: signal_addr,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::ReturnZero,
+            }],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        assert!(runtime.lock_mutex_for_thread(1, mutex));
+
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_pc(worker_addr);
+        cpu.set_reg(0, cond);
+        cpu.set_reg(4, 4);
+        cpu.set_reg(14, THREAD_RETURN_SENTINEL);
+        runtime.guest_threads.push_back(GuestThread {
+            id: 7,
+            cpu,
+            wait: GuestThreadWait::Runnable,
+            trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
+            trace_pc_count: 0,
+            trace_mem32_count: 0,
+            trace_mem32_deref_count: 0,
+            trace_cxx_string_count: 0,
+        });
+
+        runtime
+            .wait_main_after_hle_with_policy(
+                "pthread_cond_wait",
+                [cond, mutex, 0, 0],
+                MainThreadWaitPolicy {
+                    idle_spin_limit: Some(1),
+                    slice_steps: 1,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(runtime.main_wait, GuestThreadWait::Runnable);
+        assert!(runtime.guest_threads.is_empty());
+        let mutex_state = runtime
+            .guest_mutexes
+            .iter()
+            .find(|guest_mutex| guest_mutex.addr == mutex)
+            .unwrap();
+        assert_eq!(mutex_state.owner, Some(1));
+    }
+
+    #[test]
+    fn main_pthread_cond_timedwait_times_out_and_relocks_mutex() {
+        let cond = 0x6000_0100;
+        let mutex = 0x6000_0200;
+        let abstime = 0x4000_0100;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x4000_0000, 0x1000).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        let timeout_ns = runtime.hle.current_wall_time_ns().saturating_add(1_000_000);
+        runtime
+            .link
+            .memory
+            .store32(abstime, (timeout_ns / 1_000_000_000) as u32)
+            .unwrap();
+        runtime
+            .link
+            .memory
+            .store32(abstime + 4, (timeout_ns % 1_000_000_000) as u32)
+            .unwrap();
+        assert!(runtime.lock_mutex_for_thread(1, mutex));
+        runtime.cpu.set_reg(0, 0);
+
+        runtime
+            .wait_main_after_hle("pthread_cond_timedwait", [cond, mutex, abstime, 0])
+            .unwrap();
+
+        assert_eq!(runtime.cpu.reg(0), PTHREAD_ETIMEDOUT);
+        assert_eq!(runtime.main_wait, GuestThreadWait::Runnable);
+        let mutex_state = runtime
+            .guest_mutexes
+            .iter()
+            .find(|guest_mutex| guest_mutex.addr == mutex)
+            .unwrap();
+        assert_eq!(mutex_state.owner, Some(1));
     }
 
     #[test]
@@ -5014,6 +5646,7 @@ mod tests {
         runtime.main_wait = GuestThreadWait::Condvar {
             cond: 0x71bf_a0dc,
             mutex: 0x71bf_a0d8,
+            timeout: None,
         };
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Thumb);
@@ -5501,6 +6134,50 @@ mod tests {
         runtime.cpu.set_reg(2, 0x1234);
         runtime.cpu.set_reg(3, vararg);
         assert_ne!(runtime.call_jni_object_method().unwrap(), 0);
+    }
+
+    #[test]
+    fn jni_broadcast_addresses_returns_object_string_array() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x10000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.jni_methods.push(JniMethod {
+            id: 0x1234,
+            name: "getBroadcastAddresses".to_string(),
+            sig: "()[Ljava/lang/String;".to_string(),
+            is_static: false,
+        });
+        runtime.cpu.set_reg(2, 0x1234);
+
+        let array = runtime.call_jni_object_method().unwrap();
+        assert_ne!(array, 0);
+        runtime.cpu.set_reg(1, array);
+        assert_eq!(runtime.jni_array_len().unwrap(), 1);
+        runtime.cpu.set_reg(1, array);
+        runtime.cpu.set_reg(2, 0);
+        let element = runtime.jni_object_array_element().unwrap();
+
+        assert_eq!(
+            runtime.load_guest_c_string(element, 64).unwrap(),
+            "255.255.255.255"
+        );
     }
 
     #[test]

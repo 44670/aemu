@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--ws ADDR]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--ws ADDR]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -517,6 +517,7 @@ struct RunApkNativeOptions {
     sdl2_frames: Option<u64>,
     sdl2_stop_after_draw_elements: Option<usize>,
     sdl2_stop_screenshot: Option<PathBuf>,
+    sdl2_ignore_host_quit: bool,
     sdl2_hold_ms: u64,
     ws_addr: Option<String>,
 }
@@ -550,6 +551,7 @@ fn parse_run_apk_native_args(
         sdl2_frames: None,
         sdl2_stop_after_draw_elements: None,
         sdl2_stop_screenshot: None,
+        sdl2_ignore_host_quit: false,
         sdl2_hold_ms: 1000,
         ws_addr: None,
     };
@@ -617,6 +619,9 @@ fn parse_run_apk_native_args(
                     .next()
                     .ok_or_else(|| "--sdl2-stop-screenshot needs a path".to_string())?;
                 options.sdl2_stop_screenshot = Some(PathBuf::from(value));
+            }
+            "--sdl2-ignore-host-quit" => {
+                options.sdl2_ignore_host_quit = true;
             }
             "--ws" => {
                 options.launch = true;
@@ -712,6 +717,7 @@ fn run_apk_native(
             options.sdl2_frames,
             options.sdl2_stop_after_draw_elements,
             options.sdl2_stop_screenshot.as_deref(),
+            options.sdl2_ignore_host_quit,
             options.ws_addr.as_deref(),
         )?;
     } else if options.gles_summary || options.sdl2 {
@@ -889,6 +895,7 @@ fn replay_sdl2_live_gles_frames(
     max_frames: Option<u64>,
     stop_after_draw_elements: Option<usize>,
     stop_screenshot: Option<&Path>,
+    ignore_host_quit: bool,
     ws_addr: Option<&str>,
 ) -> Result<(), String> {
     use aemu::hle_imports::GlesEvent;
@@ -982,6 +989,17 @@ fn replay_sdl2_live_gles_frames(
             .map_err(|err| format!("SDL2 event poll failed: {err}"))?
         {
             match event {
+                HostEvent::Quit
+                | HostEvent::Key {
+                    key: HostKey::Escape,
+                    pressed: true,
+                    ..
+                } if ignore_host_quit => {
+                    println!(
+                        "sdl2-live: ignored host quit event frames={} events={} payload={}",
+                        frames, total_events, total_payload_bytes
+                    );
+                }
                 HostEvent::Quit
                 | HostEvent::Key {
                     key: HostKey::Escape,
@@ -1152,6 +1170,7 @@ fn replay_sdl2_live_gles_frames(
     _max_frames: Option<u64>,
     _stop_after_draw_elements: Option<usize>,
     _stop_screenshot: Option<&Path>,
+    _ignore_host_quit: bool,
     _ws_addr: Option<&str>,
 ) -> Result<(), String> {
     Err("--sdl2-live requires rebuilding with --features sdl2".to_string())

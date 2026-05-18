@@ -77,6 +77,11 @@ def pc_profile_path(args) -> pathlib.Path:
     return pathlib.Path(args.pc_profile) if args.pc_profile else root / "pc_profile.jsonl"
 
 
+def ui_journal_path(args) -> pathlib.Path:
+    root = pathlib.Path(args.trace_dir)
+    return pathlib.Path(args.journal) if args.journal else root / "journal.jsonl"
+
+
 def load_trace(args) -> tuple[list[dict], list[dict], pathlib.Path, pathlib.Path]:
     _root, hle_dir, draw_dir = trace_paths(args)
     uploads = read_jsonl(hle_dir / "manifest.jsonl")
@@ -531,6 +536,74 @@ def print_pc_profile(args) -> int:
         print_pc_profile_symbols(filtered, args.limit)
     for row in filtered[: args.limit]:
         print(format_pc_profile_entry(row))
+    return 0
+
+
+def pc_profile_phase_symbol(checkpoint: dict) -> str:
+    top = checkpoint.get("top")
+    if not isinstance(top, list) or not top:
+        return "none"
+    top_row = top[0]
+    if not isinstance(top_row, dict):
+        return "none"
+    symbol = top_row.get("symbol") or top_row.get("library") or top_row.get("pc_hex") or "unknown"
+    offset = top_row.get("symbol_offset_hex")
+    if top_row.get("symbol") and offset and offset != "0x0":
+        symbol = f"{symbol}+{offset}"
+    count = top_row.get("count")
+    thread = top_row.get("thread_id")
+    suffix = []
+    if isinstance(count, int):
+        suffix.append(f"count={count}")
+    if isinstance(thread, int):
+        suffix.append(f"thread={thread}")
+    return f"{symbol} ({' '.join(suffix)})" if suffix else symbol
+
+
+def ui_profile_phase_label(row: dict) -> tuple[str, str]:
+    if row.get("kind") == "wait_debug":
+        return "wait", "wait_debug"
+    action = row.get("action")
+    action_name = action.get("action") if isinstance(action, dict) else row.get("kind", "unknown")
+    step = row.get("step")
+    return str(step if step is not None else "?"), str(action_name or "unknown")
+
+
+def print_ui_profile(args) -> int:
+    path = ui_journal_path(args)
+    rows = read_jsonl(path)
+    checkpoints = []
+    for row in rows:
+        checkpoint = row.get("pc_profile")
+        if isinstance(checkpoint, dict):
+            checkpoints.append((row, checkpoint))
+    if not checkpoints:
+        raise TraceQueryError(f"{path}: no UI journal PC profile checkpoints")
+    print(f"ui-profile: path={path} rows={len(rows)} checkpoints={len(checkpoints)}")
+    prev_samples = None
+    prev_instructions = None
+    for row, checkpoint in checkpoints[: args.limit]:
+        step, action = ui_profile_phase_label(row)
+        samples = checkpoint.get("samples") if isinstance(checkpoint.get("samples"), int) else 0
+        instructions = (
+            checkpoint.get("guest_instructions")
+            if isinstance(checkpoint.get("guest_instructions"), int)
+            else 0
+        )
+        delta_samples = 0 if prev_samples is None else samples - prev_samples
+        delta_instructions = 0 if prev_instructions is None else instructions - prev_instructions
+        elapsed = row.get("elapsed_seconds")
+        elapsed_text = f" elapsed={elapsed}" if isinstance(elapsed, (int, float)) else ""
+        print(
+            "ui-profile: "
+            f"step={step} action={action}{elapsed_text} "
+            f"samples={samples} delta_samples={delta_samples} "
+            f"guest_instructions={instructions} delta_guest_instructions={delta_instructions} "
+            f"unique={checkpoint.get('unique_buckets', 0)} "
+            f"top={pc_profile_phase_symbol(checkpoint)}"
+        )
+        prev_samples = samples
+        prev_instructions = instructions
     return 0
 
 
@@ -2788,6 +2861,56 @@ def run_self_test() -> None:
         assert len(rows) == 1
         assert invalid == 1
         assert pc_profile_entry_matches(rows[0]["top"][0], pc_args)
+        (root / "journal.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "kind": "wait_debug",
+                            "pc_profile": {
+                                "samples": 128,
+                                "guest_instructions": 524288,
+                                "unique_buckets": 2,
+                                "top": [
+                                    {
+                                        "symbol": "bn_mul_mont",
+                                        "symbol_offset_hex": "0x11c",
+                                        "count": 42,
+                                        "thread_id": 1,
+                                    }
+                                ],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {
+                            "kind": "step",
+                            "step": 1,
+                            "action": {"action": "debug"},
+                            "elapsed_seconds": 0.25,
+                            "pc_profile": {
+                                "samples": 130,
+                                "guest_instructions": 532480,
+                                "unique_buckets": 3,
+                                "top": [
+                                    {
+                                        "symbol": "bn_mul_mont",
+                                        "symbol_offset_hex": "0x120",
+                                        "count": 43,
+                                        "thread_id": 1,
+                                    }
+                                ],
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        ui_args = argparse.Namespace(trace_dir=str(root), journal=None, limit=4)
+        assert print_ui_profile(ui_args) == 0
         (root / "native_events.jsonl").write_text(
             "\n".join(
                 [
@@ -3383,6 +3506,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--native-log", help="override native stderr trace log path")
     parser.add_argument("--native-events", help="override native event JSONL path")
     parser.add_argument("--pc-profile", help="override PC profile JSONL path")
+    parser.add_argument("--journal", help="override UI smoke journal JSONL path")
     parser.add_argument("--self-test", action="store_true", help="run built-in self-test")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -3410,6 +3534,11 @@ def build_parser() -> argparse.ArgumentParser:
     pc_profile.add_argument("--thread", type=parse_u32)
     pc_profile.add_argument("--symbols", action="store_true")
     pc_profile.add_argument("--limit", type=int, default=40)
+
+    ui_profile = subparsers.add_parser(
+        "ui-profile", help="show UI journal PC profile checkpoints by phase"
+    )
+    ui_profile.add_argument("--limit", type=int, default=40)
 
     thread_summary = subparsers.add_parser(
         "thread-summary", help="summarize AEMU_TRACE_THREADS run.log events"
@@ -3526,6 +3655,8 @@ def main(argv=None) -> int:
         return print_native_event(args)
     if args.command == "pc-profile":
         return print_pc_profile(args)
+    if args.command == "ui-profile":
+        return print_ui_profile(args)
     if args.command == "thread-summary":
         return print_thread_summary(args)
     if args.command == "resource-progress":

@@ -4607,7 +4607,8 @@ impl Cpu {
 
         let imm3 = u32::from((second >> 12) & 0x7);
         let imm2 = u32::from((second >> 6) & 0x3);
-        let shift = decode_arm_shift(u32::from((second >> 4) & 0x3));
+        let shift_bits = u32::from((second >> 4) & 0x3);
+        let shift = decode_arm_shift(shift_bits);
         let shifted = shift_operand(self.regs[rm], shift, (imm3 << 2) | imm2, self.cpsr.c, true);
         let lhs = if rn == 15 {
             if matches!(op, 0x8 | 0xd | 0xe) {
@@ -4640,6 +4641,18 @@ impl Cpu {
                         self.cpsr.set_nzc(value, shifted.carry);
                     }
                 }
+                Ok(())
+            }
+            0x6 => {
+                if rd == 15 || rn == 15 {
+                    return Err(Trap::Unpredictable("Thumb PKH with PC register"));
+                }
+                let value = match shift_bits {
+                    0 => (lhs & 0x0000_ffff) | (shifted.value & 0xffff_0000),
+                    2 => (lhs & 0xffff_0000) | (shifted.value & 0x0000_ffff),
+                    _ => return Err(Trap::UndefinedThumb { pc, instr: first }),
+                };
+                self.regs[rd] = value;
                 Ok(())
             }
             0x8 | 0xa | 0xb | 0xd | 0xe => {
@@ -10628,6 +10641,50 @@ mod tests {
         cpu.set_reg(0, 0x0006_32fa);
         cpu.execute_thumb(0x4478, 0x0004_bad6, &mut mem).unwrap(); // add r0, pc
         assert_eq!(cpu.reg(0), 0x000a_edd4);
+    }
+
+    #[test]
+    fn thumb32_pack_halfword_function() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0x3000, 0x1000);
+
+        cpu.set_reg(9, 0xaaaa_1234);
+        cpu.set_reg(8, 0x5678_bbbb);
+        cpu.execute_thumb32(0xeac9, 0x4108, 0, &mut mem).unwrap(); // pkhbt r1, r9, r8, lsl #16
+        assert_eq!(cpu.reg(1), 0xbbbb_1234);
+
+        cpu.set_reg(3, 0xaaaa_1234);
+        cpu.set_reg(4, 0x8765_4321);
+        cpu.execute_thumb32(0xeac3, 0x2224, 0, &mut mem).unwrap(); // pkhtb r2, r3, r4, asr #8
+        assert_eq!(cpu.reg(2), 0xaaaa_6543);
+
+        mem.load_thumb_halfwords(
+            0x3000,
+            &[
+                0xbf1c, // itt ne
+                0xeac9, 0x4108, // pkhbtne r1, r9, r8, lsl #16
+                0x6001, // strne r1, [r0]
+            ],
+        )
+        .unwrap();
+        cpu.set_isa(Isa::Thumb);
+        cpu.set_pc(0x3000);
+        cpu.set_reg(0, 0x3400);
+        cpu.set_reg(1, 0);
+        cpu.cpsr.z = false;
+        for _ in 0..3 {
+            cpu.step(&mut mem).unwrap();
+        }
+        assert_eq!(mem.load32(0x3400).unwrap(), 0xbbbb_1234);
+
+        mem.store32(0x3400, 0).unwrap();
+        cpu.set_pc(0x3000);
+        cpu.set_reg(1, 0);
+        cpu.cpsr.z = true;
+        for _ in 0..3 {
+            cpu.step(&mut mem).unwrap();
+        }
+        assert_eq!(mem.load32(0x3400).unwrap(), 0);
     }
 
     #[test]
