@@ -1,5 +1,7 @@
 pub mod apk_plan;
 pub mod armv7a;
+#[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+pub mod dynarmic_backend;
 pub mod elf_dynamic;
 pub mod elf_linker;
 pub mod elf_loader;

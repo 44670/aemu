@@ -20,6 +20,7 @@ pub const DEFAULT_SHARED_OBJECT_BASE: u32 = 0x7000_0000;
 pub const DEFAULT_SHARED_OBJECT_ALIGN: u32 = 0x0010_0000;
 pub const DEFAULT_HLE_BASE: u32 = 0x6f00_0000;
 const DEFAULT_HLE_PAGE_SIZE: usize = 0x10000;
+const ELF_PF_X: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLoadConfig {
@@ -77,6 +78,7 @@ pub struct LoadedNativeObject {
     pub load_bias: u32,
     pub memory_base: u32,
     pub memory_size: u32,
+    pub executable_ranges: Vec<GuestTableRange>,
     pub entry: u32,
     pub needed: Vec<String>,
     pub imports: Vec<ElfImport>,
@@ -400,6 +402,15 @@ fn loaded_object(image: &NativeImage, plan: &ElfLoadPlan) -> LoadedNativeObject 
         load_bias: plan.load_bias,
         memory_base: plan.memory_base,
         memory_size: plan.memory_size,
+        executable_ranges: plan
+            .segments
+            .iter()
+            .filter(|segment| segment.flags & ELF_PF_X != 0 && segment.memory_size != 0)
+            .map(|segment| GuestTableRange {
+                addr: segment.memory_addr,
+                size: segment.memory_size,
+            })
+            .collect(),
         entry: plan.entry,
         needed: image.dynamic.needed.clone(),
         imports: image.dynamic.imports.clone(),

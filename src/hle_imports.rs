@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::ZlibDecoder;
 use offset_allocator::{Allocation as OffsetAllocation, Allocator as OffsetAllocator};
@@ -140,17 +144,62 @@ fn env_hwcap_value(name: &str, default_value: u32) -> u32 {
         .unwrap_or(default_value)
 }
 
-fn env_u64_value(name: &str, default_value: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| parse_env_u64_value(&raw))
-        .unwrap_or(default_value)
-}
-
 fn optional_env_u64_value(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()
         .and_then(|raw| parse_env_u64_value(&raw))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn system_wall_time_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| {
+            duration
+                .as_secs()
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::from(duration.subsec_nanos()))
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "webgl"))]
+fn system_wall_time_ns() -> u64 {
+    js_date_now_ns()
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+fn system_wall_time_ns() -> u64 {
+    0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn monotonic_time_ns() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "webgl"))]
+fn monotonic_time_ns() -> u64 {
+    js_date_now_ns()
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+fn monotonic_time_ns() -> u64 {
+    0
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "webgl"))]
+fn js_date_now_ns() -> u64 {
+    let millis = js_sys::Date::now();
+    if !millis.is_finite() || millis <= 0.0 {
+        return 0;
+    }
+    (millis * 1_000_000.0).min(u64::MAX as f64) as u64
 }
 
 fn parse_env_u32_value(raw: &str) -> Option<u32> {
@@ -495,9 +544,12 @@ pub struct HleRuntime {
     alooper_events: VecDeque<u32>,
     unwind_tables: Vec<HleUnwindTable>,
     random_state: u32,
+    clock_mode: HleClockMode,
     clock_ns: u64,
     clock_step_ns: u64,
     clock_step_after_draw_ns: Option<u64>,
+    clock_start_monotonic_ns: u64,
+    clock_wall_floor_ns: u64,
     fake_geometries: Vec<NamedGuestObject>,
     fake_texture_pairs: Vec<NamedGuestObject>,
     resource_texture_aliases: Option<Vec<(String, String)>>,
@@ -1181,11 +1233,18 @@ struct PthreadSpecific {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum HleClockMode {
+    System,
+    SteppedFake,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct FakeTime {
     monotonic_secs: u64,
     wall_secs: u64,
-    nsecs: u32,
-    usecs: u32,
+    monotonic_nsecs: u32,
+    wall_nsecs: u32,
+    wall_usecs: u32,
 }
 
 impl HleRuntime {
@@ -1194,6 +1253,16 @@ impl HleRuntime {
         let heap_base = align_up(heap_base, 8).unwrap_or(heap_base);
         let heap_size = heap_end.saturating_sub(heap_base);
         let max_regions = (heap_size / (HLE_HEAP_SMALL_MAX + 1)).clamp(1024, HLE_HEAP_MAX_REGIONS);
+        let clock_step_ns = optional_env_u64_value("AEMU_FAKE_TIME_STEP_NANOS");
+        let clock_step_after_draw_ns =
+            optional_env_u64_value("AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS");
+        let clock_mode = if clock_step_ns.is_some() || clock_step_after_draw_ns.is_some() {
+            HleClockMode::SteppedFake
+        } else {
+            HleClockMode::System
+        };
+        let clock_start_monotonic_ns = monotonic_time_ns();
+        let clock_wall_floor_ns = system_wall_time_ns();
         Self {
             errno_addr,
             heap_base,
@@ -1233,11 +1302,12 @@ impl HleRuntime {
             alooper_events: VecDeque::new(),
             unwind_tables: Vec::new(),
             random_state: 0x1234_5678,
+            clock_mode,
             clock_ns: 0,
-            clock_step_ns: env_u64_value("AEMU_FAKE_TIME_STEP_NANOS", FAKE_TIME_STEP_NANOS),
-            clock_step_after_draw_ns: optional_env_u64_value(
-                "AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS",
-            ),
+            clock_step_ns: clock_step_ns.unwrap_or(FAKE_TIME_STEP_NANOS),
+            clock_step_after_draw_ns,
+            clock_start_monotonic_ns,
+            clock_wall_floor_ns,
             fake_geometries: Vec::new(),
             fake_texture_pairs: Vec::new(),
             resource_texture_aliases: None,
@@ -2728,17 +2798,23 @@ impl HleRuntime {
         let now = self.advance_clock();
         if tv != 0 {
             store32(memory, tv, now.wall_secs as u32)?;
-            store32(memory, tv.wrapping_add(4), now.usecs)?;
+            store32(memory, tv.wrapping_add(4), now.wall_usecs)?;
         }
         Ok(self.return32(cpu, 0))
     }
 
     fn clock_gettime<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let clock_id = cpu.reg(0);
         let ts = cpu.reg(1);
         let now = self.advance_clock();
         if ts != 0 {
-            store32(memory, ts, now.monotonic_secs as u32)?;
-            store32(memory, ts.wrapping_add(4), now.nsecs)?;
+            let (secs, nsecs) = if clock_id == 0 {
+                (now.wall_secs, now.wall_nsecs)
+            } else {
+                (now.monotonic_secs, now.monotonic_nsecs)
+            };
+            store32(memory, ts, secs as u32)?;
+            store32(memory, ts.wrapping_add(4), nsecs)?;
         }
         Ok(self.return32(cpu, 0))
     }
@@ -2753,6 +2829,9 @@ impl HleRuntime {
     }
 
     fn advance_clock(&mut self) -> FakeTime {
+        if matches!(self.clock_mode, HleClockMode::System) {
+            return self.system_clock();
+        }
         let step_ns = if self.gles_draw_submissions == 0 {
             self.clock_step_ns
         } else {
@@ -2764,23 +2843,46 @@ impl HleRuntime {
         FakeTime {
             monotonic_secs,
             wall_secs: FAKE_TIME_BASE_SECS + monotonic_secs,
-            nsecs,
-            usecs: nsecs / 1_000,
+            monotonic_nsecs: nsecs,
+            wall_nsecs: nsecs,
+            wall_usecs: nsecs / 1_000,
+        }
+    }
+
+    fn system_clock(&self) -> FakeTime {
+        let monotonic_ns = monotonic_time_ns().saturating_sub(self.clock_start_monotonic_ns);
+        let wall_ns = self.current_wall_time_ns();
+        FakeTime {
+            monotonic_secs: monotonic_ns / 1_000_000_000,
+            wall_secs: wall_ns / 1_000_000_000,
+            monotonic_nsecs: (monotonic_ns % 1_000_000_000) as u32,
+            wall_nsecs: (wall_ns % 1_000_000_000) as u32,
+            wall_usecs: ((wall_ns % 1_000_000_000) / 1_000) as u32,
         }
     }
 
     pub fn current_wall_time_ns(&self) -> u64 {
-        FAKE_TIME_BASE_SECS
-            .saturating_mul(1_000_000_000)
-            .saturating_add(self.clock_ns)
+        match self.clock_mode {
+            HleClockMode::System => system_wall_time_ns().max(self.clock_wall_floor_ns),
+            HleClockMode::SteppedFake => FAKE_TIME_BASE_SECS
+                .saturating_mul(1_000_000_000)
+                .saturating_add(self.clock_ns),
+        }
     }
 
     pub fn advance_wall_time_to_ns(&mut self, wall_time_ns: u64) {
-        let base_ns = FAKE_TIME_BASE_SECS.saturating_mul(1_000_000_000);
-        let Some(clock_ns) = wall_time_ns.checked_sub(base_ns) else {
-            return;
-        };
-        self.clock_ns = self.clock_ns.max(clock_ns);
+        match self.clock_mode {
+            HleClockMode::System => {
+                self.clock_wall_floor_ns = self.clock_wall_floor_ns.max(wall_time_ns);
+            }
+            HleClockMode::SteppedFake => {
+                let base_ns = FAKE_TIME_BASE_SECS.saturating_mul(1_000_000_000);
+                let Some(clock_ns) = wall_time_ns.checked_sub(base_ns) else {
+                    return;
+                };
+                self.clock_ns = self.clock_ns.max(clock_ns);
+            }
+        }
     }
 
     fn fopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -13766,6 +13868,7 @@ mod tests {
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(14, 0x2000);
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        hle.clock_mode = HleClockMode::SteppedFake;
 
         cpu.set_reg(0, 1);
         cpu.set_reg(1, 0x1100);
@@ -13805,6 +13908,7 @@ mod tests {
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(14, 0x2000);
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        hle.clock_mode = HleClockMode::SteppedFake;
         hle.clock_step_ns = 1_000_000;
 
         cpu.set_reg(0, 1);
@@ -13823,12 +13927,13 @@ mod tests {
     #[test]
     fn fake_time_can_switch_step_after_first_gles_draw() {
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
+        hle.clock_mode = HleClockMode::SteppedFake;
         hle.clock_step_ns = 100;
         hle.clock_step_after_draw_ns = Some(1_000_000);
 
-        assert_eq!(hle.advance_clock().nsecs, 100);
+        assert_eq!(hle.advance_clock().monotonic_nsecs, 100);
         hle.push_gles_event(GlesEvent::Clear { mask: 0x4100 });
-        assert_eq!(hle.advance_clock().nsecs, 200);
+        assert_eq!(hle.advance_clock().monotonic_nsecs, 200);
         assert_eq!(hle.gles_draw_submissions, 0);
 
         hle.push_gles_event(GlesEvent::DrawArrays {
@@ -13838,7 +13943,7 @@ mod tests {
             client_attribs: Vec::new(),
         });
         assert_eq!(hle.gles_draw_submissions, 1);
-        assert_eq!(hle.advance_clock().nsecs, 1_000_200);
+        assert_eq!(hle.advance_clock().monotonic_nsecs, 1_000_200);
     }
 
     #[test]

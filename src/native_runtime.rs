@@ -19,8 +19,8 @@ pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
 pub const DEFAULT_HEAP_SIZE: usize = 0x0800_0000;
 const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
-const CALL_RETURN_SENTINEL: u32 = 0xffff_fffc;
-const THREAD_RETURN_SENTINEL: u32 = 0xffff_fff8;
+const CALL_RETURN_SENTINEL: u32 = 0xfffe_fffc;
+const THREAD_RETURN_SENTINEL: u32 = 0xfffe_fff0;
 const KUSER_CMPXCHG64: u32 = 0xffff_0f60;
 const KUSER_MEMORY_BARRIER: u32 = 0xffff_0fa0;
 const KUSER_CMPXCHG: u32 = 0xffff_0fc0;
@@ -35,6 +35,8 @@ const GUEST_THREAD_SWAP_SERVICE_SLICES: usize = 64;
 const MAIN_THREAD_WAIT_IDLE_SPINS: usize = 1024;
 const GUEST_THREAD_STALL_SUMMARY_LIMIT: usize = 16;
 const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
+#[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+const DYNARMIC_DEFAULT_RUN_TICKS: usize = 256;
 const PTHREAD_ETIMEDOUT: u32 = 110;
 const MCPE_RUNNABLE_PTHREAD_STARTS: &[&str] = &[
     // Evidence: MCPE Play stalls waiting on the native threadpool condvar when
@@ -109,12 +111,14 @@ impl Default for NativeRuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCpuBackendKind {
     AemuInterpreter,
+    Dynarmic,
 }
 
 impl NativeCpuBackendKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "aemu" | "aemu-interpreter" => Some(Self::AemuInterpreter),
+            "dynarmic" => Some(Self::Dynarmic),
             _ => None,
         }
     }
@@ -122,6 +126,14 @@ impl NativeCpuBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AemuInterpreter => "aemu",
+            Self::Dynarmic => "dynarmic",
+        }
+    }
+
+    pub fn is_available(self) -> bool {
+        match self {
+            Self::AemuInterpreter => true,
+            Self::Dynarmic => cfg!(all(feature = "dynarmic", not(target_family = "wasm"))),
         }
     }
 }
@@ -131,6 +143,10 @@ pub struct NativeRuntime {
     pub cpu: Cpu,
     pub hle: HleRuntime,
     cpu_backend: NativeCpuBackendKind,
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    dynarmic: Option<crate::dynarmic_backend::DynarmicA32<crate::guest_memory::MappedMemory>>,
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    dynarmic_run_ticks: usize,
     runtime_hle_traps: Vec<RuntimeHleTrap>,
     jni_methods: Vec<JniMethod>,
     jni_java_vm: u32,
@@ -180,6 +196,7 @@ pub struct NativeActivityHarness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRuntimeStep {
     GuestInstruction,
+    GuestInstructions(usize),
     HleCall {
         name: String,
         address: u32,
@@ -591,16 +608,23 @@ impl PcProfiler {
         objects
     }
 
-    fn tick(&mut self) -> bool {
-        self.guest_instructions = self.guest_instructions.saturating_add(1);
+    fn tick(&mut self, guest_instructions: usize) -> bool {
+        let guest_instructions = guest_instructions.max(1);
+        self.guest_instructions = self.guest_instructions.saturating_add(guest_instructions);
         if self.sample_limit.is_some_and(|limit| self.samples >= limit) {
             return false;
         }
-        self.instructions_until_sample -= 1;
-        if self.instructions_until_sample != 0 {
+        if guest_instructions < self.instructions_until_sample {
+            self.instructions_until_sample -= guest_instructions;
             return false;
         }
-        self.instructions_until_sample = self.interval;
+        let overshoot = guest_instructions - self.instructions_until_sample;
+        let remainder = overshoot % self.interval;
+        self.instructions_until_sample = if remainder == 0 {
+            self.interval
+        } else {
+            self.interval - remainder
+        };
         self.samples = self.samples.saturating_add(1);
         true
     }
@@ -1080,7 +1104,7 @@ impl NativeRuntime {
         config: NativeRuntimeConfig,
         cpu_backend: NativeCpuBackendKind,
     ) -> Result<Self, NativeRuntimeError> {
-        if cpu_backend != NativeCpuBackendKind::AemuInterpreter {
+        if !cpu_backend.is_available() {
             return Err(NativeRuntimeError::UnsupportedCpuBackend(cpu_backend));
         }
 
@@ -1128,11 +1152,30 @@ impl NativeRuntime {
         };
         let pc_profiler = PcProfiler::from_env(&link);
 
+        #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+        let dynarmic = if cpu_backend == NativeCpuBackendKind::Dynarmic {
+            let dynarmic = crate::dynarmic_backend::DynarmicA32::new_for_mapped_memory(
+                &link.memory,
+                collect_dynarmic_executable_ranges(&link),
+            );
+            Some(dynarmic)
+        } else {
+            None
+        };
+        #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+        let dynarmic_run_ticks = parse_usize_env("AEMU_DYNARMIC_RUN_TICKS")
+            .filter(|ticks| *ticks != 0)
+            .unwrap_or(DYNARMIC_DEFAULT_RUN_TICKS);
+
         Ok(Self {
             link,
             cpu,
             hle,
             cpu_backend,
+            #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+            dynarmic,
+            #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+            dynarmic_run_ticks,
             runtime_hle_traps,
             jni_methods: Vec::new(),
             jni_java_vm: 0,
@@ -1157,7 +1200,112 @@ impl NativeRuntime {
     pub fn step(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
         match self.cpu_backend {
             NativeCpuBackendKind::AemuInterpreter => self.step_aemu_interpreter(),
+            NativeCpuBackendKind::Dynarmic => self.step_dynarmic(),
         }
+    }
+
+    #[cfg(not(all(feature = "dynarmic", not(target_family = "wasm"))))]
+    fn step_dynarmic(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        Err(NativeRuntimeError::UnsupportedCpuBackend(
+            NativeCpuBackendKind::Dynarmic,
+        ))
+    }
+
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    fn step_dynarmic(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        let pc_before = self.cpu.pc();
+        let isa_before = self.cpu.isa();
+        let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
+        self.maybe_bridge_minecraft_resources_loaded(pc_before)?;
+        if let Some(step) = self.dispatch_kuser_helper(pc_before, args_before)? {
+            return Ok(step);
+        }
+        if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
+            self.dispatch_runtime_hle(trap)?;
+            return Ok(NativeRuntimeStep::HleCall {
+                name: trap.name.to_string(),
+                address: pc_before,
+                args: args_before,
+            });
+        }
+
+        let Some(dynarmic) = self.dynarmic.as_mut() else {
+            return Err(NativeRuntimeError::UnsupportedCpuBackend(
+                NativeCpuBackendKind::Dynarmic,
+            ));
+        };
+        dynarmic.load_cpu(&self.cpu);
+        let result = if self.dynarmic_run_ticks <= 1 {
+            dynarmic.step_with_memory(&mut self.link.memory)
+        } else {
+            dynarmic.run_with_memory(&mut self.link.memory, self.dynarmic_run_ticks as u64)
+        }
+        .map_err(|err| match err {
+            Trap::Memory(message) => NativeRuntimeError::Memory(format!(
+                "{message} while executing {isa_before:?} at {pc_before:#010x}"
+            )),
+            source => NativeRuntimeError::CpuAt {
+                pc: pc_before,
+                isa: isa_before,
+                source,
+            },
+        })?;
+        dynarmic.store_cpu(&mut self.cpu);
+
+        if result.memory_abort {
+            let pc = self.cpu.pc();
+            if let Some(sentinel) = dynarmic_return_sentinel_for_abort(result.memory_abort_addr)
+                .or_else(|| dynarmic_return_sentinel_for_abort(pc))
+            {
+                self.cpu.set_pc(sentinel);
+                return Ok(NativeRuntimeStep::GuestInstructions(
+                    usize::try_from(result.ticks_used)
+                        .unwrap_or(self.dynarmic_run_ticks)
+                        .max(1),
+                ));
+            }
+            let args = core::array::from_fn(|idx| self.cpu.reg(idx));
+            for helper_pc in [result.memory_abort_addr, pc] {
+                if let Some(step) = self.dispatch_kuser_helper(helper_pc, args)? {
+                    return Ok(step);
+                }
+            }
+            return Err(NativeRuntimeError::Memory(format!(
+                "dynarmic memory abort at {:#010x} while executing {isa_before:?} at {pc_before:#010x}; current pc={pc:#010x}",
+                result.memory_abort_addr
+            )));
+        }
+        if result.interpreter_fallback {
+            return Err(NativeRuntimeError::CpuAt {
+                pc: pc_before,
+                isa: isa_before,
+                source: Trap::Unpredictable("Dynarmic requested interpreter fallback"),
+            });
+        }
+        if result.svc_valid {
+            return Err(NativeRuntimeError::CpuAt {
+                pc: pc_before,
+                isa: isa_before,
+                source: Trap::SoftwareInterrupt {
+                    pc: pc_before,
+                    comment: result.svc,
+                },
+            });
+        }
+        if result.exception_kind >= 0 {
+            return self.handle_dynarmic_exception(
+                pc_before,
+                isa_before,
+                result.exception_pc,
+                result.exception_kind,
+                usize::try_from(result.ticks_used).unwrap_or(self.dynarmic_run_ticks),
+            );
+        }
+        Ok(NativeRuntimeStep::GuestInstructions(
+            usize::try_from(result.ticks_used)
+                .unwrap_or(self.dynarmic_run_ticks)
+                .max(1),
+        ))
     }
 
     fn step_aemu_interpreter(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
@@ -1179,34 +1327,7 @@ impl NativeRuntime {
         match self.cpu.step(&mut self.link.memory) {
             Ok(()) => Ok(NativeRuntimeStep::GuestInstruction),
             Err(Trap::UndefinedArm { pc, instr }) if instr == HLE_TRAP_ARM_INSTR => {
-                if let Some(symbol) = self.link.hle_symbol_by_address(pc) {
-                    let name = symbol.name.clone();
-                    self.hle
-                        .dispatch(&name, &mut self.cpu, &mut self.link.memory)
-                        .map_err(|source| NativeRuntimeError::Hle {
-                            name: name.clone(),
-                            source,
-                        })?;
-                    return Ok(NativeRuntimeStep::HleCall {
-                        name,
-                        address: pc,
-                        args: args_before,
-                    });
-                }
-                if let Some(trap) = self
-                    .runtime_hle_traps
-                    .iter()
-                    .find(|trap| trap.address == pc)
-                    .copied()
-                {
-                    self.dispatch_runtime_hle(trap)?;
-                    return Ok(NativeRuntimeStep::HleCall {
-                        name: trap.name.to_string(),
-                        address: pc,
-                        args: args_before,
-                    });
-                }
-                Err(NativeRuntimeError::UnknownHleTrap { pc })
+                self.dispatch_hle_trap_at(pc, args_before)
             }
             Err(Trap::Memory(err)) => Err(NativeRuntimeError::Memory(format!(
                 "{err} while executing {isa_before:?} at {pc_before:#010x}"
@@ -1216,6 +1337,135 @@ impl NativeRuntime {
                 isa: isa_before,
                 source: err,
             }),
+        }
+    }
+
+    fn dispatch_hle_trap_at(
+        &mut self,
+        pc: u32,
+        args: [u32; 4],
+    ) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        if let Some(symbol) = self.link.hle_symbol_by_address(pc) {
+            let name = symbol.name.clone();
+            self.hle
+                .dispatch(&name, &mut self.cpu, &mut self.link.memory)
+                .map_err(|source| NativeRuntimeError::Hle {
+                    name: name.clone(),
+                    source,
+                })?;
+            return Ok(NativeRuntimeStep::HleCall {
+                name,
+                address: pc,
+                args,
+            });
+        }
+        if let Some(trap) = self
+            .runtime_hle_traps
+            .iter()
+            .find(|trap| trap.address == pc)
+            .copied()
+        {
+            self.dispatch_runtime_hle(trap)?;
+            return Ok(NativeRuntimeStep::HleCall {
+                name: trap.name.to_string(),
+                address: pc,
+                args,
+            });
+        }
+        Err(NativeRuntimeError::UnknownHleTrap { pc })
+    }
+
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    fn handle_dynarmic_exception(
+        &mut self,
+        pc_before: u32,
+        isa_before: Isa,
+        exception_pc: u32,
+        exception_kind: i32,
+        ticks_used: usize,
+    ) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        if let Some(sentinel) = dynarmic_return_sentinel_for_abort(exception_pc) {
+            self.cpu.set_pc(sentinel);
+            return Ok(NativeRuntimeStep::GuestInstruction);
+        }
+        let args = core::array::from_fn(|idx| self.cpu.reg(idx));
+        if let Some(step) = self.dispatch_kuser_helper(exception_pc, args)? {
+            return Ok(step);
+        }
+        const DYNARMIC_UNDEFINED_INSTRUCTION: i32 = 0;
+        const DYNARMIC_UNPREDICTABLE_INSTRUCTION: i32 = 1;
+        const DYNARMIC_BREAKPOINT: i32 = 8;
+        match (exception_kind, isa_before) {
+            (DYNARMIC_UNDEFINED_INSTRUCTION, Isa::Arm) => {
+                let instr = self.link.memory.load32(exception_pc).map_err(|err| {
+                    NativeRuntimeError::Memory(format!(
+                        "{err} while reading Dynarmic undefined ARM instruction at {exception_pc:#010x}"
+                    ))
+                })?;
+                self.cpu.set_pc(exception_pc);
+                if instr == HLE_TRAP_ARM_INSTR {
+                    let pre_hle_ticks = ticks_used.saturating_sub(1);
+                    if pre_hle_ticks > 0 {
+                        return Ok(NativeRuntimeStep::GuestInstructions(pre_hle_ticks));
+                    }
+                    let args = core::array::from_fn(|idx| self.cpu.reg(idx));
+                    return self.dispatch_hle_trap_at(exception_pc, args);
+                }
+                Err(NativeRuntimeError::CpuAt {
+                    pc: pc_before,
+                    isa: isa_before,
+                    source: Trap::UndefinedArm {
+                        pc: exception_pc,
+                        instr,
+                    },
+                })
+            }
+            (DYNARMIC_UNDEFINED_INSTRUCTION, Isa::Thumb) => {
+                let instr = self.link.memory.load16(exception_pc).map_err(|err| {
+                    NativeRuntimeError::Memory(format!(
+                        "{err} while reading Dynarmic undefined Thumb instruction at {exception_pc:#010x}"
+                    ))
+                })?;
+                self.cpu.set_pc(exception_pc);
+                if exception_pc & 3 == 0
+                    && self
+                        .link
+                        .memory
+                        .load32(exception_pc)
+                        .ok()
+                        .is_some_and(|word| word == HLE_TRAP_ARM_INSTR)
+                {
+                    let pre_hle_ticks = ticks_used.saturating_sub(1);
+                    if pre_hle_ticks > 0 {
+                        return Ok(NativeRuntimeStep::GuestInstructions(pre_hle_ticks));
+                    }
+                    let args = core::array::from_fn(|idx| self.cpu.reg(idx));
+                    return self.dispatch_hle_trap_at(exception_pc, args);
+                }
+                Err(NativeRuntimeError::CpuAt {
+                    pc: pc_before,
+                    isa: isa_before,
+                    source: Trap::UndefinedThumb {
+                        pc: exception_pc,
+                        instr,
+                    },
+                })
+            }
+            (DYNARMIC_UNPREDICTABLE_INSTRUCTION, _) => {
+                self.cpu.set_pc(exception_pc);
+                self.step_aemu_interpreter()
+            }
+            (DYNARMIC_BREAKPOINT, _) => Err(NativeRuntimeError::CpuAt {
+                pc: pc_before,
+                isa: isa_before,
+                source: Trap::Breakpoint {
+                    pc: exception_pc,
+                    comment: 0,
+                },
+            }),
+            _ => Err(NativeRuntimeError::Memory(format!(
+                "Dynarmic raised unhandled guest exception kind {exception_kind} at {exception_pc:#010x} while executing {isa_before:?} at {pc_before:#010x}"
+            ))),
         }
     }
 
@@ -1309,25 +1559,39 @@ impl NativeRuntime {
         self.kuser_store32(helper, addr.wrapping_add(4), (value >> 32) as u32)
     }
 
-    fn profile_guest_pc(&mut self, thread_id: u32) {
-        let should_sample = self.pc_profiler.as_mut().is_some_and(PcProfiler::tick);
+    fn current_pc_profile_sample(&mut self) -> Option<(u32, Isa, Option<u32>)> {
+        self.pc_profiler.as_ref()?;
+        let pc = self.cpu.pc();
+        let isa = self.cpu.isa();
+        let instr = match isa {
+            Isa::Arm => self.link.memory.load32(pc).ok(),
+            Isa::Thumb => self.link.memory.load16(pc).ok().map(|first| {
+                if pc_profile_thumb_is_32bit_prefix(first) {
+                    self.link
+                        .memory
+                        .load16(pc.wrapping_add(2))
+                        .map(|second| (u32::from(first) << 16) | u32::from(second))
+                        .unwrap_or(u32::from(first))
+                } else {
+                    u32::from(first)
+                }
+            }),
+        };
+        Some((pc, isa, instr))
+    }
+
+    fn profile_guest_pc_sample(
+        &mut self,
+        thread_id: u32,
+        guest_instructions: usize,
+        sample: Option<(u32, Isa, Option<u32>)>,
+    ) {
+        let should_sample = self
+            .pc_profiler
+            .as_mut()
+            .is_some_and(|profiler| profiler.tick(guest_instructions));
         if should_sample {
-            let pc = self.cpu.pc();
-            let isa = self.cpu.isa();
-            let instr = match isa {
-                Isa::Arm => self.link.memory.load32(pc).ok(),
-                Isa::Thumb => self.link.memory.load16(pc).ok().map(|first| {
-                    if pc_profile_thumb_is_32bit_prefix(first) {
-                        self.link
-                            .memory
-                            .load16(pc.wrapping_add(2))
-                            .map(|second| (u32::from(first) << 16) | u32::from(second))
-                            .unwrap_or(u32::from(first))
-                    } else {
-                        u32::from(first)
-                    }
-                }),
-            };
+            let (pc, isa, instr) = sample.unwrap_or_else(|| (self.cpu.pc(), self.cpu.isa(), None));
             if let Some(profiler) = self.pc_profiler.as_mut() {
                 profiler.record_sample(thread_id, pc, isa, instr);
             }
@@ -1394,15 +1658,24 @@ impl NativeRuntime {
     }
 
     pub fn run(&mut self, max_steps: usize) -> Result<(), NativeRuntimeError> {
-        for _ in 0..max_steps {
-            if let NativeRuntimeStep::HleCall {
-                name,
-                address,
-                args,
-            } = self.step()?
-            {
-                self.handle_thread_sync_hle(1, &name, address, args)?;
-                self.wait_main_after_hle(&name, args)?;
+        let mut step_idx = 0usize;
+        while step_idx < max_steps {
+            match self.step()? {
+                NativeRuntimeStep::GuestInstruction => {
+                    step_idx = step_idx.saturating_add(1);
+                }
+                NativeRuntimeStep::GuestInstructions(count) => {
+                    step_idx = step_idx.saturating_add(count.max(1));
+                }
+                NativeRuntimeStep::HleCall {
+                    name,
+                    address,
+                    args,
+                } => {
+                    self.handle_thread_sync_hle(1, &name, address, args)?;
+                    self.wait_main_after_hle(&name, args)?;
+                    step_idx = step_idx.saturating_add(1);
+                }
             }
         }
         Err(NativeRuntimeError::Cpu(Trap::StepLimit))
@@ -1836,12 +2109,13 @@ impl NativeRuntime {
         } else {
             VecDeque::new()
         };
-        for step_idx in 0..max_steps {
+        let mut step_idx = 0usize;
+        while step_idx < max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
                 self.flush_pc_profile();
                 return Ok(NativeRuntimeFunctionExit::Returned);
             }
-            self.profile_guest_pc(1);
+            let profile_sample = self.current_pc_profile_sample();
             if collect_tail && tail.len() == RUN_FUNCTION_TRACE_LEN {
                 tail.pop_front();
             }
@@ -1948,8 +2222,9 @@ impl NativeRuntime {
                     regs: core::array::from_fn(|idx| self.cpu.reg(idx)),
                 });
             }
-            match self.step() {
-                Ok(NativeRuntimeStep::GuestInstruction) => {}
+            let step_delta = match self.step() {
+                Ok(NativeRuntimeStep::GuestInstruction) => 1,
+                Ok(NativeRuntimeStep::GuestInstructions(count)) => count.max(1),
                 Ok(NativeRuntimeStep::HleCall {
                     name,
                     address: hle_address,
@@ -1995,6 +2270,7 @@ impl NativeRuntime {
                             step: step_idx,
                         });
                     }
+                    1
                 }
                 Err(source) => {
                     self.flush_pc_profile();
@@ -2003,13 +2279,16 @@ impl NativeRuntime {
                         tail: tail.into_iter().collect(),
                     });
                 }
-            }
+            };
+            self.profile_guest_pc_sample(1, step_delta, profile_sample);
+            let next_step_idx = step_idx.saturating_add(step_delta);
             if !self.guest_threads.is_empty()
-                && step_idx != 0
-                && step_idx % GUEST_THREAD_SERVICE_INTERVAL == 0
+                && next_step_idx / GUEST_THREAD_SERVICE_INTERVAL
+                    != step_idx / GUEST_THREAD_SERVICE_INTERVAL
             {
                 self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
             }
+            step_idx = next_step_idx;
         }
         self.flush_pc_profile();
         Err(NativeRuntimeError::Traced {
@@ -2778,7 +3057,8 @@ impl NativeRuntime {
             );
         }
 
-        for step_idx in 0..max_steps {
+        let mut step_idx = 0usize;
+        while step_idx < max_steps {
             if self.cpu.pc() == CALL_RETURN_SENTINEL {
                 if trace {
                     eprintln!(
@@ -2806,8 +3086,9 @@ impl NativeRuntime {
                     self.cpu.reg(14),
                 );
             }
-            match self.step()? {
-                NativeRuntimeStep::GuestInstruction => {}
+            let step_delta = match self.step()? {
+                NativeRuntimeStep::GuestInstruction => 1,
+                NativeRuntimeStep::GuestInstructions(count) => count.max(1),
                 NativeRuntimeStep::HleCall {
                     name,
                     address,
@@ -2832,8 +3113,10 @@ impl NativeRuntime {
                             "pthread_once init routine for thread {thread_id} blocked on {wait:?}"
                         )));
                     }
+                    1
                 }
-            }
+            };
+            step_idx = step_idx.saturating_add(step_delta);
         }
 
         Err(NativeRuntimeError::Memory(format!(
@@ -2867,12 +3150,13 @@ impl NativeRuntime {
         let mut result = Ok(false);
         let collect_tail = std::env::var_os("AEMU_TRACE_THREADS").is_some()
             || std::env::var_os("AEMU_TRACE_TAIL").is_some();
-        for step_idx in 0..max_steps {
+        let mut step_idx = 0usize;
+        while step_idx < max_steps {
             if self.cpu.pc() == THREAD_RETURN_SENTINEL {
                 result = Ok(true);
                 break;
             }
-            self.profile_guest_pc(thread.id);
+            let profile_sample = self.current_pc_profile_sample();
             if !trace_ranges.is_empty() {
                 let pc = self.cpu.pc();
                 if trace_ranges
@@ -2965,8 +3249,9 @@ impl NativeRuntime {
             if collect_tail {
                 push_trace_tail(&mut thread.trace_tail, &self.cpu, GUEST_THREAD_TRACE_LEN);
             }
-            match self.step() {
-                Ok(NativeRuntimeStep::GuestInstruction) => {}
+            let step_delta = match self.step() {
+                Ok(NativeRuntimeStep::GuestInstruction) => 1,
+                Ok(NativeRuntimeStep::GuestInstructions(count)) => count.max(1),
                 Ok(NativeRuntimeStep::HleCall {
                     name,
                     address,
@@ -2980,6 +3265,7 @@ impl NativeRuntime {
                         }
                         break;
                     }
+                    1
                 }
                 Err(err) => {
                     if let NativeRuntimeError::Hle {
@@ -3006,7 +3292,9 @@ impl NativeRuntime {
                     }
                     break;
                 }
-            }
+            };
+            self.profile_guest_pc_sample(thread.id, step_delta, profile_sample);
+            step_idx = step_idx.saturating_add(step_delta);
         }
         if thread.wait.is_runnable()
             && matches!(result, Ok(false))
@@ -3872,6 +4160,17 @@ fn parse_usize_env(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.trim().parse().ok()
 }
 
+#[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+fn dynarmic_return_sentinel_for_abort(addr: u32) -> Option<u32> {
+    if addr == CALL_RETURN_SENTINEL || addr == CALL_RETURN_SENTINEL.wrapping_add(4) {
+        return Some(CALL_RETURN_SENTINEL);
+    }
+    if addr == THREAD_RETURN_SENTINEL || addr == THREAD_RETURN_SENTINEL.wrapping_add(4) {
+        return Some(THREAD_RETURN_SENTINEL);
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceMem32Spec {
     pc: u32,
@@ -4309,6 +4608,21 @@ fn collect_linked_runtime_hle_traps(link: &NativeLinkReport) -> Vec<RuntimeHleTr
         .collect()
 }
 
+#[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+fn collect_dynarmic_executable_ranges(link: &NativeLinkReport) -> Vec<(u32, u32)> {
+    let object_ranges = link.objects.iter().flat_map(|object| {
+        object
+            .executable_ranges
+            .iter()
+            .map(|range| (range.addr, range.size))
+    });
+    let hle_ranges = link
+        .hle_symbols
+        .iter()
+        .map(|symbol| (symbol.address, symbol.shape.size()));
+    object_ranges.chain(hle_ranges).collect()
+}
+
 fn build_minecraft_resource_bridge(link: &NativeLinkReport) -> Option<MinecraftResourceBridge> {
     let render = link_symbol_address_in_library(link, MCPE_LIBRARY, MCPE_GAME_RENDERER_RENDER)?;
     let on_resources_loaded =
@@ -4534,6 +4848,10 @@ mod tests {
             NativeCpuBackendKind::parse("aemu"),
             Some(NativeCpuBackendKind::AemuInterpreter)
         );
+        assert_eq!(
+            NativeCpuBackendKind::parse("dynarmic"),
+            Some(NativeCpuBackendKind::Dynarmic)
+        );
         assert_eq!(NativeCpuBackendKind::parse("unknown"), None);
     }
 
@@ -4549,6 +4867,7 @@ mod tests {
                 load_bias: 0x7100_0000,
                 memory_base: 0x7100_0000,
                 memory_size: 0x1000,
+                executable_ranges: Vec::new(),
                 entry: 0,
                 needed: Vec::new(),
                 imports: Vec::new(),
@@ -4732,6 +5051,7 @@ mod tests {
                 load_bias: 0x7050_0000,
                 memory_base: 0x7050_0000,
                 memory_size: 0x200_0000,
+                executable_ranges: Vec::new(),
                 entry: 0,
                 needed: Vec::new(),
                 imports: Vec::new(),
@@ -4815,6 +5135,70 @@ mod tests {
         assert_eq!(runtime.cpu.pc(), 0x1234);
     }
 
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    #[test]
+    fn dynarmic_defers_chunk_hle_trap_with_current_args() {
+        let code_address = 0x4000_0000;
+        let hle_address = code_address + 8;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(code_address, 0x1000).unwrap();
+        memory.store32(code_address, 0xe3a0_0028).unwrap(); // mov r0, #40
+        memory.store32(code_address + 4, 0xe3a0_1007).unwrap(); // mov r1, #7
+        memory.store32(hle_address, HLE_TRAP_ARM_INSTR).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: vec![HleSymbol {
+                name: "malloc".to_string(),
+                address: hle_address,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::Implemented,
+            }],
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime =
+            NativeRuntime::new_with_cpu_backend(report, config, NativeCpuBackendKind::Dynarmic)
+                .unwrap();
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(code_address);
+        runtime.cpu.set_reg(14, 0x1234);
+
+        assert_eq!(
+            runtime.step().unwrap(),
+            NativeRuntimeStep::GuestInstructions(2)
+        );
+        assert_eq!(runtime.cpu.pc(), hle_address);
+
+        let step = runtime.step().unwrap();
+
+        assert_eq!(
+            step,
+            NativeRuntimeStep::HleCall {
+                name: "malloc".to_string(),
+                address: hle_address,
+                args: [40, 7, 0, 0],
+            }
+        );
+        assert_ne!(runtime.cpu.reg(0), 0);
+        assert_eq!(runtime.cpu.pc(), 0x1234);
+    }
+
     #[test]
     fn dispatches_arm_kuser_memory_barrier_without_mapping_high_page() {
         let report = NativeLinkReport {
@@ -4852,6 +5236,109 @@ mod tests {
             }
         );
         assert_eq!(runtime.cpu.pc(), 0x4000_0100);
+        assert_eq!(runtime.cpu.isa(), Isa::Thumb);
+    }
+
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    #[test]
+    fn dynarmic_dispatches_kuser_helper_reached_inside_chunk() {
+        let code_address = 0x4100_0000;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(code_address, 0x1000).unwrap();
+        memory.store32(code_address, 0xe51f_f004).unwrap(); // ldr pc, [pc, #-4]
+        memory
+            .store32(code_address + 4, KUSER_MEMORY_BARRIER)
+            .unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5100_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5100_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5100_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime =
+            NativeRuntime::new_with_cpu_backend(report, config, NativeCpuBackendKind::Dynarmic)
+                .unwrap();
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_pc(code_address);
+        runtime.cpu.set_reg(14, code_address + 0x101);
+
+        let step = runtime.step().unwrap();
+
+        assert_eq!(
+            step,
+            NativeRuntimeStep::HleCall {
+                name: "__kuser_memory_barrier".to_string(),
+                address: KUSER_MEMORY_BARRIER,
+                args: [0, 0, 0, 0],
+            }
+        );
+        assert_eq!(runtime.cpu.pc(), code_address + 0x100);
+        assert_eq!(runtime.cpu.isa(), Isa::Thumb);
+    }
+
+    #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+    #[test]
+    fn dynarmic_dispatches_kuser_no_execute_exception_reached_from_thumb() {
+        let code_address = 0x4200_0000;
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(code_address, 0x1000).unwrap();
+        memory.store16(code_address, 0x4801).unwrap(); // ldr r0, [pc, #4]
+        memory.store16(code_address + 2, 0x4700).unwrap(); // bx r0
+        memory
+            .store32(code_address + 8, KUSER_MEMORY_BARRIER)
+            .unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5200_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5200_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5200_3000,
+            heap_size: 0x1000,
+        };
+        let mut runtime =
+            NativeRuntime::new_with_cpu_backend(report, config, NativeCpuBackendKind::Dynarmic)
+                .unwrap();
+        runtime.cpu.set_isa(Isa::Thumb);
+        runtime.cpu.set_pc(code_address);
+        runtime.cpu.set_reg(14, code_address + 0x101);
+
+        let step = runtime.step().unwrap();
+
+        assert_eq!(
+            step,
+            NativeRuntimeStep::HleCall {
+                name: "__kuser_memory_barrier".to_string(),
+                address: KUSER_MEMORY_BARRIER,
+                args: [KUSER_MEMORY_BARRIER, 0, 0, 0],
+            }
+        );
+        assert_eq!(runtime.cpu.pc(), code_address + 0x100);
         assert_eq!(runtime.cpu.isa(), Isa::Thumb);
     }
 
@@ -5079,6 +5566,7 @@ mod tests {
                 load_bias: 0x7000_0000,
                 memory_base: 0x7000_0000,
                 memory_size: 0x1000,
+                executable_ranges: Vec::new(),
                 entry: 0x7000_0000,
                 needed: Vec::new(),
                 imports: Vec::new(),
@@ -5602,6 +6090,7 @@ mod tests {
             load_bias: 0x7050_0000,
             memory_base: 0x7100_0000,
             memory_size: 0x0060_0000,
+            executable_ranges: Vec::new(),
             entry: 0x7100_0000,
             needed: Vec::new(),
             imports: Vec::new(),
@@ -5685,6 +6174,7 @@ mod tests {
             load_bias: 0x7050_0000,
             memory_base: 0x7150_0000,
             memory_size: 0x0020_0000,
+            executable_ranges: Vec::new(),
             entry: 0x7150_0000,
             needed: Vec::new(),
             imports: Vec::new(),
@@ -5717,6 +6207,7 @@ mod tests {
             load_bias: 0x7030_0000,
             memory_base: 0x7030_0000,
             memory_size: 0x0010_0000,
+            executable_ranges: Vec::new(),
             entry: 0x7030_0000,
             needed: Vec::new(),
             imports: Vec::new(),
@@ -6188,6 +6679,7 @@ mod tests {
             load_bias: address & 0xfff0_0000,
             memory_base: address & 0xfff0_0000,
             memory_size: 0x1000,
+            executable_ranges: Vec::new(),
             entry: address & 0xfff0_0000,
             needed: Vec::new(),
             imports: Vec::new(),
@@ -6225,6 +6717,10 @@ mod tests {
             cpu: Cpu::new(),
             hle: HleRuntime::new(0, 0x6000_0000, 0x1000),
             cpu_backend: NativeCpuBackendKind::AemuInterpreter,
+            #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+            dynarmic: None,
+            #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
+            dynarmic_run_ticks: DYNARMIC_DEFAULT_RUN_TICKS,
             runtime_hle_traps: Vec::new(),
             jni_methods: Vec::new(),
             jni_java_vm: 0,

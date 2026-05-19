@@ -11,9 +11,11 @@ wasm/WebGL for browser execution.
 2. Treat the APK as an input container: inspect ZIP metadata, parse the
    manifest/resources/assets as needed, extract or stream files, and load
    `lib/armeabi-v7a/*.so` through our own ELF/linker path.
-3. Run native game code with a custom ARM interpreter. Use QEMU user-mode as
-   an offline instruction oracle and Dynarmic as a decoder/semantics reference;
-   do not embed external CPU emulators as runtime cores.
+3. Run native game code with the custom Rust ARM interpreter by default. Use
+   QEMU user-mode as an offline instruction oracle and Dynarmic as a
+   decoder/semantics reference. A native-only Dynarmic backend may be kept as
+   an explicit performance experiment, but it must not replace the default
+   interpreter or the wasm/browser CPU path.
 4. HLE Android and Bionic APIs on demand: libc, pthreads, time, file paths,
    APK assets, JNI/native-activity entrypoints, EGL, GLES, input, audio, and
    save data.
@@ -66,6 +68,14 @@ NEON coverage for the current `armeabi-v7a` Minecraft PE probe, while keeping
 older user-mode instructions that remain valid on ARMv7-A.
 Privileged instructions should trap or become explicit user-mode stubs instead
 of silently pretending to emulate kernel behavior.
+
+### Optional Dynarmic Native Backend
+
+Dynarmic is being evaluated as an optional native-only SDL2 CPU backend selected
+with `--cpu-backend dynarmic` and the `dynarmic` Cargo feature. It is not part
+of the wasm/WebGL runtime and does not bypass AEMU guest memory, Android HLE,
+EGL/GLES capture, SDL2/WebGL replay, or cooperative guest-thread scheduling.
+Current evaluation evidence lives in `docs/dynarmic_backend_eval.md`.
 
 ### Graphics and WebGL
 

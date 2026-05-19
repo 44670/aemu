@@ -80,6 +80,7 @@ pub struct Cpsr {
     pub c: bool,
     pub v: bool,
     pub q: bool,
+    pub it: u8,
     pub ge: u8,
     pub t: bool,
 }
@@ -91,7 +92,9 @@ impl Cpsr {
             | (u32::from(self.c) << 29)
             | (u32::from(self.v) << 28)
             | (u32::from(self.q) << 27)
+            | (u32::from(self.it & 0x3) << 25)
             | (u32::from(self.ge & 0xf) << 16)
+            | (u32::from(self.it & 0xfc) << 8)
             | (u32::from(self.t) << 5)
     }
 
@@ -102,6 +105,7 @@ impl Cpsr {
             c: value & (1 << 29) != 0,
             v: value & (1 << 28) != 0,
             q: value & (1 << 27) != 0,
+            it: (((value >> 8) & 0xfc) | ((value >> 25) & 0x3)) as u8,
             ge: ((value >> 16) & 0xf) as u8,
             t: value & (1 << 5) != 0,
         }
@@ -188,6 +192,7 @@ impl Cpu {
     pub fn set_isa(&mut self, isa: Isa) {
         self.cpsr.t = isa == Isa::Thumb;
         if isa == Isa::Arm {
+            self.cpsr.it = 0;
             self.thumb_it = None;
             self.thumb_in_it = false;
         }
@@ -207,6 +212,14 @@ impl Cpu {
 
     pub fn set_sreg(&mut self, idx: usize, value: u32) {
         self.sregs[idx] = value;
+    }
+
+    pub fn cp15_virtual_counter(&self) -> u64 {
+        self.cp15_virtual_counter
+    }
+
+    pub fn set_cp15_virtual_counter(&mut self, value: u64) {
+        self.cp15_virtual_counter = value;
     }
 
     pub fn dreg(&self, idx: usize) -> u64 {

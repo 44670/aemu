@@ -1636,6 +1636,12 @@ def build_arg_parser():
     parser.add_argument("--apk", default=str(DEFAULT_APK))
     parser.add_argument("--abi", default=DEFAULT_ABI)
     parser.add_argument("--binary", default=str(DEFAULT_BINARY))
+    parser.add_argument("--cpu-backend", choices=["aemu", "dynarmic"], default="aemu")
+    parser.add_argument(
+        "--dynarmic-run-ticks",
+        type=int,
+        help="set AEMU_DYNARMIC_RUN_TICKS for chunked native Dynarmic runs",
+    )
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--trace-dir")
     parser.add_argument("--allow-existing-trace-dir", action="store_true")
@@ -1793,8 +1799,6 @@ def apply_milestone_defaults(args):
         return
     args.frames = max(args.frames, 260)
     args.timeout = max(args.timeout, 640 if args.first_visible_draw_resource else 560)
-    if args.fake_time_step_nanos is None:
-        args.fake_time_step_nanos = 100_000
     if args.guest_thread_swap_slices is None:
         args.guest_thread_swap_slices = 256
     if args.stop_after_gles_draw_elements is None:
@@ -1857,6 +1861,8 @@ def main(argv=None):
         env["AEMU_HWCAP2"] = args.hwcap2
     if args.fake_time_step_nanos is not None:
         env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
+    if args.dynarmic_run_ticks is not None:
+        env["AEMU_DYNARMIC_RUN_TICKS"] = str(args.dynarmic_run_ticks)
     if args.guest_thread_swap_slices is not None:
         env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
     if args.profile_pc:
@@ -1891,6 +1897,8 @@ def main(argv=None):
         str(apk),
         "--abi",
         args.abi,
+        "--cpu-backend",
+        args.cpu_backend,
         "--steps",
         str(args.steps),
         "--sdl2-live",
@@ -1922,6 +1930,8 @@ def main(argv=None):
         "apk": str(apk),
         "abi": args.abi,
         "binary": str(binary),
+        "cpu_backend": args.cpu_backend,
+        "dynarmic_run_ticks": args.dynarmic_run_ticks,
         "link_log": str(link_log_path),
         "run_log": str(run_log_path),
         "summary_json": str(summary_path),

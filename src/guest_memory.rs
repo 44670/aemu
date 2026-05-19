@@ -190,6 +190,22 @@ impl MappedMemory {
         None
     }
 
+    #[cfg(all(target_os = "linux", not(debug_assertions)))]
+    pub fn dynarmic_host_page_table_excluding(&self, excluded_pages: &[u64]) -> Vec<*mut u8> {
+        let mut page_table = vec![std::ptr::null_mut(); PAGE_COUNT];
+        for (word_idx, mut word) in self.mapped_pages.iter().copied().enumerate() {
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let page = word_idx * 64 + bit;
+                if !page_bitmap_contains(excluded_pages, page) {
+                    page_table[page] = page_addr(page) as usize as *mut u8;
+                }
+                word &= word - 1;
+            }
+        }
+        page_table
+    }
+
     fn rollback_new_pages(&mut self, first_new_page: usize) {
         while self.pages.len() > first_new_page {
             if let Some(page) = self.pages.pop() {
@@ -648,6 +664,13 @@ fn page_index(addr: u32) -> usize {
     (addr as usize) >> PAGE_SHIFT
 }
 
+#[cfg(all(target_os = "linux", not(debug_assertions)))]
+fn page_bitmap_contains(bitmap: &[u64], page: usize) -> bool {
+    bitmap
+        .get(page / 64)
+        .is_some_and(|word| (word & (1u64 << (page % 64))) != 0)
+}
+
 #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
 fn page_offset(addr: u32) -> usize {
     (addr as usize) & (PAGE_SIZE - 1)
@@ -684,12 +707,15 @@ fn map_page_storage(_base: u32) -> std::result::Result<PageStorage, MappedMemory
     Ok(PageStorage::Owned(Box::new([0; PAGE_SIZE])))
 }
 
+#[cfg(target_os = "linux")]
 fn unmap_page_storage(page: MappedPage) {
-    #[cfg(target_os = "linux")]
     if matches!(page.storage, PageStorage::Identity) {
         let _ = linux_fixed_mapping::unmap_page(page.base);
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+fn unmap_page_storage(_page: MappedPage) {}
 
 #[cfg(target_os = "linux")]
 mod linux_fixed_mapping {

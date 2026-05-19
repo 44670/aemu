@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|dynarmic] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|dynarmic] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -568,7 +568,7 @@ fn parse_run_apk_native_args(
                     .ok_or_else(|| "--cpu-backend needs a backend value".to_string())?;
                 options.cpu_backend = aemu::native_runtime::NativeCpuBackendKind::parse(&value)
                     .ok_or_else(|| {
-                        format!("invalid --cpu-backend value: {value} (expected aemu)")
+                        format!("invalid --cpu-backend value: {value} (expected aemu or dynarmic)")
                     })?;
             }
             "--steps" => {

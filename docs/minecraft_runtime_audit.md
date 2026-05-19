@@ -22,7 +22,7 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Requirement | Current Evidence | Status |
 | --- | --- | --- |
 | Keep one Rust crate | `Cargo.toml` remains a single package; no workspace split. | Satisfied |
-| Use Rust custom interpreter, not libdvm/QEMU/Dynarmic runtime | `src/armv7a.rs`; QEMU/Dynarmic remain references/oracles only. | Satisfied |
+| Use Rust custom interpreter as the default runtime | `src/armv7a.rs` remains the default CPU backend; QEMU remains an oracle; Dynarmic is gated as an optional native-only performance experiment documented in `docs/dynarmic_backend_eval.md`. | Satisfied |
 | Test APK path is `/mnt/hgfs/deb13/AndroidGames` | `AGENTS.md`, `docs/minecraft_pe_probe.md`, and CLI probes use that path. | Satisfied |
 | 1:1 guest address map | `src/native_loader.rs`, `src/guest_memory.rs`, `AGENTS.md`. | Satisfied |
 | APK native load/link | `cargo run -- link-apk ... --abi armeabi-v7a` reports loaded and relocated. | Satisfied for local ARMv7 research APK |

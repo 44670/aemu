@@ -8,6 +8,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
+dynarmic = []
 sdl2 = ["dep:sdl2"]
 webgl = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
 

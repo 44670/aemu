@@ -348,6 +348,8 @@ def apply_trace_env(args, out_dir, env):
         env["AEMU_FAKE_TIME_STEP_NANOS"] = str(args.fake_time_step_nanos)
     if args.fake_time_step_after_draw_nanos is not None:
         env["AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS"] = str(args.fake_time_step_after_draw_nanos)
+    if args.dynarmic_run_ticks is not None:
+        env["AEMU_DYNARMIC_RUN_TICKS"] = str(args.dynarmic_run_ticks)
     if args.guest_thread_swap_slices is not None:
         env["AEMU_GUEST_THREAD_SWAP_SLICES"] = str(args.guest_thread_swap_slices)
     if args.main_thread_wait_idle_spins is not None:
@@ -399,6 +401,7 @@ def summarize_env(env):
         "AEMU_TRACE_GLES_EVENTS_SKIP",
         "AEMU_FAKE_TIME_STEP_NANOS",
         "AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS",
+        "AEMU_DYNARMIC_RUN_TICKS",
         "AEMU_GUEST_THREAD_SWAP_SLICES",
         "AEMU_MAIN_THREAD_WAIT_IDLE_SPINS",
         "AEMU_MAIN_THREAD_WAIT_SLICE_STEPS",
@@ -485,6 +488,8 @@ def build_emulator_cmd(args, ws_addr):
         str(args.apk),
         "--abi",
         args.abi,
+        "--cpu-backend",
+        args.cpu_backend,
         "--steps",
         str(args.steps),
         "--sdl2-live",
@@ -713,6 +718,7 @@ def build_arg_parser():
     parser.add_argument("--apk", type=pathlib.Path, default=DEFAULT_APK)
     parser.add_argument("--binary", type=pathlib.Path, default=DEFAULT_BINARY)
     parser.add_argument("--abi", default=DEFAULT_ABI)
+    parser.add_argument("--cpu-backend", choices=["aemu", "dynarmic"], default="aemu")
     parser.add_argument("--out-dir", type=pathlib.Path)
     parser.add_argument("--display", default=":0")
     parser.add_argument("--ws", default=DEFAULT_WS_ADDR)
@@ -731,6 +737,11 @@ def build_arg_parser():
         "--fake-time-step-after-draw-nanos",
         type=int,
         help="set AEMU_FAKE_TIME_STEP_AFTER_DRAW_NANOS after GLES draw submissions start",
+    )
+    parser.add_argument(
+        "--dynarmic-run-ticks",
+        type=int,
+        help="set AEMU_DYNARMIC_RUN_TICKS for chunked native Dynarmic runs",
     )
     parser.add_argument(
         "--guest-thread-swap-slices",
@@ -916,8 +927,6 @@ def apply_milestone_defaults(args):
     args.frames = max(args.frames, 260)
     args.timeout = max(args.timeout, 640.0)
     args.ws_request_timeout = max(args.ws_request_timeout, 90.0)
-    if args.fake_time_step_nanos is None:
-        args.fake_time_step_nanos = 100_000
     if args.guest_thread_swap_slices is None:
         args.guest_thread_swap_slices = 256
     if args.main_thread_wait_slice_steps is None:
