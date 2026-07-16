@@ -11,11 +11,13 @@ default = []
 dynarmic = []
 sdl2 = ["dep:sdl2"]
 webgl = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+wasm-bench = []
 
 [dependencies]
 base64 = "0.22"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 js-sys = { version = "0.3", optional = true }
+libm = "0.2"
 offset-allocator = "0.2"
 sdl2 = { version = "0.38", optional = true }
 serde_json = "1"

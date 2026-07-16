@@ -35,8 +35,8 @@ Old Android games may use OpenGL ES 1.1 fixed-function rendering or OpenGL ES
 - GLES 1.1 fixed function should be emulated over shader-based backends.
 - GLES 2.0 should map as directly as possible to WebGL 1.
 - GLES 3.x should be optional and should not be part of the initial baseline.
-- EGL should be implemented as a facade that creates and manages the host SDL2
-  canvas/context and presents through `eglSwapBuffers`.
+- EGL must maintain guest-visible display/config/context/surface ownership and
+  error state, while the host SDL2/WebGL backend presents `eglSwapBuffers`.
 
 Important GLES 1.1 functions to expect in old games include:
 
@@ -59,17 +59,43 @@ Likely early surfaces:
 - APK/asset loading
 - `lib/armeabi/*.so` loading and imported-symbol resolution
 - Bionic/libc/pthread/math/time/file/socket shims as needed
-- Android native app entrypoints and lifecycle stubs
+- Android native app entrypoints and stateful lifecycle delivery
 - `ANativeActivity`
 - `ANativeWindow`
 - `AInputQueue`
-- EGL facade
-- GLES facade
-- OpenSL ES or AudioTrack-style audio facade mapped to SDL2 audio
+- EGL state model and host presentation bridge
+- GLES state model and checked host replay
+- OpenSL ES or AudioTrack-style audio model mapped to SDL2 audio
 - Touch, keyboard, and controller input mapped from SDL2/browser events
 - Save-data and external-storage path mapping
 
 Avoid building broad framework behavior until a target game actually needs it.
+
+## No-Fake-HLE Contract
+
+HLE is permitted only at external Android/system ABI boundaries for services
+that are absent from the loaded guest process. It must not replace APK-defined
+game or engine logic, manufacture game state, skip a guest callback or thread,
+or turn an unsupported operation into generic success.
+
+- Every APK-defined game/engine function executes as guest code. The only
+  defined-symbol overrides are the explicit compiler integer helper list in
+  `src/native_loader.rs`, whose arithmetic semantics are tested.
+- A system entry marked implemented must validate its inputs and model its
+  return value, output memory, persistent state, side effects, and failure
+  behavior that the guest can observe. A bounded unavailable service returns a
+  documented failure or configured absence; it does not pretend success.
+- Unknown or unmodeled imports and JNI entries fail at the exact call. Do not
+  add generic return-zero, return-one, or void-success dispatch behavior.
+- Every successful `pthread_create` schedules the supplied guest start routine.
+  Native-app-glue itself creates the app thread; launchers promote that real
+  pthread and never call `android_main` directly or fabricate a fallback
+  `android_app`.
+- Target-specific symbol registries, environment-controlled game hooks,
+  resource-completion bridges, and selective thread allowlists are forbidden,
+  including diagnostic and test-only variants.
+- Any exception to these rules needs an explicit current platform requirement,
+  a semantic test, and a link audit proving it cannot capture game code.
 
 ## ARM CPU Direction
 
@@ -419,9 +445,10 @@ first-swap GLES event stream into the SDL2 context after the first guest
 `eglSwapBuffers`. For the local MCPE ARMv7 probe this includes shader/program
 replay, payload-backed textures/buffers/uniforms, client-side vertex attribute
 staging, and all captured indexed draw submissions.
-`run-apk-native --sdl2-live` keeps the guest in `android_main` after the first
-swap, drains and replays each frame's GLES event batch, and resumes to the next
-`eglSwapBuffers`; use `--sdl2-frames N` for bounded verification runs. On the
+`run-apk-native --sdl2-live` keeps the real native-app-glue pthread running
+after the first swap, drains and replays each frame's GLES event batch, and
+resumes it to the next `eglSwapBuffers`; use `--sdl2-frames N` for bounded
+verification runs. On the
 local X11 display, use `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1` so SDL creates a
 GLES context through EGL. The SDL2 live loop can also expose a small local
 WebSocket control harness:
@@ -437,12 +464,11 @@ Current live rendering reaches MCPE's first `eglSwapBuffers`, replays frames in
 SDL2, and the harness captures framebuffer screenshots directly as PNG; no PPM
 or conversion step is expected. A run on
 `DISPLAY=:0` has been verified past frame 2000 without the previous HLE
-`std::string` heap exhaustion. WebSocket/SDL2 pointer events now enter the
-guest through a minimal Android `AInputQueue`/`AMotionEvent` facade. The old
-MCPE `Multitouch::feed` target hook is diagnostic-only and not linked by
-default. Do not call this playable yet: the framebuffer still stays on the
-gradient/loading frame after input, default execution now keeps MCPE
-texture/geometry/UI/resource logic native, and audio remains stubbed.
+`std::string` heap exhaustion. WebSocket/SDL2 pointer events enter the guest
+through the Android `AInputQueue`/`AMotionEvent` model. The old MCPE
+`Multitouch::feed` target hook has been removed. MCPE texture, geometry, UI,
+resource, input, and world logic stays native; audio remains unsupported and
+must fail explicitly when reached rather than report fake completion.
 Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,
@@ -522,30 +548,22 @@ For the default native TextureGroup path, use:
 tools/trace_query.py "$trace_dir" mcpe-text --profile native
 ```
 
-The native path currently uses a 128x128 text atlas; the old HLE
-font-expansion path uses 256x256. Both profiles reject the known bad 64x32
-binding.
+The native path currently uses a 128x128 text atlas. Historical HLE
+font-expansion traces used 256x256, but that target path has been removed. The
+native profile rejects the known bad 64x32 binding.
 
-MCPE game/engine target facades are diagnostic only and must stay native by
-default. This includes `Font::init()`, `TextureGroup::*`, `AppPlatform::*`
+MCPE game/engine target facades have been removed and must not return. This
+includes `Font::init()`, `TextureGroup::*`, `AppPlatform::*`
 image loaders, `ImageUtils::*`, `GeometryGroup::*`, MCPE input/gamepad/menu
 methods, render helpers, profiler/telemetry, social, networking, and Realms
 methods. Keep AEMU HLE at Android/system/libc/libm/libstdc++/EGL/GLES import
 boundaries, not at MCPE gameplay or rendering-engine methods.
 
-For old experiments only, set `AEMU_MCPE_HLE_GAME_LOGIC=1` to restore all MCPE
-target HLE facades. To restore just the old TextureGroup diagnostic HLE
-facades, set `AEMU_MCPE_HLE_TEXTURE_GROUP=1` or the narrower
-`AEMU_MCPE_HLE_TEXTURE_DATA=1`, `AEMU_MCPE_HLE_TEXTURE_PAIR=1`, or
-`AEMU_MCPE_HLE_TEXTURE_IS_LOADED=1`. Mixing native `getTexturePair` with the
-old diagnostic `isLoaded(...) == true` HLE facade can make
-`TextureAtlas::redrawAtlas()` call `TexturePair::clear()` on a null native
-pair.
-
-The old MCPE resource bridge that calls `MinecraftClient::onResourcesLoaded`
-from inside `GameRenderer::render` is also disabled by default. It may be
-restored only for old diagnostics with `AEMU_ENABLE_MCPE_RESOURCE_BRIDGE=1`
-or `AEMU_MCPE_HLE_GAME_LOGIC=1`.
+MCPE target facades must not exist in the HLE registry or dispatcher, including
+as test fixtures or environment-variable overrides. The linker resolves game
+and engine symbols to their native definitions. The old resource bridge
+that called `MinecraftClient::onResourcesLoaded` from
+`GameRenderer::render` has been removed.
 
 For native TextureData fallback traces captured in `run.log`, use:
 

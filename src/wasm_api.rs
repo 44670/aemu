@@ -66,7 +66,9 @@ fn run_mcpe_first_frame_impl(
 
     let mut runtime = NativeRuntime::new(report, NativeRuntimeConfig::default())
         .map_err(|err| format!("runtime setup failed: {err}"))?;
-    runtime.hle.set_apk_bytes(apk_bytes);
+    runtime
+        .set_apk_bytes(apk_bytes)
+        .map_err(|err| format!("APK runtime metadata setup failed: {err}"))?;
 
     let constructors = runtime
         .constructors()
@@ -205,32 +207,30 @@ fn run_native_activity_until_swap(
         .run_function_with_args(on_create, &[harness.activity, 0, 0], max_steps)
         .map_err(|err| format!("ANativeActivity_onCreate failed: {err}"))?;
 
-    let mut app = runtime
+    let app = runtime
         .link
         .memory
         .load32(harness.activity.wrapping_add(0x1c))
         .map_err(|err| format!("failed to read ANativeActivity.instance: {err}"))?;
     if app == 0 {
-        app = runtime
-            .prepare_android_app(harness)
-            .map_err(|err| format!("android_app harness setup failed: {err}"))?;
-    } else {
-        runtime
-            .populate_android_app(app, harness)
-            .map_err(|err| format!("android_app harness patch failed: {err}"))?;
+        return Err(
+            "ANativeActivity_onCreate returned without installing ANativeActivity.instance"
+                .to_string(),
+        );
     }
-
-    let android_main = runtime
-        .symbol_address_in_library(MCPE_LIBRARY, "android_main")
-        .or_else(|| runtime.symbol_address("android_main"))
-        .ok_or_else(|| "missing android_main export".to_string())?;
+    runtime
+        .populate_android_app(app, harness)
+        .map_err(|err| format!("android_app harness setup failed: {err}"))?;
+    runtime
+        .promote_guest_thread_for_arg(app)
+        .map_err(|err| format!("native_app_glue pthread activation failed: {err}"))?;
     match runtime
-        .run_function_with_args_until_hle(android_main, &[app], max_steps, Some("eglSwapBuffers"))
-        .map_err(|err| format!("android_main failed: {err}"))?
+        .continue_until_hle(max_steps, Some("eglSwapBuffers"))
+        .map_err(|err| format!("native_app_glue pthread failed: {err}"))?
     {
         NativeRuntimeFunctionExit::HleCall { step, .. } => Ok(step),
         NativeRuntimeFunctionExit::Returned => {
-            Err("android_main returned before eglSwapBuffers".to_string())
+            Err("native_app_glue pthread returned before eglSwapBuffers".to_string())
         }
     }
 }

@@ -1,14 +1,18 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::armv7a::{Cpu, Isa, Memory, Trap};
+use crate::armv7a::{
+    Cpu, Isa, Memory, RELEASE_BATCH_BOUNDARY, RELEASE_BATCH_BUDGET, RELEASE_BATCH_NO_PC,
+    RELEASE_BATCH_TRAP, ReleaseBatchStops, Trap,
+};
+use crate::dex_index::{ApkDexIndex, DexMemberKind};
 use crate::guest_memory::MappedMemoryError;
 use crate::hle_imports::{
-    CreatedPthread, HLE_TRAP_ARM_INSTR, HleError, HleRuntime, HleUnwindTable,
+    CreatedPthread, HLE_TRAP_ARM_INSTR, HleCallBehavior, HleError, HleRuntime, HleUnwindTable,
 };
-use crate::native_loader::NativeLinkReport;
+use crate::native_loader::{HleSymbol, NativeLinkReport};
 use sha1::{Digest, Sha1};
 
 pub const DEFAULT_STACK_BASE: u32 = 0x6c00_0000;
@@ -16,7 +20,7 @@ pub const DEFAULT_STACK_SIZE: usize = 0x0200_0000;
 pub const DEFAULT_TLS_BASE: u32 = 0x6e00_0000;
 pub const DEFAULT_TLS_SIZE: usize = 0x0001_0000;
 pub const DEFAULT_HEAP_BASE: u32 = 0x6000_0000;
-pub const DEFAULT_HEAP_SIZE: usize = 0x0800_0000;
+pub const DEFAULT_HEAP_SIZE: usize = 0x0c00_0000;
 const STACK_ENTRY_HEADROOM_MAX: u32 = 0x1000;
 const ERRNO_OFFSET: u32 = 0x100;
 const CALL_RETURN_SENTINEL: u32 = 0xfffe_fffc;
@@ -25,6 +29,15 @@ const KUSER_CMPXCHG64: u32 = 0xffff_0f60;
 const KUSER_MEMORY_BARRIER: u32 = 0xffff_0fa0;
 const KUSER_CMPXCHG: u32 = 0xffff_0fc0;
 const KUSER_GET_TLS: u32 = 0xffff_0fe0;
+
+#[inline(always)]
+fn is_kuser_helper_address(pc: u32) -> bool {
+    matches!(
+        pc,
+        KUSER_CMPXCHG64 | KUSER_MEMORY_BARRIER | KUSER_CMPXCHG | KUSER_GET_TLS
+    )
+}
+
 const RUN_FUNCTION_TRACE_LEN: usize = 24;
 const GUEST_THREAD_TRACE_LEN: usize = 128;
 const GUEST_THREAD_STACK_SIZE: u32 = 0x0004_0000;
@@ -35,18 +48,22 @@ const GUEST_THREAD_SWAP_SERVICE_SLICES: usize = 64;
 const MAIN_THREAD_WAIT_IDLE_SPINS: usize = 1024;
 const GUEST_THREAD_STALL_SUMMARY_LIMIT: usize = 16;
 const PTHREAD_ONCE_INIT_STEPS: usize = 100_000;
+const PTHREAD_CLEANUP_STEPS: usize = 100_000;
+const PTHREAD_DESTRUCTOR_STEPS: usize = 100_000;
+const PTHREAD_DESTRUCTOR_ITERATIONS: usize = 4;
 #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
 const DYNARMIC_DEFAULT_RUN_TICKS: usize = 256;
 const PTHREAD_ETIMEDOUT: u32 = 110;
-const MCPE_RUNNABLE_PTHREAD_STARTS: &[&str] = &[
-    // Evidence: MCPE Play stalls waiting on the native threadpool condvar when
-    // these guest pthreads are skipped.
-    "_ZN9crossplat10threadpool12thread_startEPv",
-    // Evidence: after the threadpool workers run, Play still stalls with only
-    // these RakNet pthreads skipped.
-    "_ZN6RakNet12RNS2_Berkley12RecvFromLoopEPv",
-    "_ZN6RakNet17UpdateNetworkLoopEPv",
-];
+const ANDROID_TOTAL_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const JNI_OK: u32 = 0;
+const JNI_ERR: u32 = u32::MAX;
+const JNI_EDETACHED: u32 = (-2_i32) as u32;
+const JNI_EVERSION: u32 = (-3_i32) as u32;
+const JNI_VERSION_1_1: u32 = 0x0001_0001;
+const JNI_VERSION_1_2: u32 = 0x0001_0002;
+const JNI_VERSION_1_4: u32 = 0x0001_0004;
+const JNI_VERSION_1_6: u32 = 0x0001_0006;
+const JNI_LOCAL_CAPACITY_LIMIT: u32 = 65_536;
 const GUEST_THREAD_SERVICE_HLE: &[&str] = &[
     "pthread_create",
     "pthread_cond_signal",
@@ -68,7 +85,6 @@ const ANDROID_APP_WINDOW_OFFSET: u32 = 0x24;
 const ANDROID_APP_ACTIVITY_STATE_OFFSET: u32 = 0x38;
 const ANDROID_APP_DESTROY_REQUESTED_OFFSET: u32 = 0x3c;
 const ANDROID_APP_INPUT_POLL_SOURCE_OFFSET: u32 = 0x60;
-const ANDROID_APP_RUNNING_OFFSET: u32 = 0x6c;
 const ANDROID_APP_PENDING_INPUT_QUEUE_OFFSET: u32 = 0x7c;
 const ANDROID_APP_PENDING_WINDOW_OFFSET: u32 = 0x80;
 const ANDROID_POLL_SOURCE_MAIN: u32 = 1;
@@ -77,13 +93,6 @@ const APP_CMD_INIT_WINDOW: u32 = 1;
 const APP_CMD_GAINED_FOCUS: u32 = 6;
 const APP_CMD_START: u32 = 10;
 const APP_CMD_RESUME: u32 = 11;
-const MCPE_LIBRARY: &str = "libminecraftpe.so";
-const MCPE_GAME_RENDERER_RENDER: &str = "_ZN12GameRenderer6renderEf";
-const MCPE_ON_RESOURCES_LOADED: &str = "_ZN15MinecraftClient17onResourcesLoadedEv";
-const MCPE_GAME_RENDERER_RENDER_RESOURCE_GATE_OFFSET: u32 = 0x19e;
-const MCPE_CLIENT_RESOURCES_READY_OFFSET: u32 = 0x23e;
-const MCPE_ON_RESOURCES_LOADED_STEPS: usize = 100_000_000;
-const MCPE_ON_RESOURCES_LOADED_STEPS_ENV: &str = "AEMU_MCPE_ON_RESOURCES_LOADED_STEPS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeConfig {
@@ -142,25 +151,48 @@ pub struct NativeRuntime {
     pub link: NativeLinkReport,
     pub cpu: Cpu,
     pub hle: HleRuntime,
+    hle_address_index: HleAddressIndex,
     cpu_backend: NativeCpuBackendKind,
     #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
     dynarmic: Option<crate::dynarmic_backend::DynarmicA32<crate::guest_memory::MappedMemory>>,
     #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
     dynarmic_run_ticks: usize,
+    intercepted_runtime_hle_trap: Option<RuntimeHleTrap>,
     runtime_hle_traps: Vec<RuntimeHleTrap>,
+    jni_declarations: ApkDexIndex,
+    jni_classes: Vec<JniClass>,
+    jni_objects: Vec<JniObject>,
+    jni_arrays: Vec<JniArray>,
+    jni_stores: Vec<JniStore>,
     jni_methods: Vec<JniMethod>,
+    jni_native_methods: Vec<JniNativeMethod>,
+    jni_pending_exceptions: Vec<JniThreadException>,
+    jni_local_frames: Vec<JniThreadLocalFrames>,
+    jni_attached_threads: BTreeSet<u32>,
+    jni_localization: BTreeMap<String, String>,
     jni_java_vm: u32,
+    jni_env: u32,
+    jni_activity_descriptor: String,
+    jni_package_name: String,
+    jni_apk_digest: [u8; 20],
+    jni_device_id: Option<String>,
+    jni_last_android_release: Option<String>,
+    jni_uuid_counter: u64,
+    jni_vibration_count: u64,
+    jni_last_vibration_millis: Option<i64>,
     stack_base: u32,
     stack_size: u32,
     next_thread_stack_top: u32,
     guest_threads: VecDeque<GuestThread>,
-    skipped_guest_threads: VecDeque<CreatedPthread>,
     guest_mutexes: Vec<GuestMutex>,
     main_wait: GuestThreadWait,
-    minecraft_resource_bridge: Option<MinecraftResourceBridge>,
-    minecraft_resource_bridge_active: bool,
+    foreground_thread: u32,
+    foreground_return_pc: u32,
     trace_native_event_count: usize,
     pc_profiler: Option<PcProfiler>,
+    function_diagnostics_enabled: bool,
+    main_thread_wait_policy: MainThreadWaitPolicy,
+    trace_threads: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,7 +265,86 @@ struct RuntimeHleTrap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeHleTrapKind {
     Jni(JniFunction),
+    UnsupportedJni { table: JniTable, offset: u16 },
     CxxDynamicCast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JniTable {
+    Env,
+    Vm,
+}
+
+impl JniTable {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Env => "JNIEnv",
+            Self::Vm => "JavaVM",
+        }
+    }
+}
+
+const HLE_ADDRESS_INDEX_EMPTY: u16 = u16::MAX;
+
+#[derive(Debug)]
+struct HleAddressIndex {
+    base: u32,
+    slots: Vec<u16>,
+}
+
+impl HleAddressIndex {
+    fn new(symbols: &[HleSymbol]) -> Result<Self, NativeRuntimeError> {
+        let Some(base) = symbols.iter().map(|symbol| symbol.address).min() else {
+            return Ok(Self {
+                base: 0,
+                slots: Vec::new(),
+            });
+        };
+        let end = symbols.iter().try_fold(base, |end, symbol| {
+            symbol
+                .address
+                .checked_add(symbol.shape.size())
+                .map(|symbol_end| end.max(symbol_end))
+        });
+        let end = end.ok_or(NativeRuntimeError::AddressOverflow)?;
+        let byte_len = end
+            .checked_sub(base)
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        let slot_len = usize::try_from(byte_len.div_ceil(4))
+            .map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let mut slots = vec![HLE_ADDRESS_INDEX_EMPTY; slot_len];
+
+        for (symbol_idx, symbol) in symbols.iter().enumerate() {
+            let symbol_idx = u16::try_from(symbol_idx)
+                .ok()
+                .filter(|idx| *idx != HLE_ADDRESS_INDEX_EMPTY)
+                .ok_or(NativeRuntimeError::AddressOverflow)?;
+            let first_slot = usize::try_from((symbol.address - base) / 4)
+                .map_err(|_| NativeRuntimeError::AddressOverflow)?;
+            let symbol_end = symbol
+                .address
+                .checked_add(symbol.shape.size())
+                .ok_or(NativeRuntimeError::AddressOverflow)?;
+            let last_slot = usize::try_from((symbol_end - base).div_ceil(4))
+                .map_err(|_| NativeRuntimeError::AddressOverflow)?;
+            slots[first_slot..last_slot].fill(symbol_idx);
+        }
+
+        Ok(Self { base, slots })
+    }
+
+    #[inline(always)]
+    fn symbol_index(&self, address: u32, symbols: &[HleSymbol]) -> Option<usize> {
+        let offset = address.checked_sub(self.base)?;
+        let slot = usize::try_from(offset / 4).ok()?;
+        let symbol_idx = usize::from(*self.slots.get(slot)?);
+        if symbol_idx == usize::from(HLE_ADDRESS_INDEX_EMPTY) {
+            return None;
+        }
+        let symbol = symbols.get(symbol_idx)?;
+        let end = symbol.address.checked_add(symbol.shape.size())?;
+        (address >= symbol.address && address < end).then_some(symbol_idx)
+    }
 }
 
 #[derive(Debug)]
@@ -302,41 +413,135 @@ enum CxxTypeInfoKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JniFunction {
+    ExceptionOccurred,
+    ExceptionCheck,
+    ExceptionDescribe,
+    ExceptionClear,
+    PushLocalFrame,
+    PopLocalFrame,
     FindClass,
+    DeleteRef,
+    EnsureLocalCapacity,
+    AttachCurrentThread { daemon: bool },
+    DetachCurrentThread,
+    GetEnv,
     RefIdentity,
+    NewObject(JniCallArgLayout),
     GetObjectClass,
     GetMethodId,
     GetStaticMethodId,
     GetFieldId,
-    CallObjectMethod,
-    CallStaticObjectMethod,
-    CallIntMethod,
-    CallStaticIntMethod,
-    CallBooleanMethod,
-    CallStaticBooleanMethod,
-    CallVoidMethod,
+    GetStaticFieldId,
+    GetStaticObjectField,
+    GetStaticIntField,
+    CallObjectMethod(JniCallArgLayout),
+    CallStaticObjectMethod(JniCallArgLayout),
+    CallIntMethod(JniCallArgLayout),
+    CallStaticIntMethod(JniCallArgLayout),
+    CallLongMethod(JniCallArgLayout),
+    CallFloatMethod(JniCallArgLayout),
+    CallBooleanMethod(JniCallArgLayout),
+    CallStaticBooleanMethod(JniCallArgLayout),
+    CallVoidMethod(JniCallArgLayout),
+    CallStaticVoidMethod(JniCallArgLayout),
+    GetStringLength,
     NewStringUtf,
     GetStringUtfLength,
     GetStringUtfChars,
     ReleaseStringUtfChars,
     GetArrayLength,
     GetObjectArrayElement,
+    GetByteArrayElements,
     GetIntArrayElements,
+    ReleaseByteArrayElements,
     ReleaseIntArrayElements,
+    GetByteArrayRegion,
+    RegisterNatives,
     GetJavaVm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JniCallArgLayout {
+    Direct,
+    VaList,
+    Array,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct JniMethod {
     id: u32,
+    class_descriptor: String,
     name: String,
     sig: String,
+    kind: DexMemberKind,
     is_static: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniClass {
+    handle: u32,
+    descriptor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniObject {
+    handle: u32,
+    class_descriptor: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JniArrayKind {
+    Object,
+    Byte,
+    Int,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniArray {
+    handle: u32,
+    data: u32,
+    len: u32,
+    kind: JniArrayKind,
+    descriptor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniStore {
+    handle: u32,
+    listener: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniPendingException {
+    handle: u32,
+    class_descriptor: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniThreadException {
+    thread: u32,
+    exception: JniPendingException,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniThreadLocalFrames {
+    thread: u32,
+    capacities: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JniNativeMethod {
+    class: u32,
+    name: String,
+    signature: String,
+    function: u32,
 }
 
 #[derive(Debug, Clone)]
 struct GuestThread {
     id: u32,
+    arg: u32,
     cpu: Cpu,
     wait: GuestThreadWait,
     trace_tail: VecDeque<NativeRuntimeTraceEntry>,
@@ -344,6 +549,7 @@ struct GuestThread {
     trace_mem32_count: usize,
     trace_mem32_deref_count: usize,
     trace_cxx_string_count: usize,
+    trace_hle_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,12 +606,6 @@ struct GuestMutex {
     recursion: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MinecraftResourceBridge {
-    render_resource_gate_pc: u32,
-    on_resources_loaded: u32,
-}
-
 fn push_trace_tail(tail: &mut VecDeque<NativeRuntimeTraceEntry>, cpu: &Cpu, max_len: usize) {
     if tail.len() == max_len {
         tail.pop_front();
@@ -456,6 +656,20 @@ pub enum NativeRuntimeError {
     UnknownHleTrap {
         pc: u32,
     },
+    UnsupportedJniEntry {
+        table: &'static str,
+        offset: u16,
+    },
+    UnknownJniMethodId {
+        operation: &'static str,
+        method_id: u32,
+    },
+    UnsupportedJniMethod {
+        operation: &'static str,
+        name: String,
+        signature: String,
+    },
+    Dex(String),
     Hle {
         name: String,
         source: HleError,
@@ -508,6 +722,28 @@ impl fmt::Display for NativeRuntimeError {
                 Ok(())
             }
             Self::UnknownHleTrap { pc } => write!(f, "unknown HLE trap at {pc:#010x}"),
+            Self::UnsupportedJniEntry { table, offset } => {
+                write!(
+                    f,
+                    "unsupported {table} function-table entry at offset {offset:#x}"
+                )
+            }
+            Self::UnknownJniMethodId {
+                operation,
+                method_id,
+            } => write!(
+                f,
+                "{operation} used unknown JNI method/field id {method_id:#010x}"
+            ),
+            Self::UnsupportedJniMethod {
+                operation,
+                name,
+                signature,
+            } => write!(
+                f,
+                "unsupported {operation} for JNI member {name:?} {signature:?}"
+            ),
+            Self::Dex(err) => write!(f, "DEX declaration index failed: {err}"),
             Self::Hle { name, source } => write!(f, "HLE {name} failed: {source}"),
         }
     }
@@ -1139,18 +1375,31 @@ impl NativeRuntime {
             .checked_add(ERRNO_OFFSET)
             .ok_or(NativeRuntimeError::AddressOverflow)?;
         let mut hle = HleRuntime::new(errno_addr, config.heap_base, config.heap_size as u32);
+        let mut jni_declarations = ApkDexIndex::default();
+        let mut jni_apk_digest = [0u8; 20];
         match std::fs::read(&link.apk_path) {
-            Ok(bytes) => hle.set_apk_bytes(bytes),
+            Ok(bytes) => {
+                jni_declarations = ApkDexIndex::from_apk(&bytes)
+                    .map_err(|err| NativeRuntimeError::Dex(err.to_string()))?;
+                jni_apk_digest.copy_from_slice(&Sha1::digest(&bytes));
+                hle.set_apk_bytes(bytes);
+            }
             Err(_) => hle.set_apk_path(link.apk_path.clone()),
         }
+        let jni_activity_descriptor = jni_declarations
+            .native_activity_class()
+            .unwrap_or("Lcom/mojang/minecraftpe/MainActivity;")
+            .to_string();
+        let jni_package_name = package_name_from_class_descriptor(&jni_activity_descriptor)
+            .unwrap_or_else(|| "com.mojang.minecraftpe".to_string());
         hle.set_unwind_tables(collect_unwind_tables(&link));
-        let runtime_hle_traps = collect_linked_runtime_hle_traps(&link);
-        let minecraft_resource_bridge = if minecraft_resource_bridge_enabled() {
-            build_minecraft_resource_bridge(&link)
-        } else {
-            None
-        };
+        let hle_address_index = HleAddressIndex::new(&link.hle_symbols)?;
+        let intercepted_runtime_hle_trap = linked_cxx_dynamic_cast_trap(&link);
         let pc_profiler = PcProfiler::from_env(&link);
+        let function_diagnostics_enabled =
+            pc_profiler.is_some() || function_diagnostics_requested();
+        let main_thread_wait_policy = MainThreadWaitPolicy::from_env();
+        let trace_threads = std::env::var_os("AEMU_TRACE_THREADS").is_some();
 
         #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
         let dynarmic = if cpu_backend == NativeCpuBackendKind::Dynarmic {
@@ -1171,26 +1420,67 @@ impl NativeRuntime {
             link,
             cpu,
             hle,
+            hle_address_index,
             cpu_backend,
             #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
             dynarmic,
             #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
             dynarmic_run_ticks,
-            runtime_hle_traps,
+            intercepted_runtime_hle_trap,
+            runtime_hle_traps: Vec::new(),
+            jni_declarations,
+            jni_classes: Vec::new(),
+            jni_objects: Vec::new(),
+            jni_arrays: Vec::new(),
+            jni_stores: Vec::new(),
             jni_methods: Vec::new(),
+            jni_native_methods: Vec::new(),
+            jni_pending_exceptions: Vec::new(),
+            jni_local_frames: Vec::new(),
+            jni_attached_threads: BTreeSet::from([1]),
+            jni_localization: BTreeMap::new(),
             jni_java_vm: 0,
+            jni_env: 0,
+            jni_activity_descriptor,
+            jni_package_name,
+            jni_apk_digest,
+            jni_device_id: None,
+            jni_last_android_release: None,
+            jni_uuid_counter: 0,
+            jni_vibration_count: 0,
+            jni_last_vibration_millis: None,
             stack_base: config.stack_base,
             stack_size,
             next_thread_stack_top: config.stack_base,
             guest_threads: VecDeque::new(),
-            skipped_guest_threads: VecDeque::new(),
             guest_mutexes: Vec::new(),
             main_wait: GuestThreadWait::Runnable,
-            minecraft_resource_bridge,
-            minecraft_resource_bridge_active: false,
+            foreground_thread: 1,
+            foreground_return_pc: CALL_RETURN_SENTINEL,
             trace_native_event_count: 0,
             pc_profiler,
+            function_diagnostics_enabled,
+            main_thread_wait_policy,
+            trace_threads,
         })
+    }
+
+    pub fn set_apk_bytes(&mut self, apk_bytes: Vec<u8>) -> Result<(), NativeRuntimeError> {
+        let declarations = ApkDexIndex::from_apk(&apk_bytes)
+            .map_err(|err| NativeRuntimeError::Dex(err.to_string()))?;
+        if let Some(activity) = declarations.native_activity_class() {
+            self.jni_activity_descriptor = activity.to_string();
+            if let Some(package) = package_name_from_class_descriptor(activity) {
+                self.jni_package_name = package;
+            }
+        }
+        self.jni_declarations = declarations;
+        self.jni_apk_digest
+            .copy_from_slice(&Sha1::digest(&apk_bytes));
+        self.jni_device_id = None;
+        self.jni_uuid_counter = 0;
+        self.hle.set_apk_bytes(apk_bytes);
+        Ok(())
     }
 
     pub fn cpu_backend(&self) -> NativeCpuBackendKind {
@@ -1215,12 +1505,14 @@ impl NativeRuntime {
     fn step_dynarmic(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
         let pc_before = self.cpu.pc();
         let isa_before = self.cpu.isa();
-        let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
-        self.maybe_bridge_minecraft_resources_loaded(pc_before)?;
-        if let Some(step) = self.dispatch_kuser_helper(pc_before, args_before)? {
+        if is_kuser_helper_address(pc_before)
+            && let Some(step) = self
+                .dispatch_kuser_helper(pc_before, core::array::from_fn(|idx| self.cpu.reg(idx)))?
+        {
             return Ok(step);
         }
-        if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
+        if let Some(trap) = self.intercepted_runtime_hle_entry(pc_before, isa_before) {
+            let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
             self.dispatch_runtime_hle(trap)?;
             return Ok(NativeRuntimeStep::HleCall {
                 name: trap.name.to_string(),
@@ -1308,15 +1600,23 @@ impl NativeRuntime {
         ))
     }
 
+    #[inline(never)]
     fn step_aemu_interpreter(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        self.step_aemu_interpreter_inner()
+    }
+
+    #[inline(always)]
+    fn step_aemu_interpreter_inner(&mut self) -> Result<NativeRuntimeStep, NativeRuntimeError> {
         let pc_before = self.cpu.pc();
         let isa_before = self.cpu.isa();
-        let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
-        self.maybe_bridge_minecraft_resources_loaded(pc_before)?;
-        if let Some(step) = self.dispatch_kuser_helper(pc_before, args_before)? {
+        if is_kuser_helper_address(pc_before)
+            && let Some(step) = self
+                .dispatch_kuser_helper(pc_before, core::array::from_fn(|idx| self.cpu.reg(idx)))?
+        {
             return Ok(step);
         }
-        if let Some(trap) = self.runtime_hle_entry(pc_before, isa_before) {
+        if let Some(trap) = self.intercepted_runtime_hle_entry(pc_before, isa_before) {
+            let args_before = core::array::from_fn(|idx| self.cpu.reg(idx));
             self.dispatch_runtime_hle(trap)?;
             return Ok(NativeRuntimeStep::HleCall {
                 name: trap.name.to_string(),
@@ -1326,33 +1626,74 @@ impl NativeRuntime {
         }
         match self.cpu.step(&mut self.link.memory) {
             Ok(()) => Ok(NativeRuntimeStep::GuestInstruction),
-            Err(Trap::UndefinedArm { pc, instr }) if instr == HLE_TRAP_ARM_INSTR => {
-                self.dispatch_hle_trap_at(pc, args_before)
+            Err(trap) => self.handle_aemu_interpreter_trap(pc_before, isa_before, trap),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn handle_aemu_interpreter_trap(
+        &mut self,
+        pc_before: u32,
+        isa_before: Isa,
+        trap: Trap,
+    ) -> Result<NativeRuntimeStep, NativeRuntimeError> {
+        match trap {
+            Trap::UndefinedArm { pc, instr } if instr == HLE_TRAP_ARM_INSTR => {
+                self.dispatch_hle_trap_at(pc, core::array::from_fn(|idx| self.cpu.reg(idx)))
             }
-            Err(Trap::Memory(err)) => Err(NativeRuntimeError::Memory(format!(
+            Trap::Memory(err) => Err(NativeRuntimeError::Memory(format!(
                 "{err} while executing {isa_before:?} at {pc_before:#010x}"
             ))),
-            Err(err) => Err(NativeRuntimeError::CpuAt {
+            source => Err(NativeRuntimeError::CpuAt {
                 pc: pc_before,
                 isa: isa_before,
-                source: err,
+                source,
             }),
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn dispatch_hle_trap_at(
         &mut self,
         pc: u32,
         args: [u32; 4],
     ) -> Result<NativeRuntimeStep, NativeRuntimeError> {
-        if let Some(symbol) = self.link.hle_symbol_by_address(pc) {
+        if let Some(symbol_idx) = self
+            .hle_address_index
+            .symbol_index(pc, &self.link.hle_symbols)
+        {
+            let symbol = &self.link.hle_symbols[symbol_idx];
             let name = symbol.name.clone();
-            self.hle
-                .dispatch(&name, &mut self.cpu, &mut self.link.memory)
-                .map_err(|source| NativeRuntimeError::Hle {
-                    name: name.clone(),
-                    source,
-                })?;
+            if symbol.behavior == HleCallBehavior::RuntimeImplemented {
+                self.cpu.set_reg(0, 0);
+                self.cpu.branch_exchange(self.cpu.reg(14));
+            } else {
+                if let Err(source) = self
+                    .hle
+                    .dispatch(&name, &mut self.cpu, &mut self.link.memory)
+                {
+                    if parse_trace_hle_filter()
+                        .as_ref()
+                        .is_some_and(|filter| filter.matches(&name))
+                    {
+                        eprintln!(
+                            "HLE_DISPATCH_ERROR function={pc:#010x} name={name} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} sp={:#010x} lr={:#010x} error={source}",
+                            args[0],
+                            args[1],
+                            args[2],
+                            args[3],
+                            self.cpu.reg(13),
+                            self.cpu.reg(14),
+                        );
+                    }
+                    return Err(NativeRuntimeError::Hle {
+                        name: name.clone(),
+                        source,
+                    });
+                }
+            }
             return Ok(NativeRuntimeStep::HleCall {
                 name,
                 address: pc,
@@ -1469,6 +1810,8 @@ impl NativeRuntime {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn dispatch_kuser_helper(
         &mut self,
         pc: u32,
@@ -1604,59 +1947,6 @@ impl NativeRuntime {
         }
     }
 
-    fn maybe_bridge_minecraft_resources_loaded(
-        &mut self,
-        pc: u32,
-    ) -> Result<(), NativeRuntimeError> {
-        let Some(bridge) = self.minecraft_resource_bridge else {
-            return Ok(());
-        };
-        if self.minecraft_resource_bridge_active || pc != bridge.render_resource_gate_pc {
-            return Ok(());
-        }
-        let client = self.cpu.reg(7);
-        if client == 0 {
-            return Ok(());
-        }
-        let ready_addr = client.wrapping_add(MCPE_CLIENT_RESOURCES_READY_OFFSET);
-        let ready = self
-            .link
-            .memory
-            .load8(ready_addr)
-            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
-        if ready != 0 {
-            return Ok(());
-        }
-
-        if std::env::var_os("AEMU_TRACE_MCPE_RESOURCE_BRIDGE").is_some() {
-            eprintln!(
-                "MCPE resource bridge: calling onResourcesLoaded={:#010x} client={client:#010x} ready@{ready_addr:#010x}",
-                bridge.on_resources_loaded,
-            );
-        }
-
-        self.minecraft_resource_bridge_active = true;
-        let saved_cpu = self.cpu.clone();
-        let result = self.run_function_with_args(
-            bridge.on_resources_loaded,
-            &[client],
-            minecraft_on_resources_loaded_steps(),
-        );
-        self.cpu = saved_cpu;
-        self.minecraft_resource_bridge_active = false;
-        result?;
-
-        if std::env::var_os("AEMU_TRACE_MCPE_RESOURCE_BRIDGE").is_some() {
-            let ready_after = self
-                .link
-                .memory
-                .load8(ready_addr)
-                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
-            eprintln!("MCPE resource bridge: ready@{ready_addr:#010x} now {ready_after:#04x}");
-        }
-        Ok(())
-    }
-
     pub fn run(&mut self, max_steps: usize) -> Result<(), NativeRuntimeError> {
         let mut step_idx = 0usize;
         while step_idx < max_steps {
@@ -1672,7 +1962,7 @@ impl NativeRuntime {
                     address,
                     args,
                 } => {
-                    self.handle_thread_sync_hle(1, &name, address, args)?;
+                    self.handle_thread_sync_hle(self.foreground_thread, &name, address, args)?;
                     self.wait_main_after_hle(&name, args)?;
                     step_idx = step_idx.saturating_add(1);
                 }
@@ -1746,10 +2036,19 @@ impl NativeRuntime {
         let looper = self.alloc_guest_zeroed(0x10, 4)?;
         let input_queue = self.alloc_guest_zeroed(0x10, 4)?;
         let window = self.alloc_guest_zeroed(0x10, 4)?;
-        let internal_data_path = self.write_guest_c_string("/data/data/com.mojang.minecraftpe")?;
-        let external_data_path =
-            self.write_guest_c_string("/sdcard/Android/data/com.mojang.minecraftpe/files")?;
-        let obb_path = self.write_guest_c_string("/sdcard/Android/obb/com.mojang.minecraftpe")?;
+        let internal_data_path =
+            self.write_guest_c_string(&format!("/data/data/{}", self.jni_package_name))?;
+        let external_data_path = self.write_guest_c_string(&format!(
+            "/sdcard/Android/data/{}/files",
+            self.jni_package_name
+        ))?;
+        let obb_path =
+            self.write_guest_c_string(&format!("/sdcard/Android/obb/{}", self.jni_package_name))?;
+
+        self.jni_objects.push(JniObject {
+            handle: activity_class,
+            class_descriptor: self.jni_activity_descriptor.clone(),
+        });
 
         self.store_runtime32(activity, callbacks)?;
         self.store_runtime32(activity.wrapping_add(0x04), java_vm)?;
@@ -1762,6 +2061,9 @@ impl NativeRuntime {
         self.store_runtime32(activity.wrapping_add(0x20), asset_manager)?;
         self.store_runtime32(activity.wrapping_add(0x24), obb_path)?;
         self.hle.set_native_activity(activity);
+        self.hle
+            .register_android_configuration(configuration, asset_manager);
+        self.hle.set_native_window(window, 854, 480, 2);
 
         Ok(NativeActivityHarness {
             activity,
@@ -1780,7 +2082,8 @@ impl NativeRuntime {
         })
     }
 
-    pub fn prepare_android_app(
+    #[cfg(test)]
+    fn prepare_android_app(
         &mut self,
         harness: NativeActivityHarness,
     ) -> Result<u32, NativeRuntimeError> {
@@ -1825,7 +2128,6 @@ impl NativeRuntime {
             .set_input_poll_source(app.wrapping_add(ANDROID_APP_INPUT_POLL_SOURCE_OFFSET));
         self.store_runtime32(app.wrapping_add(ANDROID_APP_ACTIVITY_STATE_OFFSET), 0)?;
         self.store_runtime32(app.wrapping_add(ANDROID_APP_DESTROY_REQUESTED_OFFSET), 0)?;
-        self.store_runtime32(app.wrapping_add(ANDROID_APP_RUNNING_OFFSET), 1)?;
         self.queue_android_lifecycle_events(app)?;
         Ok(())
     }
@@ -1877,33 +2179,183 @@ impl NativeRuntime {
     }
 
     fn prepare_jni_tables(&mut self) -> Result<(u32, u32), NativeRuntimeError> {
-        let return_zero = self.write_guest_words(&[0xe3a0_0000, 0xe12f_ff1e])?;
         let find_class = self.write_runtime_trap("JNI FindClass", JniFunction::FindClass)?;
+        let exception_occurred =
+            self.write_runtime_trap("JNI ExceptionOccurred", JniFunction::ExceptionOccurred)?;
+        let exception_check =
+            self.write_runtime_trap("JNI ExceptionCheck", JniFunction::ExceptionCheck)?;
+        let exception_describe =
+            self.write_runtime_trap("JNI ExceptionDescribe", JniFunction::ExceptionDescribe)?;
+        let exception_clear =
+            self.write_runtime_trap("JNI ExceptionClear", JniFunction::ExceptionClear)?;
+        let push_local_frame =
+            self.write_runtime_trap("JNI PushLocalFrame", JniFunction::PushLocalFrame)?;
+        let pop_local_frame =
+            self.write_runtime_trap("JNI PopLocalFrame", JniFunction::PopLocalFrame)?;
+        let delete_ref = self.write_runtime_trap("JNI DeleteRef", JniFunction::DeleteRef)?;
+        let ensure_local_capacity =
+            self.write_runtime_trap("JNI EnsureLocalCapacity", JniFunction::EnsureLocalCapacity)?;
+        let attach_current_thread = self.write_runtime_trap(
+            "JNI AttachCurrentThread",
+            JniFunction::AttachCurrentThread { daemon: false },
+        )?;
+        let attach_current_thread_as_daemon = self.write_runtime_trap(
+            "JNI AttachCurrentThreadAsDaemon",
+            JniFunction::AttachCurrentThread { daemon: true },
+        )?;
+        let detach_current_thread =
+            self.write_runtime_trap("JNI DetachCurrentThread", JniFunction::DetachCurrentThread)?;
+        let get_env = self.write_runtime_trap("JNI GetEnv", JniFunction::GetEnv)?;
         let ref_identity = self.write_runtime_trap("JNI ref identity", JniFunction::RefIdentity)?;
+        let new_object = self.write_runtime_trap(
+            "JNI NewObject",
+            JniFunction::NewObject(JniCallArgLayout::Direct),
+        )?;
+        let new_object_v = self.write_runtime_trap(
+            "JNI NewObjectV",
+            JniFunction::NewObject(JniCallArgLayout::VaList),
+        )?;
+        let new_object_a = self.write_runtime_trap(
+            "JNI NewObjectA",
+            JniFunction::NewObject(JniCallArgLayout::Array),
+        )?;
         let get_object_class =
             self.write_runtime_trap("JNI GetObjectClass", JniFunction::GetObjectClass)?;
         let get_method_id = self.write_runtime_trap("JNI GetMethodID", JniFunction::GetMethodId)?;
         let get_static_method_id =
             self.write_runtime_trap("JNI GetStaticMethodID", JniFunction::GetStaticMethodId)?;
         let get_field_id = self.write_runtime_trap("JNI GetFieldID", JniFunction::GetFieldId)?;
-        let call_object_method =
-            self.write_runtime_trap("JNI CallObjectMethod", JniFunction::CallObjectMethod)?;
-        let call_static_object_method = self.write_runtime_trap(
+        let get_static_field_id =
+            self.write_runtime_trap("JNI GetStaticFieldID", JniFunction::GetStaticFieldId)?;
+        let get_static_object_field = self.write_runtime_trap(
+            "JNI GetStaticObjectField",
+            JniFunction::GetStaticObjectField,
+        )?;
+        let get_static_int_field =
+            self.write_runtime_trap("JNI GetStaticIntField", JniFunction::GetStaticIntField)?;
+        let mut call_trap = |name, function| self.write_runtime_trap(name, function);
+        let call_object_method = call_trap(
+            "JNI CallObjectMethod",
+            JniFunction::CallObjectMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_object_method_v = call_trap(
+            "JNI CallObjectMethodV",
+            JniFunction::CallObjectMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_object_method_a = call_trap(
+            "JNI CallObjectMethodA",
+            JniFunction::CallObjectMethod(JniCallArgLayout::Array),
+        )?;
+        let call_static_object_method = call_trap(
             "JNI CallStaticObjectMethod",
-            JniFunction::CallStaticObjectMethod,
+            JniFunction::CallStaticObjectMethod(JniCallArgLayout::Direct),
         )?;
-        let call_int_method =
-            self.write_runtime_trap("JNI CallIntMethod", JniFunction::CallIntMethod)?;
-        let call_static_int_method =
-            self.write_runtime_trap("JNI CallStaticIntMethod", JniFunction::CallStaticIntMethod)?;
-        let call_boolean_method =
-            self.write_runtime_trap("JNI CallBooleanMethod", JniFunction::CallBooleanMethod)?;
-        let call_static_boolean_method = self.write_runtime_trap(
+        let call_static_object_method_v = call_trap(
+            "JNI CallStaticObjectMethodV",
+            JniFunction::CallStaticObjectMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_static_object_method_a = call_trap(
+            "JNI CallStaticObjectMethodA",
+            JniFunction::CallStaticObjectMethod(JniCallArgLayout::Array),
+        )?;
+        let call_int_method = call_trap(
+            "JNI CallIntMethod",
+            JniFunction::CallIntMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_int_method_v = call_trap(
+            "JNI CallIntMethodV",
+            JniFunction::CallIntMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_int_method_a = call_trap(
+            "JNI CallIntMethodA",
+            JniFunction::CallIntMethod(JniCallArgLayout::Array),
+        )?;
+        let call_static_int_method = call_trap(
+            "JNI CallStaticIntMethod",
+            JniFunction::CallStaticIntMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_static_int_method_v = call_trap(
+            "JNI CallStaticIntMethodV",
+            JniFunction::CallStaticIntMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_static_int_method_a = call_trap(
+            "JNI CallStaticIntMethodA",
+            JniFunction::CallStaticIntMethod(JniCallArgLayout::Array),
+        )?;
+        let call_long_method = call_trap(
+            "JNI CallLongMethod",
+            JniFunction::CallLongMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_long_method_v = call_trap(
+            "JNI CallLongMethodV",
+            JniFunction::CallLongMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_long_method_a = call_trap(
+            "JNI CallLongMethodA",
+            JniFunction::CallLongMethod(JniCallArgLayout::Array),
+        )?;
+        let call_float_method = call_trap(
+            "JNI CallFloatMethod",
+            JniFunction::CallFloatMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_float_method_v = call_trap(
+            "JNI CallFloatMethodV",
+            JniFunction::CallFloatMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_float_method_a = call_trap(
+            "JNI CallFloatMethodA",
+            JniFunction::CallFloatMethod(JniCallArgLayout::Array),
+        )?;
+        let call_boolean_method = call_trap(
+            "JNI CallBooleanMethod",
+            JniFunction::CallBooleanMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_boolean_method_v = call_trap(
+            "JNI CallBooleanMethodV",
+            JniFunction::CallBooleanMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_boolean_method_a = call_trap(
+            "JNI CallBooleanMethodA",
+            JniFunction::CallBooleanMethod(JniCallArgLayout::Array),
+        )?;
+        let call_static_boolean_method = call_trap(
             "JNI CallStaticBooleanMethod",
-            JniFunction::CallStaticBooleanMethod,
+            JniFunction::CallStaticBooleanMethod(JniCallArgLayout::Direct),
         )?;
-        let call_void_method =
-            self.write_runtime_trap("JNI CallVoidMethod", JniFunction::CallVoidMethod)?;
+        let call_static_boolean_method_v = call_trap(
+            "JNI CallStaticBooleanMethodV",
+            JniFunction::CallStaticBooleanMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_static_boolean_method_a = call_trap(
+            "JNI CallStaticBooleanMethodA",
+            JniFunction::CallStaticBooleanMethod(JniCallArgLayout::Array),
+        )?;
+        let call_void_method = call_trap(
+            "JNI CallVoidMethod",
+            JniFunction::CallVoidMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_void_method_v = call_trap(
+            "JNI CallVoidMethodV",
+            JniFunction::CallVoidMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_void_method_a = call_trap(
+            "JNI CallVoidMethodA",
+            JniFunction::CallVoidMethod(JniCallArgLayout::Array),
+        )?;
+        let call_static_void_method = call_trap(
+            "JNI CallStaticVoidMethod",
+            JniFunction::CallStaticVoidMethod(JniCallArgLayout::Direct),
+        )?;
+        let call_static_void_method_v = call_trap(
+            "JNI CallStaticVoidMethodV",
+            JniFunction::CallStaticVoidMethod(JniCallArgLayout::VaList),
+        )?;
+        let call_static_void_method_a = call_trap(
+            "JNI CallStaticVoidMethodA",
+            JniFunction::CallStaticVoidMethod(JniCallArgLayout::Array),
+        )?;
+        let get_string_length =
+            self.write_runtime_trap("JNI GetStringLength", JniFunction::GetStringLength)?;
         let new_string_utf =
             self.write_runtime_trap("JNI NewStringUTF", JniFunction::NewStringUtf)?;
         let get_string_utf_length =
@@ -1920,80 +2372,118 @@ impl NativeRuntime {
             "JNI GetObjectArrayElement",
             JniFunction::GetObjectArrayElement,
         )?;
+        let get_byte_array_elements = self.write_runtime_trap(
+            "JNI GetByteArrayElements",
+            JniFunction::GetByteArrayElements,
+        )?;
         let get_int_array_elements =
             self.write_runtime_trap("JNI GetIntArrayElements", JniFunction::GetIntArrayElements)?;
+        let release_byte_array_elements = self.write_runtime_trap(
+            "JNI ReleaseByteArrayElements",
+            JniFunction::ReleaseByteArrayElements,
+        )?;
         let release_int_array_elements = self.write_runtime_trap(
             "JNI ReleaseIntArrayElements",
             JniFunction::ReleaseIntArrayElements,
         )?;
+        let get_byte_array_region =
+            self.write_runtime_trap("JNI GetByteArrayRegion", JniFunction::GetByteArrayRegion)?;
+        let register_natives =
+            self.write_runtime_trap("JNI RegisterNatives", JniFunction::RegisterNatives)?;
         let get_java_vm = self.write_runtime_trap("JNI GetJavaVM", JniFunction::GetJavaVm)?;
 
         let env_vtable = self.alloc_guest_zeroed(0x400, 4)?;
         for offset in (0..0x400).step_by(4) {
-            self.store_runtime32(env_vtable.wrapping_add(offset), return_zero)?;
+            let trap = self.write_unsupported_jni_trap(JniTable::Env, offset as u16)?;
+            self.store_runtime32(env_vtable.wrapping_add(offset), trap)?;
         }
         let jni_env = self.alloc_guest_zeroed(4, 4)?;
         self.store_runtime32(jni_env, env_vtable)?;
+        self.jni_env = jni_env;
 
         let vm_vtable = self.alloc_guest_zeroed(0x80, 4)?;
         for offset in (0..0x80).step_by(4) {
-            self.store_runtime32(vm_vtable.wrapping_add(offset), return_zero)?;
+            let trap = self.write_unsupported_jni_trap(JniTable::Vm, offset as u16)?;
+            self.store_runtime32(vm_vtable.wrapping_add(offset), trap)?;
         }
         let java_vm = self.alloc_guest_zeroed(4, 4)?;
         self.store_runtime32(java_vm, vm_vtable)?;
         self.jni_java_vm = java_vm;
 
-        let store_env =
-            self.write_guest_words(&[0xe59f_3008, 0xe581_3000, 0xe3a0_0000, 0xe12f_ff1e, jni_env])?;
-
         self.store_runtime32(env_vtable.wrapping_add(0x18), find_class)?; // FindClass
+        self.store_runtime32(env_vtable.wrapping_add(0x3c), exception_occurred)?; // ExceptionOccurred
+        self.store_runtime32(env_vtable.wrapping_add(0x40), exception_describe)?; // ExceptionDescribe
+        self.store_runtime32(env_vtable.wrapping_add(0x44), exception_clear)?; // ExceptionClear
+        self.store_runtime32(env_vtable.wrapping_add(0x4c), push_local_frame)?; // PushLocalFrame
+        self.store_runtime32(env_vtable.wrapping_add(0x50), pop_local_frame)?; // PopLocalFrame
         self.store_runtime32(env_vtable.wrapping_add(0x54), ref_identity)?; // NewGlobalRef
-        self.store_runtime32(env_vtable.wrapping_add(0x58), return_zero)?; // DeleteGlobalRef
-        self.store_runtime32(env_vtable.wrapping_add(0x5c), return_zero)?; // DeleteLocalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x58), delete_ref)?; // DeleteGlobalRef
+        self.store_runtime32(env_vtable.wrapping_add(0x5c), delete_ref)?; // DeleteLocalRef
         self.store_runtime32(env_vtable.wrapping_add(0x64), ref_identity)?; // NewLocalRef
-        self.store_runtime32(env_vtable.wrapping_add(0x68), return_zero)?; // EnsureLocalCapacity
+        self.store_runtime32(env_vtable.wrapping_add(0x68), ensure_local_capacity)?; // EnsureLocalCapacity
+        self.store_runtime32(env_vtable.wrapping_add(0x70), new_object)?; // NewObject
+        self.store_runtime32(env_vtable.wrapping_add(0x74), new_object_v)?; // NewObjectV
+        self.store_runtime32(env_vtable.wrapping_add(0x78), new_object_a)?; // NewObjectA
         self.store_runtime32(env_vtable.wrapping_add(0x7c), get_object_class)?; // GetObjectClass
         self.store_runtime32(env_vtable.wrapping_add(0x84), get_method_id)?; // GetMethodID
         self.store_runtime32(env_vtable.wrapping_add(0x88), call_object_method)?; // CallObjectMethod
-        self.store_runtime32(env_vtable.wrapping_add(0x8c), call_object_method)?; // CallObjectMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0x90), call_object_method)?; // CallObjectMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x8c), call_object_method_v)?; // CallObjectMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x90), call_object_method_a)?; // CallObjectMethodA
         self.store_runtime32(env_vtable.wrapping_add(0x94), call_boolean_method)?; // CallBooleanMethod
-        self.store_runtime32(env_vtable.wrapping_add(0x98), call_boolean_method)?; // CallBooleanMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0x9c), call_boolean_method)?; // CallBooleanMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x98), call_boolean_method_v)?; // CallBooleanMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x9c), call_boolean_method_a)?; // CallBooleanMethodA
         self.store_runtime32(env_vtable.wrapping_add(0xc4), call_int_method)?; // CallIntMethod
-        self.store_runtime32(env_vtable.wrapping_add(0xc8), call_int_method)?; // CallIntMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0xcc), call_int_method)?; // CallIntMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0xc8), call_int_method_v)?; // CallIntMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0xcc), call_int_method_a)?; // CallIntMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0xd0), call_long_method)?; // CallLongMethod
+        self.store_runtime32(env_vtable.wrapping_add(0xd4), call_long_method_v)?; // CallLongMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0xd8), call_long_method_a)?; // CallLongMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0xdc), call_float_method)?; // CallFloatMethod
+        self.store_runtime32(env_vtable.wrapping_add(0xe0), call_float_method_v)?; // CallFloatMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0xe4), call_float_method_a)?; // CallFloatMethodA
         self.store_runtime32(env_vtable.wrapping_add(0xf4), call_void_method)?; // CallVoidMethod
-        self.store_runtime32(env_vtable.wrapping_add(0xf8), call_void_method)?; // CallVoidMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0xfc), call_void_method)?; // CallVoidMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0xf8), call_void_method_v)?; // CallVoidMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0xfc), call_void_method_a)?; // CallVoidMethodA
         self.store_runtime32(env_vtable.wrapping_add(0x178), get_field_id)?; // GetFieldID
         self.store_runtime32(env_vtable.wrapping_add(0x1c4), get_static_method_id)?; // GetStaticMethodID
         self.store_runtime32(env_vtable.wrapping_add(0x1c8), call_static_object_method)?; // CallStaticObjectMethod
-        self.store_runtime32(env_vtable.wrapping_add(0x1cc), call_static_object_method)?; // CallStaticObjectMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0x1d0), call_static_object_method)?; // CallStaticObjectMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x1cc), call_static_object_method_v)?; // CallStaticObjectMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x1d0), call_static_object_method_a)?; // CallStaticObjectMethodA
         self.store_runtime32(env_vtable.wrapping_add(0x1d4), call_static_boolean_method)?; // CallStaticBooleanMethod
-        self.store_runtime32(env_vtable.wrapping_add(0x1d8), call_static_boolean_method)?; // CallStaticBooleanMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0x1dc), call_static_boolean_method)?; // CallStaticBooleanMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x1d8), call_static_boolean_method_v)?; // CallStaticBooleanMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x1dc), call_static_boolean_method_a)?; // CallStaticBooleanMethodA
         self.store_runtime32(env_vtable.wrapping_add(0x204), call_static_int_method)?; // CallStaticIntMethod
-        self.store_runtime32(env_vtable.wrapping_add(0x208), call_static_int_method)?; // CallStaticIntMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0x20c), call_static_int_method)?; // CallStaticIntMethodA
-        self.store_runtime32(env_vtable.wrapping_add(0x234), call_void_method)?; // CallStaticVoidMethod
-        self.store_runtime32(env_vtable.wrapping_add(0x238), call_void_method)?; // CallStaticVoidMethodV
-        self.store_runtime32(env_vtable.wrapping_add(0x23c), call_void_method)?; // CallStaticVoidMethodA
-        self.store_runtime32(env_vtable.wrapping_add(0x240), get_field_id)?; // GetStaticFieldID
+        self.store_runtime32(env_vtable.wrapping_add(0x208), call_static_int_method_v)?; // CallStaticIntMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x20c), call_static_int_method_a)?; // CallStaticIntMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x234), call_static_void_method)?; // CallStaticVoidMethod
+        self.store_runtime32(env_vtable.wrapping_add(0x238), call_static_void_method_v)?; // CallStaticVoidMethodV
+        self.store_runtime32(env_vtable.wrapping_add(0x23c), call_static_void_method_a)?; // CallStaticVoidMethodA
+        self.store_runtime32(env_vtable.wrapping_add(0x240), get_static_field_id)?; // GetStaticFieldID
+        self.store_runtime32(env_vtable.wrapping_add(0x244), get_static_object_field)?; // GetStaticObjectField
+        self.store_runtime32(env_vtable.wrapping_add(0x258), get_static_int_field)?; // GetStaticIntField
+        self.store_runtime32(env_vtable.wrapping_add(0x290), get_string_length)?; // GetStringLength
         self.store_runtime32(env_vtable.wrapping_add(0x29c), new_string_utf)?; // NewStringUTF
         self.store_runtime32(env_vtable.wrapping_add(0x2a0), get_string_utf_length)?; // GetStringUTFLength
         self.store_runtime32(env_vtable.wrapping_add(0x2a4), get_string_utf_chars)?; // GetStringUTFChars
         self.store_runtime32(env_vtable.wrapping_add(0x2a8), release_string_utf_chars)?; // ReleaseStringUTFChars
         self.store_runtime32(env_vtable.wrapping_add(0x2ac), get_array_length)?; // GetArrayLength
         self.store_runtime32(env_vtable.wrapping_add(0x2b4), get_object_array_element)?; // GetObjectArrayElement
+        self.store_runtime32(env_vtable.wrapping_add(0x2e0), get_byte_array_elements)?; // GetByteArrayElements
         self.store_runtime32(env_vtable.wrapping_add(0x2ec), get_int_array_elements)?; // GetIntArrayElements
+        self.store_runtime32(env_vtable.wrapping_add(0x300), release_byte_array_elements)?; // ReleaseByteArrayElements
         self.store_runtime32(env_vtable.wrapping_add(0x30c), release_int_array_elements)?; // ReleaseIntArrayElements
+        self.store_runtime32(env_vtable.wrapping_add(0x320), get_byte_array_region)?; // GetByteArrayRegion
+        self.store_runtime32(env_vtable.wrapping_add(0x35c), register_natives)?; // RegisterNatives
         self.store_runtime32(env_vtable.wrapping_add(0x36c), get_java_vm)?; // GetJavaVM
+        self.store_runtime32(env_vtable.wrapping_add(0x390), exception_check)?; // ExceptionCheck
 
-        self.store_runtime32(vm_vtable.wrapping_add(0x10), store_env)?; // AttachCurrentThread
-        self.store_runtime32(vm_vtable.wrapping_add(0x18), store_env)?; // GetEnv
-        self.store_runtime32(vm_vtable.wrapping_add(0x1c), store_env)?; // AttachCurrentThreadAsDaemon
+        self.store_runtime32(vm_vtable.wrapping_add(0x10), attach_current_thread)?; // AttachCurrentThread
+        self.store_runtime32(vm_vtable.wrapping_add(0x14), detach_current_thread)?; // DetachCurrentThread
+        self.store_runtime32(vm_vtable.wrapping_add(0x18), get_env)?; // GetEnv
+        self.store_runtime32(
+            vm_vtable.wrapping_add(0x1c),
+            attach_current_thread_as_daemon,
+        )?; // AttachCurrentThreadAsDaemon
         Ok((java_vm, jni_env))
     }
 
@@ -2063,6 +2553,7 @@ impl NativeRuntime {
         }
         self.cpu.branch_exchange(address);
         self.cpu.set_reg(14, CALL_RETURN_SENTINEL);
+        self.foreground_return_pc = CALL_RETURN_SENTINEL;
         self.continue_function_until_hle(address, max_steps, stop_hle_name)
     }
 
@@ -2074,7 +2565,182 @@ impl NativeRuntime {
         self.continue_function_until_hle(self.cpu.pc(), max_steps, stop_hle_name)
     }
 
+    pub fn promote_guest_thread_for_arg(&mut self, arg: u32) -> Result<u32, NativeRuntimeError> {
+        self.drain_created_pthreads()?;
+        let Some(index) = self
+            .guest_threads
+            .iter()
+            .position(|thread| thread.arg == arg)
+        else {
+            return Err(NativeRuntimeError::Memory(format!(
+                "no live guest pthread owns argument {arg:#010x}"
+            )));
+        };
+        let thread = self
+            .guest_threads
+            .remove(index)
+            .expect("located guest pthread must remain present");
+        if !thread.wait.is_runnable() {
+            return Err(NativeRuntimeError::Memory(format!(
+                "guest pthread {} for argument {arg:#010x} is blocked on {:?}",
+                thread.id, thread.wait
+            )));
+        }
+        self.cpu = thread.cpu;
+        self.main_wait = GuestThreadWait::Runnable;
+        self.foreground_thread = thread.id;
+        self.foreground_return_pc = THREAD_RETURN_SENTINEL;
+        self.hle.set_current_pthread(thread.id);
+        Ok(thread.id)
+    }
+
     fn continue_function_until_hle(
+        &mut self,
+        address: u32,
+        max_steps: usize,
+        stop_hle_name: Option<&str>,
+    ) -> Result<NativeRuntimeFunctionExit, NativeRuntimeError> {
+        if !self.function_diagnostics_enabled
+            && self.cpu_backend == NativeCpuBackendKind::AemuInterpreter
+        {
+            self.continue_function_until_hle_aemu_fast(address, max_steps, stop_hle_name)
+        } else {
+            self.continue_function_until_hle_diagnostic(address, max_steps, stop_hle_name)
+        }
+    }
+
+    fn continue_function_until_hle_aemu_fast(
+        &mut self,
+        _address: u32,
+        max_steps: usize,
+        stop_hle_name: Option<&str>,
+    ) -> Result<NativeRuntimeFunctionExit, NativeRuntimeError> {
+        let mut step_idx = 0usize;
+        let mut next_thread_service_step = GUEST_THREAD_SERVICE_INTERVAL;
+        while step_idx < max_steps {
+            let batch_limit = max_steps
+                .min(next_thread_service_step)
+                .saturating_sub(step_idx)
+                .min(u32::MAX as usize) as u32;
+            let stops = self.aemu_release_batch_stops(self.foreground_return_pc);
+            let mut trap = None;
+            let outcome =
+                self.cpu
+                    .run_release_batch(&mut self.link.memory, batch_limit, stops, &mut trap);
+            let batch_start_step = step_idx;
+            step_idx = step_idx.saturating_add(outcome.steps as usize);
+
+            if outcome.reason == RELEASE_BATCH_BOUNDARY
+                && self.cpu.pc() == self.foreground_return_pc
+            {
+                return Ok(NativeRuntimeFunctionExit::Returned);
+            }
+
+            if outcome.reason != RELEASE_BATCH_BUDGET {
+                let runtime_step = if outcome.reason == RELEASE_BATCH_TRAP {
+                    self.handle_aemu_interpreter_trap(
+                        outcome.pc,
+                        outcome.isa(),
+                        trap.expect("trap batch outcome must carry its trap"),
+                    )
+                } else if outcome.reason == RELEASE_BATCH_BOUNDARY {
+                    self.step_aemu_interpreter_inner()
+                } else {
+                    unreachable!("invalid release batch outcome")
+                };
+
+                let hle_step = if outcome.reason == RELEASE_BATCH_TRAP {
+                    batch_start_step.saturating_add(outcome.steps.saturating_sub(1) as usize)
+                } else {
+                    step_idx
+                };
+                let step_delta = match runtime_step {
+                    Ok(NativeRuntimeStep::GuestInstruction) => 1,
+                    Ok(NativeRuntimeStep::GuestInstructions(count)) => count.max(1),
+                    Ok(NativeRuntimeStep::HleCall {
+                        name,
+                        address: hle_address,
+                        args,
+                    }) => {
+                        if let Some(exit) = self.handle_main_release_hle(
+                            name,
+                            hle_address,
+                            args,
+                            hle_step,
+                            stop_hle_name,
+                        )? {
+                            return Ok(exit);
+                        }
+                        1
+                    }
+                    Err(source) => {
+                        return Err(NativeRuntimeError::Traced {
+                            source: Box::new(source),
+                            tail: Vec::new(),
+                        });
+                    }
+                };
+                if outcome.reason == RELEASE_BATCH_BOUNDARY {
+                    step_idx = step_idx.saturating_add(step_delta);
+                }
+            }
+
+            if step_idx >= next_thread_service_step {
+                if !self.guest_threads.is_empty() {
+                    self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+                }
+                next_thread_service_step =
+                    next_thread_service_step.saturating_add(GUEST_THREAD_SERVICE_INTERVAL);
+            }
+        }
+        Err(NativeRuntimeError::Traced {
+            source: Box::new(NativeRuntimeError::Cpu(Trap::StepLimit)),
+            tail: Vec::new(),
+        })
+    }
+
+    #[inline(always)]
+    fn aemu_release_batch_stops(&self, return_pc: u32) -> ReleaseBatchStops {
+        ReleaseBatchStops {
+            return_pc,
+            intercepted_pc: self
+                .intercepted_runtime_hle_trap
+                .map_or(RELEASE_BATCH_NO_PC, |trap| trap.address),
+            bridge_pc: RELEASE_BATCH_NO_PC,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn handle_main_release_hle(
+        &mut self,
+        name: String,
+        address: u32,
+        args: [u32; 4],
+        step: usize,
+        stop_hle_name: Option<&str>,
+    ) -> Result<Option<NativeRuntimeFunctionExit>, NativeRuntimeError> {
+        self.handle_thread_sync_hle(self.foreground_thread, &name, address, args)?;
+        self.wait_main_after_hle(&name, args)?;
+        let should_service_threads = self.hle.has_created_pthreads()
+            || (!self.guest_threads.is_empty()
+                && GUEST_THREAD_SERVICE_HLE.contains(&name.as_str()));
+        if should_service_threads {
+            self.service_guest_threads(GUEST_THREAD_SLICE_STEPS)?;
+        }
+        if stop_hle_name.is_some_and(|stop| stop == name) {
+            self.service_guest_threads_at_stop_hle(&name)?;
+            return Ok(Some(NativeRuntimeFunctionExit::HleCall {
+                name,
+                address,
+                args,
+                step,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn continue_function_until_hle_diagnostic(
         &mut self,
         address: u32,
         max_steps: usize,
@@ -2111,7 +2777,7 @@ impl NativeRuntime {
         };
         let mut step_idx = 0usize;
         while step_idx < max_steps {
-            if self.cpu.pc() == CALL_RETURN_SENTINEL {
+            if self.cpu.pc() == self.foreground_return_pc {
                 self.flush_pc_profile();
                 return Ok(NativeRuntimeFunctionExit::Returned);
             }
@@ -2230,7 +2896,7 @@ impl NativeRuntime {
                     address: hle_address,
                     args,
                 }) => {
-                    self.handle_thread_sync_hle(1, &name, hle_address, args)?;
+                    self.handle_thread_sync_hle(self.foreground_thread, &name, hle_address, args)?;
                     self.wait_main_after_hle(&name, args)?;
                     let should_service_threads = self.hle.has_created_pthreads()
                         || (!self.guest_threads.is_empty()
@@ -2280,7 +2946,7 @@ impl NativeRuntime {
                     });
                 }
             };
-            self.profile_guest_pc_sample(1, step_delta, profile_sample);
+            self.profile_guest_pc_sample(self.foreground_thread, step_delta, profile_sample);
             let next_step_idx = step_idx.saturating_add(step_delta);
             if !self.guest_threads.is_empty()
                 && next_step_idx / GUEST_THREAD_SERVICE_INTERVAL
@@ -2313,11 +2979,40 @@ impl NativeRuntime {
             serviced += 1;
             let done = self.run_guest_thread_slice(&mut thread, slice_steps)?;
             self.drain_created_pthreads()?;
-            if !done {
+            if done {
+                self.run_guest_thread_destructors(&mut thread)?;
+                self.hle.finish_pthread(thread.id);
+            } else {
                 self.guest_threads.push_back(thread);
             }
         }
         Ok(serviced)
+    }
+
+    fn run_guest_thread_destructors(
+        &mut self,
+        thread: &mut GuestThread,
+    ) -> Result<(), NativeRuntimeError> {
+        for _ in 0..PTHREAD_DESTRUCTOR_ITERATIONS {
+            let callbacks = self.hle.take_pthread_destructor_callbacks(thread.id);
+            if callbacks.is_empty() {
+                return Ok(());
+            }
+            for (routine, argument) in callbacks {
+                thread.wait = GuestThreadWait::Runnable;
+                thread.cpu.set_reg(0, argument);
+                thread.cpu.set_reg(14, THREAD_RETURN_SENTINEL);
+                thread.cpu.branch_exchange(routine);
+                let returned = self.run_guest_thread_slice(thread, PTHREAD_DESTRUCTOR_STEPS)?;
+                if !returned || thread.cpu.pc() != THREAD_RETURN_SENTINEL {
+                    return Err(NativeRuntimeError::Memory(format!(
+                        "pthread TLS destructor {routine:#010x} for thread {} did not return",
+                        thread.id
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn service_guest_threads_at_stop_hle(&mut self, name: &str) -> Result<(), NativeRuntimeError> {
@@ -2342,22 +3037,8 @@ impl NativeRuntime {
 
     fn drain_created_pthreads(&mut self) -> Result<(), NativeRuntimeError> {
         for created in self.hle.take_created_pthreads() {
-            if !self.should_run_created_pthread(created) {
-                self.record_skipped_guest_thread(created);
-                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
-                    eprintln!(
-                        "THREAD skip id={} start={:#010x} arg={:#010x} library={}",
-                        created.id,
-                        created.start,
-                        created.arg,
-                        self.library_name_for_address(created.start & !1)
-                            .unwrap_or("<unknown>"),
-                    );
-                }
-                continue;
-            }
             let thread = self.create_guest_thread(created)?;
-            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+            if self.trace_threads {
                 let entry = self.pthread_callable_entry(created.arg).unwrap_or(0);
                 eprintln!(
                     "THREAD create id={} start={:#010x} arg={:#010x} entry={:#010x} entry_lib={} sp={:#010x}",
@@ -2375,36 +3056,10 @@ impl NativeRuntime {
         Ok(())
     }
 
-    fn record_skipped_guest_thread(&mut self, created: CreatedPthread) {
-        if self.skipped_guest_threads.len() >= GUEST_THREAD_STALL_SUMMARY_LIMIT {
-            self.skipped_guest_threads.pop_front();
-        }
-        self.skipped_guest_threads.push_back(created);
-    }
-
     fn pthread_callable_entry(&mut self, arg: u32) -> Option<u32> {
         let storage = self.link.memory.load32(arg).ok()?;
         let vtable = self.link.memory.load32(storage).ok()?;
         self.link.memory.load32(vtable.wrapping_add(8)).ok()
-    }
-
-    fn should_run_created_pthread(&self, created: CreatedPthread) -> bool {
-        if std::env::var_os("AEMU_RUN_ALL_PTHREADS").is_some() {
-            return true;
-        }
-        let address = created.start & !1;
-        let Some(library) = self.library_name_for_address(address) else {
-            return true;
-        };
-        if library == "libgnustl_shared.so" {
-            return true;
-        }
-        if library == "libminecraftpe.so" {
-            return self
-                .exact_symbol_name_for_address(address)
-                .is_some_and(|(_library, symbol)| MCPE_RUNNABLE_PTHREAD_STARTS.contains(&symbol));
-        }
-        false
     }
 
     fn library_name_for_address(&self, address: u32) -> Option<&str> {
@@ -2412,20 +3067,6 @@ impl NativeRuntime {
             let end = object.memory_base.checked_add(object.memory_size)?;
             (address >= object.memory_base && address < end).then_some(object.library_name.as_str())
         })
-    }
-
-    fn exact_symbol_name_for_address(&self, address: u32) -> Option<(&str, &str)> {
-        let object = self.link.objects.iter().find(|object| {
-            object
-                .memory_base
-                .checked_add(object.memory_size)
-                .is_some_and(|end| address >= object.memory_base && address < end)
-        })?;
-        let symbol = object
-            .defined_symbols
-            .iter()
-            .find(|symbol| (symbol.address & !1) == address)?;
-        Some((object.library_name.as_str(), symbol.name.as_str()))
     }
 
     fn create_guest_thread(
@@ -2443,6 +3084,7 @@ impl NativeRuntime {
         cpu.branch_exchange(created.start);
         Ok(GuestThread {
             id: created.id,
+            arg: created.arg,
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
@@ -2450,6 +3092,7 @@ impl NativeRuntime {
             trace_mem32_count: 0,
             trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
+            trace_hle_count: 0,
         })
     }
 
@@ -2482,6 +3125,9 @@ impl NativeRuntime {
     ) -> Result<(), NativeRuntimeError> {
         self.trace_thread_sync_hle(thread_id, name, address, args);
         match name {
+            "pthread_mutex_init" | "pthread_mutex_destroy" => {
+                self.guest_mutexes.retain(|mutex| mutex.addr != args[0]);
+            }
             "pthread_cond_signal" => self.wake_cond_threads(args[0], false),
             "pthread_cond_broadcast" => self.wake_cond_threads(args[0], true),
             "pthread_mutex_unlock" => self.unlock_mutex_for_thread(thread_id, args[0]),
@@ -2494,13 +3140,26 @@ impl NativeRuntime {
                 self.cpu.set_reg(0, result);
             }
             "pthread_once" => self.run_pthread_once(thread_id, args[0], args[1])?,
+            "__pthread_cleanup_pop" if args[1] != 0 => {
+                let routine = self
+                    .link
+                    .memory
+                    .load32(args[0].wrapping_add(4))
+                    .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+                let argument = self
+                    .link
+                    .memory
+                    .load32(args[0].wrapping_add(8))
+                    .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+                self.run_pthread_cleanup_callback(thread_id, routine, argument)?;
+            }
             _ => {}
         }
         Ok(())
     }
 
     fn trace_thread_sync_hle(&self, thread_id: u32, name: &str, address: u32, args: [u32; 4]) {
-        if std::env::var_os("AEMU_TRACE_THREADS").is_none() {
+        if !self.trace_threads {
             return;
         }
         match name {
@@ -2613,15 +3272,16 @@ impl NativeRuntime {
         {
             if now >= timeout.absolute_wall_ns {
                 self.cpu.set_reg(0, PTHREAD_ETIMEDOUT);
-                self.main_wait = if mutex == 0 || self.lock_mutex_for_thread(1, mutex) {
-                    GuestThreadWait::Runnable
-                } else {
-                    GuestThreadWait::Mutex { mutex }
-                };
-                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                self.main_wait =
+                    if mutex == 0 || self.lock_mutex_for_thread(self.foreground_thread, mutex) {
+                        GuestThreadWait::Runnable
+                    } else {
+                        GuestThreadWait::Mutex { mutex }
+                    };
+                if self.trace_threads {
                     eprintln!(
-                        "THREAD timeout id=1 mutex={mutex:#010x} wait={:?}",
-                        self.main_wait
+                        "THREAD timeout id={} mutex={mutex:#010x} wait={:?}",
+                        self.foreground_thread, self.main_wait
                     );
                 }
             }
@@ -2648,7 +3308,7 @@ impl NativeRuntime {
                 } else {
                     GuestThreadWait::Mutex { mutex }
                 };
-            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+            if self.trace_threads {
                 eprintln!(
                     "THREAD timeout id={} mutex={mutex:#010x} wait={:?}",
                     thread_id, self.guest_threads[idx].wait
@@ -2712,7 +3372,7 @@ impl NativeRuntime {
         name: &str,
         args: [u32; 4],
     ) -> Result<(), NativeRuntimeError> {
-        self.wait_main_after_hle_with_policy(name, args, MainThreadWaitPolicy::from_env())
+        self.wait_main_after_hle_with_policy(name, args, self.main_thread_wait_policy)
     }
 
     fn wait_main_after_hle_with_policy(
@@ -2721,12 +3381,15 @@ impl NativeRuntime {
         args: [u32; 4],
         policy: MainThreadWaitPolicy,
     ) -> Result<(), NativeRuntimeError> {
-        let Some(wait) = self.thread_wait_after_hle(1, name, args)? else {
+        let Some(wait) = self.thread_wait_after_hle(self.foreground_thread, name, args)? else {
             return Ok(());
         };
         self.main_wait = wait;
-        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
-            eprintln!("THREAD wait id=1 {:?}", self.main_wait);
+        if self.trace_threads {
+            eprintln!(
+                "THREAD wait id={} {:?}",
+                self.foreground_thread, self.main_wait
+            );
         }
         let mut idle_spins = 0usize;
         loop {
@@ -2798,39 +3461,6 @@ impl NativeRuntime {
                 ));
             }
         }
-        if self.skipped_guest_threads.is_empty() {
-            lines.push("skipped_pthreads=none".to_string());
-        } else {
-            lines.push(format!(
-                "skipped_pthreads={} shown={}",
-                self.skipped_guest_threads.len(),
-                self.skipped_guest_threads
-                    .len()
-                    .min(GUEST_THREAD_STALL_SUMMARY_LIMIT)
-            ));
-            let skipped_threads = self
-                .skipped_guest_threads
-                .iter()
-                .copied()
-                .take(GUEST_THREAD_STALL_SUMMARY_LIMIT)
-                .collect::<Vec<_>>();
-            for skipped in skipped_threads {
-                let entry = self.pthread_callable_entry(skipped.arg);
-                let entry_desc = entry
-                    .map(|addr| self.describe_guest_address(addr & !1))
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                lines.push(format!(
-                    "skipped id={} start={:#010x} arg={:#010x} start_at={} entry={} entry_at={entry_desc}",
-                    skipped.id,
-                    skipped.start,
-                    skipped.arg,
-                    self.describe_guest_address(skipped.start & !1),
-                    entry
-                        .map(|addr| format!("{addr:#010x}"))
-                        .unwrap_or_else(|| "<unknown>".to_string()),
-                ));
-            }
-        }
         lines.join("\n")
     }
 
@@ -2880,15 +3510,16 @@ impl NativeRuntime {
         } = self.main_wait
         {
             if main_cond == cond {
-                self.main_wait = if mutex == 0 || self.lock_mutex_for_thread(1, mutex) {
-                    GuestThreadWait::Runnable
-                } else {
-                    GuestThreadWait::Mutex { mutex }
-                };
-                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                self.main_wait =
+                    if mutex == 0 || self.lock_mutex_for_thread(self.foreground_thread, mutex) {
+                        GuestThreadWait::Runnable
+                    } else {
+                        GuestThreadWait::Mutex { mutex }
+                    };
+                if self.trace_threads {
                     eprintln!(
-                        "THREAD wake id=1 cond={cond:#010x} mutex={mutex:#010x} wait={:?}",
-                        self.main_wait
+                        "THREAD wake id={} cond={cond:#010x} mutex={mutex:#010x} wait={:?}",
+                        self.foreground_thread, self.main_wait
                     );
                 }
                 if !broadcast {
@@ -2914,7 +3545,7 @@ impl NativeRuntime {
                     } else {
                         GuestThreadWait::Mutex { mutex }
                     };
-                if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                if self.trace_threads {
                     eprintln!(
                         "THREAD wake id={} cond={cond:#010x} mutex={mutex:#010x} wait={:?}",
                         self.guest_threads[idx].id, self.guest_threads[idx].wait
@@ -2992,10 +3623,13 @@ impl NativeRuntime {
         let GuestThreadWait::Mutex { mutex } = self.main_wait else {
             return;
         };
-        if self.lock_mutex_for_thread(1, mutex) {
+        if self.lock_mutex_for_thread(self.foreground_thread, mutex) {
             self.main_wait = GuestThreadWait::Runnable;
-            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
-                eprintln!("THREAD wake id=1 mutex={mutex:#010x}");
+            if self.trace_threads {
+                eprintln!(
+                    "THREAD wake id={} mutex={mutex:#010x}",
+                    self.foreground_thread
+                );
             }
         }
     }
@@ -3011,7 +3645,7 @@ impl NativeRuntime {
         let thread_id = self.guest_threads[idx].id;
         if self.lock_mutex_for_thread(thread_id, mutex) {
             self.guest_threads[idx].wait = GuestThreadWait::Runnable;
-            if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+            if self.trace_threads {
                 eprintln!("THREAD wake id={thread_id} mutex={mutex:#010x}");
             }
         }
@@ -3055,6 +3689,18 @@ impl NativeRuntime {
             eprintln!(
                 "PTHREAD_ONCE start thread={thread_id} once={once_control:#010x} init={init_routine:#010x} state={state:#010x} max_steps={max_steps}"
             );
+        }
+
+        if !trace
+            && !self.function_diagnostics_enabled
+            && self.cpu_backend == NativeCpuBackendKind::AemuInterpreter
+        {
+            let result = self.run_pthread_once_aemu_fast(thread_id, init_routine, max_steps);
+            self.cpu = continuation;
+            if result.is_ok() {
+                self.cpu.set_reg(0, 0);
+            }
+            return result;
         }
 
         let mut step_idx = 0usize;
@@ -3106,7 +3752,7 @@ impl NativeRuntime {
                         );
                     }
                     self.handle_thread_sync_hle(thread_id, &name, address, args)?;
-                    if thread_id == 1 {
+                    if thread_id == self.foreground_thread {
                         self.wait_main_after_hle(&name, args)?;
                     } else if let Some(wait) = self.thread_wait_after_hle(thread_id, &name, args)? {
                         return Err(NativeRuntimeError::Memory(format!(
@@ -3124,7 +3770,207 @@ impl NativeRuntime {
         )))
     }
 
+    fn run_pthread_cleanup_callback(
+        &mut self,
+        thread_id: u32,
+        routine: u32,
+        argument: u32,
+    ) -> Result<(), NativeRuntimeError> {
+        if routine == 0 {
+            return Err(NativeRuntimeError::Memory(
+                "pthread cleanup routine is null".to_string(),
+            ));
+        }
+        if thread_id != self.foreground_thread {
+            return Err(NativeRuntimeError::Memory(format!(
+                "pthread cleanup callback on guest thread {thread_id} is not implemented"
+            )));
+        }
+
+        let continuation = self.cpu.clone();
+        let previous_thread = self.hle.current_pthread();
+        let previous_return_pc = self.foreground_return_pc;
+        let result = self.run_function_with_args(routine, &[argument], PTHREAD_CLEANUP_STEPS);
+        self.cpu = continuation;
+        self.foreground_return_pc = previous_return_pc;
+        self.hle.set_current_pthread(previous_thread);
+        result
+    }
+
+    fn run_pthread_once_aemu_fast(
+        &mut self,
+        thread_id: u32,
+        init_routine: u32,
+        max_steps: usize,
+    ) -> Result<(), NativeRuntimeError> {
+        let mut step_idx = 0usize;
+        while step_idx < max_steps {
+            let batch_limit = max_steps.saturating_sub(step_idx).min(u32::MAX as usize) as u32;
+            let stops = self.aemu_release_batch_stops(CALL_RETURN_SENTINEL);
+            let mut trap = None;
+            let outcome =
+                self.cpu
+                    .run_release_batch(&mut self.link.memory, batch_limit, stops, &mut trap);
+            step_idx = step_idx.saturating_add(outcome.steps as usize);
+
+            if outcome.reason == RELEASE_BATCH_BOUNDARY && self.cpu.pc() == CALL_RETURN_SENTINEL {
+                return Ok(());
+            }
+            if outcome.reason == RELEASE_BATCH_BUDGET {
+                continue;
+            }
+
+            let runtime_step = if outcome.reason == RELEASE_BATCH_TRAP {
+                self.handle_aemu_interpreter_trap(
+                    outcome.pc,
+                    outcome.isa(),
+                    trap.expect("trap batch outcome must carry its trap"),
+                )?
+            } else if outcome.reason == RELEASE_BATCH_BOUNDARY {
+                self.step_aemu_interpreter_inner()?
+            } else {
+                unreachable!("invalid release batch outcome")
+            };
+
+            let step_delta = match runtime_step {
+                NativeRuntimeStep::GuestInstruction => 1,
+                NativeRuntimeStep::GuestInstructions(count) => count.max(1),
+                NativeRuntimeStep::HleCall {
+                    name,
+                    address,
+                    args,
+                } => {
+                    self.handle_thread_sync_hle(thread_id, &name, address, args)?;
+                    if thread_id == self.foreground_thread {
+                        self.wait_main_after_hle(&name, args)?;
+                    } else if let Some(wait) = self.thread_wait_after_hle(thread_id, &name, args)? {
+                        return Err(NativeRuntimeError::Memory(format!(
+                            "pthread_once init routine for thread {thread_id} blocked on {wait:?}"
+                        )));
+                    }
+                    1
+                }
+            };
+            if outcome.reason == RELEASE_BATCH_BOUNDARY {
+                step_idx = step_idx.saturating_add(step_delta);
+            }
+        }
+
+        Err(NativeRuntimeError::Memory(format!(
+            "pthread_once init routine at {init_routine:#010x} exceeded step limit {max_steps}"
+        )))
+    }
+
     fn run_guest_thread_slice(
+        &mut self,
+        thread: &mut GuestThread,
+        max_steps: usize,
+    ) -> Result<bool, NativeRuntimeError> {
+        if !self.function_diagnostics_enabled
+            && !self.trace_threads
+            && self.cpu_backend == NativeCpuBackendKind::AemuInterpreter
+        {
+            self.run_guest_thread_slice_aemu_fast(thread, max_steps)
+        } else {
+            self.run_guest_thread_slice_diagnostic(thread, max_steps)
+        }
+    }
+
+    fn run_guest_thread_slice_aemu_fast(
+        &mut self,
+        thread: &mut GuestThread,
+        max_steps: usize,
+    ) -> Result<bool, NativeRuntimeError> {
+        let main_cpu = std::mem::replace(&mut self.cpu, thread.cpu.clone());
+        let previous_thread = self.hle.current_pthread();
+        self.hle.set_current_pthread(thread.id);
+        let mut result = Ok(false);
+        let mut step_idx = 0usize;
+        while step_idx < max_steps {
+            let batch_limit = max_steps.saturating_sub(step_idx).min(u32::MAX as usize) as u32;
+            let stops = self.aemu_release_batch_stops(THREAD_RETURN_SENTINEL);
+            let mut trap = None;
+            let outcome =
+                self.cpu
+                    .run_release_batch(&mut self.link.memory, batch_limit, stops, &mut trap);
+            step_idx = step_idx.saturating_add(outcome.steps as usize);
+
+            if outcome.reason == RELEASE_BATCH_BOUNDARY && self.cpu.pc() == THREAD_RETURN_SENTINEL {
+                result = Ok(true);
+                break;
+            }
+
+            if outcome.reason == RELEASE_BATCH_BUDGET {
+                continue;
+            }
+
+            let runtime_step = if outcome.reason == RELEASE_BATCH_TRAP {
+                self.handle_aemu_interpreter_trap(
+                    outcome.pc,
+                    outcome.isa(),
+                    trap.expect("trap batch outcome must carry its trap"),
+                )
+            } else if outcome.reason == RELEASE_BATCH_BOUNDARY {
+                self.step_aemu_interpreter_inner()
+            } else {
+                unreachable!("invalid release batch outcome")
+            };
+            let step_delta = match runtime_step {
+                Ok(NativeRuntimeStep::GuestInstruction) => 1,
+                Ok(NativeRuntimeStep::GuestInstructions(count)) => count.max(1),
+                Ok(NativeRuntimeStep::HleCall {
+                    name,
+                    address,
+                    args,
+                }) => {
+                    match self
+                        .handle_thread_sync_hle(thread.id, &name, address, args)
+                        .and_then(|()| self.thread_wait_after_hle(thread.id, &name, args))
+                    {
+                        Ok(Some(wait)) => {
+                            thread.wait = wait;
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            result = Err(err);
+                            break;
+                        }
+                    }
+                    1
+                }
+                Err(err) => {
+                    if matches!(
+                        err,
+                        NativeRuntimeError::Hle {
+                            source: HleError::Abort(_),
+                            ..
+                        }
+                    ) {
+                        result = Ok(true);
+                    } else {
+                        result = Err(err);
+                    }
+                    break;
+                }
+            };
+            if outcome.reason == RELEASE_BATCH_BOUNDARY {
+                step_idx = step_idx.saturating_add(step_delta);
+            }
+        }
+        if thread.wait.is_runnable()
+            && matches!(result, Ok(false))
+            && self.cpu.pc() == THREAD_RETURN_SENTINEL
+        {
+            result = Ok(true);
+        }
+        thread.cpu = self.cpu.clone();
+        self.cpu = main_cpu;
+        self.hle.set_current_pthread(previous_thread);
+        result
+    }
+
+    fn run_guest_thread_slice_diagnostic(
         &mut self,
         thread: &mut GuestThread,
         max_steps: usize,
@@ -3144,12 +3990,13 @@ impl NativeRuntime {
         let trace_mem32_deref_limit = parse_trace_limit("AEMU_TRACE_MEM32_DEREF_LIMIT");
         let trace_cxx_string_limit = parse_trace_limit("AEMU_TRACE_CXX_STRING_LIMIT");
         let trace_native_event_limit = parse_trace_limit("AEMU_TRACE_NATIVE_EVENTS_LIMIT");
+        let trace_hle = parse_trace_hle_filter();
+        let trace_hle_limit = parse_trace_limit("AEMU_TRACE_HLE_LIMIT");
         let main_cpu = std::mem::replace(&mut self.cpu, thread.cpu.clone());
         let previous_thread = self.hle.current_pthread();
         self.hle.set_current_pthread(thread.id);
         let mut result = Ok(false);
-        let collect_tail = std::env::var_os("AEMU_TRACE_THREADS").is_some()
-            || std::env::var_os("AEMU_TRACE_TAIL").is_some();
+        let collect_tail = self.trace_threads || std::env::var_os("AEMU_TRACE_TAIL").is_some();
         let mut step_idx = 0usize;
         while step_idx < max_steps {
             if self.cpu.pc() == THREAD_RETURN_SENTINEL {
@@ -3258,9 +4105,31 @@ impl NativeRuntime {
                     args,
                 }) => {
                     self.handle_thread_sync_hle(thread.id, &name, address, args)?;
+                    if trace_hle
+                        .as_ref()
+                        .is_some_and(|filter| filter.matches(&name))
+                        && trace_hle_limit.map_or(true, |limit| thread.trace_hle_count < limit)
+                    {
+                        thread.trace_hle_count += 1;
+                        eprintln!(
+                            "THREAD_HLE id={} function={:#010x} step={} name={} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} ret0={:#010x} ret1={:#010x} ret2={:#010x} ret3={:#010x}",
+                            thread.id,
+                            address,
+                            step_idx,
+                            name,
+                            args[0],
+                            args[1],
+                            args[2],
+                            args[3],
+                            self.cpu.reg(0),
+                            self.cpu.reg(1),
+                            self.cpu.reg(2),
+                            self.cpu.reg(3),
+                        );
+                    }
                     if let Some(wait) = self.thread_wait_after_hle(thread.id, &name, args)? {
                         thread.wait = wait;
-                        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                        if self.trace_threads {
                             eprintln!("THREAD wait id={} {wait:?}", thread.id);
                         }
                         break;
@@ -3268,12 +4137,35 @@ impl NativeRuntime {
                     1
                 }
                 Err(err) => {
+                    if let NativeRuntimeError::Hle { name, .. } = &err
+                        && trace_hle
+                            .as_ref()
+                            .is_some_and(|filter| filter.matches(name))
+                        && trace_hle_limit.map_or(true, |limit| thread.trace_hle_count < limit)
+                    {
+                        thread.trace_hle_count += 1;
+                        eprintln!(
+                            "THREAD_HLE_ERROR id={} step={} name={} pc={:#010x} {:?} r0={:#010x} r1={:#010x} r2={:#010x} r3={:#010x} sp={:#010x} lr={:#010x} error={}",
+                            thread.id,
+                            step_idx,
+                            name,
+                            self.cpu.pc(),
+                            self.cpu.isa(),
+                            self.cpu.reg(0),
+                            self.cpu.reg(1),
+                            self.cpu.reg(2),
+                            self.cpu.reg(3),
+                            self.cpu.reg(13),
+                            self.cpu.reg(14),
+                            err,
+                        );
+                    }
                     if let NativeRuntimeError::Hle {
                         name,
                         source: HleError::Abort(abort_name),
                     } = &err
                     {
-                        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+                        if self.trace_threads {
                             eprintln!(
                                 "THREAD abort id={} name={} abort={} pc={:#010x} {:?} lr={:#010x} r0={:#010x}",
                                 thread.id,
@@ -3305,7 +4197,7 @@ impl NativeRuntime {
         thread.cpu = self.cpu.clone();
         self.cpu = main_cpu;
         self.hle.set_current_pthread(previous_thread);
-        if std::env::var_os("AEMU_TRACE_THREADS").is_some() {
+        if self.trace_threads {
             eprintln!(
                 "THREAD slice id={} done={} pc={:#010x} {:?} r0={:#010x}",
                 thread.id,
@@ -3375,26 +4267,52 @@ impl NativeRuntime {
         name: &'static str,
         function: JniFunction,
     ) -> Result<u32, NativeRuntimeError> {
+        self.write_runtime_hle_trap(name, RuntimeHleTrapKind::Jni(function))
+    }
+
+    fn write_unsupported_jni_trap(
+        &mut self,
+        table: JniTable,
+        offset: u16,
+    ) -> Result<u32, NativeRuntimeError> {
+        self.write_runtime_hle_trap(
+            "unsupported JNI entry",
+            RuntimeHleTrapKind::UnsupportedJni { table, offset },
+        )
+    }
+
+    fn write_runtime_hle_trap(
+        &mut self,
+        name: &'static str,
+        kind: RuntimeHleTrapKind,
+    ) -> Result<u32, NativeRuntimeError> {
         let address = self.write_guest_words(&[HLE_TRAP_ARM_INSTR])?;
         self.runtime_hle_traps.push(RuntimeHleTrap {
             address,
             isa: Isa::Arm,
             name,
-            kind: RuntimeHleTrapKind::Jni(function),
+            kind,
         });
         Ok(address)
     }
 
-    fn runtime_hle_entry(&self, pc: u32, isa: Isa) -> Option<RuntimeHleTrap> {
-        self.runtime_hle_traps
-            .iter()
-            .find(|trap| trap.address == pc && trap.isa == isa)
-            .copied()
+    #[inline(always)]
+    fn intercepted_runtime_hle_entry(&self, pc: u32, isa: Isa) -> Option<RuntimeHleTrap> {
+        self.intercepted_runtime_hle_trap
+            .filter(|trap| trap.address == pc && trap.isa == isa)
     }
 
+    #[cold]
+    #[inline(never)]
     fn dispatch_runtime_hle(&mut self, trap: RuntimeHleTrap) -> Result<(), NativeRuntimeError> {
         match trap.kind {
             RuntimeHleTrapKind::Jni(function) => self.dispatch_jni(function),
+            RuntimeHleTrapKind::UnsupportedJni { table, offset } => {
+                Err(NativeRuntimeError::UnsupportedJniEntry {
+                    table: table.name(),
+                    offset,
+                })
+            }
             RuntimeHleTrapKind::CxxDynamicCast => self.dispatch_cxx_dynamic_cast(),
         }
     }
@@ -3541,45 +4459,84 @@ impl NativeRuntime {
 
     fn dispatch_jni(&mut self, function: JniFunction) -> Result<(), NativeRuntimeError> {
         let value = match function {
-            JniFunction::FindClass => self.cpu.reg(1).max(1),
-            JniFunction::RefIdentity | JniFunction::GetObjectClass => self.cpu.reg(1).max(1),
-            JniFunction::GetMethodId => self.register_jni_method(false)?,
-            JniFunction::GetStaticMethodId | JniFunction::GetFieldId => {
-                self.register_jni_method(true)?
+            JniFunction::ExceptionOccurred => self.jni_pending_exception_handle(),
+            JniFunction::ExceptionCheck => u32::from(self.jni_pending_exception_handle() != 0),
+            JniFunction::ExceptionDescribe => {
+                self.jni_describe_exception();
+                0
             }
-            JniFunction::CallObjectMethod | JniFunction::CallStaticObjectMethod => {
-                self.call_jni_object_method()?
+            JniFunction::ExceptionClear => {
+                self.jni_clear_exception();
+                0
             }
-            JniFunction::CallIntMethod | JniFunction::CallStaticIntMethod => {
-                self.call_jni_int_method()
+            JniFunction::PushLocalFrame => self.jni_push_local_frame()?,
+            JniFunction::PopLocalFrame => self.jni_pop_local_frame()?,
+            JniFunction::FindClass => self.jni_find_class()?,
+            JniFunction::DeleteRef => self.jni_delete_ref()?,
+            JniFunction::AttachCurrentThread { daemon } => {
+                self.jni_attach_current_thread(daemon)?
             }
-            JniFunction::CallBooleanMethod | JniFunction::CallStaticBooleanMethod => {
-                self.call_jni_boolean_method()
+            JniFunction::DetachCurrentThread => self.jni_detach_current_thread(),
+            JniFunction::GetEnv => self.jni_get_env()?,
+            JniFunction::EnsureLocalCapacity => self.jni_ensure_local_capacity()?,
+            JniFunction::RefIdentity => self.jni_copy_ref()?,
+            JniFunction::GetObjectClass => self.jni_get_object_class()?,
+            JniFunction::NewObject(layout) => self.new_jni_object(layout)?,
+            JniFunction::GetMethodId => self.lookup_jni_member(DexMemberKind::Method, false)?,
+            JniFunction::GetStaticMethodId => {
+                self.lookup_jni_member(DexMemberKind::Method, true)?
             }
-            JniFunction::CallVoidMethod | JniFunction::ReleaseStringUtfChars => 0,
-            JniFunction::NewStringUtf => self.cpu.reg(1),
-            JniFunction::GetStringUtfLength => {
-                self.load_guest_c_string(self.cpu.reg(1), 4096)?.len() as u32
+            JniFunction::GetFieldId => self.lookup_jni_member(DexMemberKind::Field, false)?,
+            JniFunction::GetStaticFieldId => self.lookup_jni_member(DexMemberKind::Field, true)?,
+            JniFunction::GetStaticObjectField => self.get_jni_static_object_field()?,
+            JniFunction::GetStaticIntField => self.get_jni_static_int_field()?,
+            JniFunction::CallObjectMethod(layout) => self.call_jni_object_method(layout, false)?,
+            JniFunction::CallStaticObjectMethod(layout) => {
+                self.call_jni_object_method(layout, true)?
             }
-            JniFunction::GetStringUtfChars => {
-                if self.cpu.reg(2) != 0 {
-                    self.link
-                        .memory
-                        .store8(self.cpu.reg(2), 0)
-                        .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
-                }
-                self.cpu.reg(1)
+            JniFunction::CallIntMethod(_) => self.call_jni_int_method(false)?,
+            JniFunction::CallStaticIntMethod(_) => self.call_jni_int_method(true)?,
+            JniFunction::CallLongMethod(_) => {
+                let value = self.call_jni_long_method()?;
+                self.cpu.set_reg(1, (value >> 32) as u32);
+                value as u32
             }
+            JniFunction::CallFloatMethod(_) => self.call_jni_float_method()?.to_bits(),
+            JniFunction::CallBooleanMethod(layout) => {
+                self.call_jni_boolean_method(layout, false)?
+            }
+            JniFunction::CallStaticBooleanMethod(layout) => {
+                self.call_jni_boolean_method(layout, true)?
+            }
+            JniFunction::CallVoidMethod(layout) => self.call_jni_void_method(layout, false)?,
+            JniFunction::CallStaticVoidMethod(layout) => self.call_jni_void_method(layout, true)?,
+            JniFunction::GetStringLength => self.jni_string_length(false)?,
+            JniFunction::ReleaseStringUtfChars => self.jni_release_string_utf_chars()?,
+            JniFunction::NewStringUtf => self.jni_new_string_utf()?,
+            JniFunction::GetStringUtfLength => self.jni_string_length(true)?,
+            JniFunction::GetStringUtfChars => self.jni_string_utf_chars()?,
             JniFunction::GetArrayLength => self.jni_array_len()?,
             JniFunction::GetObjectArrayElement => self.jni_object_array_element()?,
+            JniFunction::GetByteArrayElements => {
+                self.jni_primitive_array_elements(JniArrayKind::Byte)?
+            }
             JniFunction::GetIntArrayElements => self.jni_int_array_elements()?,
-            JniFunction::ReleaseIntArrayElements => 0,
+            JniFunction::ReleaseByteArrayElements => {
+                self.jni_release_primitive_array_elements(JniArrayKind::Byte)?
+            }
+            JniFunction::ReleaseIntArrayElements => {
+                self.jni_release_primitive_array_elements(JniArrayKind::Int)?
+            }
+            JniFunction::GetByteArrayRegion => self.jni_get_byte_array_region()?,
+            JniFunction::RegisterNatives => self.register_jni_natives()?,
             JniFunction::GetJavaVm => {
                 let out = self.cpu.reg(1);
-                if out != 0 {
+                if out == 0 {
+                    u32::MAX
+                } else {
                     self.store_runtime32(out, self.jni_java_vm)?;
+                    0
                 }
-                0
             }
         };
         self.cpu.set_reg(0, value);
@@ -3587,11 +4544,258 @@ impl NativeRuntime {
         Ok(())
     }
 
-    fn register_jni_method(&mut self, is_static: bool) -> Result<u32, NativeRuntimeError> {
+    fn jni_find_class(&mut self) -> Result<u32, NativeRuntimeError> {
+        let name = self.load_guest_c_string(self.cpu.reg(1), 1024)?;
+        let Some(descriptor) = jni_find_class_descriptor(&name) else {
+            self.set_jni_exception(
+                "Ljava/lang/NoClassDefFoundError;",
+                format!("invalid JNI class name {name:?}"),
+            )?;
+            return Ok(0);
+        };
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!("JNI find class name={name:?} descriptor={descriptor:?}");
+        }
+        self.jni_class_handle(&descriptor, true)
+    }
+
+    fn jni_get_object_class(&mut self) -> Result<u32, NativeRuntimeError> {
+        let object = self.cpu.reg(1);
+        if object == 0 {
+            self.set_jni_exception(
+                "Ljava/lang/NullPointerException;",
+                "JNI GetObjectClass object is null".to_string(),
+            )?;
+            return Ok(0);
+        }
+        let descriptor = if self.jni_classes.iter().any(|class| class.handle == object) {
+            "Ljava/lang/Class;".to_string()
+        } else if let Some(object) = self.jni_objects.iter().find(|entry| entry.handle == object) {
+            object.class_descriptor.clone()
+        } else if let Some(array) = self.jni_arrays.iter().find(|array| array.handle == object) {
+            array.descriptor.clone()
+        } else {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI GetObjectClass received unknown reference {object:#010x}"
+            )));
+        };
+        self.jni_class_handle(&descriptor, true)
+    }
+
+    fn jni_new_string_utf(&mut self) -> Result<u32, NativeRuntimeError> {
+        if self.cpu.reg(1) == 0 {
+            return Ok(0);
+        }
+        let value = self.load_guest_c_string(self.cpu.reg(1), 64 * 1024)?;
+        self.write_jni_string(&value)
+    }
+
+    fn jni_string_length(&mut self, modified_utf8: bool) -> Result<u32, NativeRuntimeError> {
+        let reference = self.cpu.reg(1);
+        if reference == 0 {
+            self.set_jni_exception(
+                "Ljava/lang/NullPointerException;",
+                "JNI string length received null".to_string(),
+            )?;
+            return Ok(0);
+        }
+        let value = self.load_jni_utf8_reference(reference, "string")?;
+        let len = if modified_utf8 {
+            value.as_bytes().len()
+        } else {
+            value.encode_utf16().count()
+        };
+        u32::try_from(len).map_err(|_| NativeRuntimeError::AddressOverflow)
+    }
+
+    fn jni_string_utf_chars(&mut self) -> Result<u32, NativeRuntimeError> {
+        let reference = self.cpu.reg(1);
+        if reference == 0 {
+            self.set_jni_exception(
+                "Ljava/lang/NullPointerException;",
+                "JNI GetStringUTFChars received null".to_string(),
+            )?;
+            return Ok(0);
+        }
+        let _ = self.load_jni_utf8_reference(reference, "string")?;
+        if self.cpu.reg(2) != 0 {
+            self.link
+                .memory
+                .store8(self.cpu.reg(2), 0)
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        }
+        Ok(reference)
+    }
+
+    fn jni_release_string_utf_chars(&mut self) -> Result<u32, NativeRuntimeError> {
+        let string = self.cpu.reg(1);
+        let chars = self.cpu.reg(2);
+        let _ = self.load_jni_utf8_reference(string, "released string")?;
+        if chars != string {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI ReleaseStringUTFChars pointer {chars:#010x} does not belong to string {string:#010x}"
+            )));
+        }
+        Ok(0)
+    }
+
+    fn new_jni_proxy(&mut self, descriptor: &str) -> Result<u32, NativeRuntimeError> {
+        if !self.jni_declarations.contains_class(descriptor) {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI proxy class {descriptor} is outside the APK/platform index"
+            )));
+        }
+        let object = self.alloc_guest_zeroed(8, 4)?;
+        self.register_jni_object(object, descriptor);
+        Ok(object)
+    }
+
+    fn new_jni_file(&mut self, path: &str) -> Result<u32, NativeRuntimeError> {
+        let object = self.write_guest_c_string(path)?;
+        self.register_jni_object(object, "Ljava/io/File;");
+        Ok(object)
+    }
+
+    fn jni_load_class(&mut self, layout: JniCallArgLayout) -> Result<u32, NativeRuntimeError> {
+        let name_ref = self.jni_reference_arg(layout, 0)?;
+        let name = self.load_jni_utf8_reference(name_ref, "class name")?;
+        let Some(descriptor) = jni_binary_class_descriptor(&name) else {
+            self.set_jni_exception(
+                "Ljava/lang/ClassNotFoundException;",
+                format!("invalid binary class name {name:?}"),
+            )?;
+            return Ok(0);
+        };
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!("JNI load class name={name:?} descriptor={descriptor:?}");
+        }
+        self.jni_class_handle(&descriptor, true)
+    }
+
+    fn jni_device_id(&mut self) -> String {
+        if let Some(value) = &self.jni_device_id {
+            return value.clone();
+        }
+        let mut sha1 = Sha1::new();
+        sha1.update(b"aemu-device-id\0");
+        sha1.update(self.jni_package_name.as_bytes());
+        sha1.update(b"\0");
+        sha1.update(self.jni_apk_digest);
+        let digest = sha1.finalize();
+        let value = uuid_hex_from_digest(&digest);
+        self.jni_device_id = Some(value.clone());
+        value
+    }
+
+    fn next_jni_uuid(&mut self) -> String {
+        self.jni_uuid_counter = self.jni_uuid_counter.wrapping_add(1);
+        let mut sha1 = Sha1::new();
+        sha1.update(b"aemu-random-uuid\0");
+        sha1.update(self.jni_package_name.as_bytes());
+        sha1.update(self.jni_apk_digest);
+        sha1.update(self.jni_uuid_counter.to_le_bytes());
+        uuid_hex_from_digest(&sha1.finalize())
+    }
+
+    fn notify_store_initialized(
+        &mut self,
+        listener: u32,
+        initialized: bool,
+    ) -> Result<(), NativeRuntimeError> {
+        let callback = self
+            .symbol_address(
+                "Java_com_mojang_minecraftpe_store_NativeStoreListener_onStoreInitialized",
+            )
+            .ok_or_else(|| {
+                NativeRuntimeError::Memory(
+                    "NativeStoreListener.onStoreInitialized JNI export is missing".to_string(),
+                )
+            })?;
+        let native_listener = u64::from(self.load_runtime32(listener.wrapping_add(8))?)
+            | (u64::from(self.load_runtime32(listener.wrapping_add(12))?) << 32);
+
+        let saved_cpu = self.cpu.clone();
+        let saved_return_pc = self.foreground_return_pc;
+        let callback_sp = saved_cpu
+            .reg(13)
+            .checked_sub(16)
+            .ok_or(NativeRuntimeError::AddressOverflow)?
+            & !7;
+        self.cpu.set_reg(13, callback_sp);
+        self.store_runtime32(callback_sp, u32::from(initialized))?;
+        let result = self.run_function_with_args(
+            callback,
+            &[
+                self.jni_env,
+                listener,
+                native_listener as u32,
+                (native_listener >> 32) as u32,
+            ],
+            5_000_000,
+        );
+        self.cpu = saved_cpu;
+        self.foreground_return_pc = saved_return_pc;
+        result
+    }
+
+    fn lookup_jni_member(
+        &mut self,
+        kind: DexMemberKind,
+        is_static: bool,
+    ) -> Result<u32, NativeRuntimeError> {
+        let class_handle = self.cpu.reg(1);
+        let class_descriptor = self
+            .jni_classes
+            .iter()
+            .find(|class| class.handle == class_handle)
+            .map(|class| class.descriptor.clone())
+            .ok_or_else(|| {
+                NativeRuntimeError::Memory(format!(
+                    "JNI member lookup received invalid class {class_handle:#010x}"
+                ))
+            })?;
         let name = self.load_guest_c_string(self.cpu.reg(2), 256)?;
         let sig = self.load_guest_c_string(self.cpu.reg(3), 256)?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI lookup class={class_handle:#010x} descriptor={class_descriptor:?} kind={kind:?} static={is_static} name={name:?} sig={sig:?}"
+            );
+        }
+        let resolved = (!name.is_empty() && !sig.is_empty())
+            .then(|| {
+                self.jni_declarations.resolve_member(
+                    &class_descriptor,
+                    &name,
+                    &sig,
+                    kind,
+                    is_static,
+                )
+            })
+            .flatten();
+        let Some(resolved) = resolved else {
+            let exception = match kind {
+                DexMemberKind::Method => "Ljava/lang/NoSuchMethodError;",
+                DexMemberKind::Field => "Ljava/lang/NoSuchFieldError;",
+            };
+            self.set_jni_exception(
+                exception,
+                format!(
+                    "no {} {class_descriptor}.{name}{sig} (static={is_static})",
+                    match kind {
+                        DexMemberKind::Method => "method",
+                        DexMemberKind::Field => "field",
+                    }
+                ),
+            )?;
+            return Ok(0);
+        };
+        let declaring_class = resolved.declaring_class;
         if let Some(method) = self.jni_methods.iter().find(|method| {
-            method.name == name && method.sig == sig && method.is_static == is_static
+            method.class_descriptor == declaring_class
+                && method.name == name
+                && method.sig == sig
+                && method.kind == kind
+                && method.is_static == is_static
         }) {
             return Ok(method.id);
         }
@@ -3600,42 +4804,719 @@ impl NativeRuntime {
         self.store_runtime32(id.wrapping_add(4), self.cpu.reg(3))?;
         self.jni_methods.push(JniMethod {
             id,
+            class_descriptor: declaring_class,
             name,
             sig,
+            kind,
             is_static,
         });
         Ok(id)
     }
 
-    fn call_jni_object_method(&mut self) -> Result<u32, NativeRuntimeError> {
-        let Some(method) = self.jni_method(self.cpu.reg(2)) else {
+    fn jni_class_handle(
+        &mut self,
+        descriptor: &str,
+        set_exception: bool,
+    ) -> Result<u32, NativeRuntimeError> {
+        if let Some(class) = self
+            .jni_classes
+            .iter()
+            .find(|class| class.descriptor == descriptor)
+        {
+            return Ok(class.handle);
+        }
+        if !self.jni_declarations.contains_class(descriptor)
+            && descriptor != self.jni_activity_descriptor
+        {
+            if set_exception {
+                self.set_jni_exception(
+                    "Ljava/lang/ClassNotFoundException;",
+                    format!("class {descriptor} is not present in the APK/platform index"),
+                )?;
+            }
             return Ok(0);
+        }
+        let handle = self.alloc_guest_zeroed(8, 4)?;
+        self.jni_classes.push(JniClass {
+            handle,
+            descriptor: descriptor.to_string(),
+        });
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!("JNI class handle={handle:#010x} descriptor={descriptor:?}");
+        }
+        Ok(handle)
+    }
+
+    fn write_jni_string(&mut self, value: &str) -> Result<u32, NativeRuntimeError> {
+        let handle = self.write_guest_c_string(value)?;
+        self.register_jni_object(handle, "Ljava/lang/String;");
+        Ok(handle)
+    }
+
+    fn register_jni_object(&mut self, handle: u32, class_descriptor: &str) {
+        if handle == 0 {
+            return;
+        }
+        if let Some(object) = self
+            .jni_objects
+            .iter_mut()
+            .find(|object| object.handle == handle)
+        {
+            object.class_descriptor = class_descriptor.to_string();
+            return;
+        }
+        self.jni_objects.push(JniObject {
+            handle,
+            class_descriptor: class_descriptor.to_string(),
+        });
+    }
+
+    fn jni_object_descriptor(&self, handle: u32) -> Option<&str> {
+        self.jni_objects
+            .iter()
+            .find(|object| object.handle == handle)
+            .map(|object| object.class_descriptor.as_str())
+    }
+
+    fn is_known_jni_reference(&self, handle: u32) -> bool {
+        handle == 0
+            || self.jni_classes.iter().any(|class| class.handle == handle)
+            || self
+                .jni_objects
+                .iter()
+                .any(|object| object.handle == handle)
+            || self.jni_arrays.iter().any(|array| array.handle == handle)
+    }
+
+    fn current_jni_thread(&self) -> u32 {
+        self.hle.current_pthread()
+    }
+
+    fn jni_pending_exception_handle(&self) -> u32 {
+        let thread = self.current_jni_thread();
+        self.jni_pending_exceptions
+            .iter()
+            .find(|entry| entry.thread == thread)
+            .map_or(0, |entry| entry.exception.handle)
+    }
+
+    fn set_jni_exception(
+        &mut self,
+        class_descriptor: &str,
+        message: String,
+    ) -> Result<(), NativeRuntimeError> {
+        let thread = self.current_jni_thread();
+        if self
+            .jni_pending_exceptions
+            .iter()
+            .any(|entry| entry.thread == thread)
+        {
+            return Ok(());
+        }
+        let handle = self.alloc_guest_zeroed(8, 4)?;
+        self.register_jni_object(handle, class_descriptor);
+        self.jni_pending_exceptions.push(JniThreadException {
+            thread,
+            exception: JniPendingException {
+                handle,
+                class_descriptor: class_descriptor.to_string(),
+                message,
+            },
+        });
+        Ok(())
+    }
+
+    fn jni_describe_exception(&self) {
+        let thread = self.current_jni_thread();
+        if let Some(entry) = self
+            .jni_pending_exceptions
+            .iter()
+            .find(|entry| entry.thread == thread)
+        {
+            eprintln!(
+                "JNI pending exception {}: {}",
+                entry.exception.class_descriptor, entry.exception.message
+            );
+        }
+    }
+
+    fn jni_clear_exception(&mut self) {
+        let thread = self.current_jni_thread();
+        self.jni_pending_exceptions
+            .retain(|entry| entry.thread != thread);
+    }
+
+    fn jni_push_local_frame(&mut self) -> Result<u32, NativeRuntimeError> {
+        let capacity = self.cpu.reg(1) as i32;
+        if capacity < 0 || capacity as u32 > JNI_LOCAL_CAPACITY_LIMIT {
+            self.set_jni_exception(
+                "Ljava/lang/OutOfMemoryError;",
+                format!("JNI local frame capacity {capacity} is outside the bounded model"),
+            )?;
+            return Ok(JNI_ERR);
+        }
+        let thread = self.current_jni_thread();
+        let frames = if let Some(frames) = self
+            .jni_local_frames
+            .iter_mut()
+            .find(|frames| frames.thread == thread)
+        {
+            frames
+        } else {
+            self.jni_local_frames.push(JniThreadLocalFrames {
+                thread,
+                capacities: Vec::new(),
+            });
+            self.jni_local_frames.last_mut().expect("inserted")
         };
-        let method_name = method.name.clone();
-        let method_sig = method.sig.clone();
-        if matches!(method_name.as_str(), "_getImageData" | "getImageData") {
-            return self.call_jni_get_image_data();
+        frames.capacities.push(capacity as u32);
+        Ok(JNI_OK)
+    }
+
+    fn jni_pop_local_frame(&mut self) -> Result<u32, NativeRuntimeError> {
+        let result = self.cpu.reg(1);
+        if !self.is_known_jni_reference(result) {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI PopLocalFrame received unknown result reference {result:#010x}"
+            )));
         }
-        if method_name == "getBroadcastAddresses" && method_sig == "()[Ljava/lang/String;" {
-            return self.call_jni_string_array(&["255.255.255.255"]);
+        let thread = self.current_jni_thread();
+        let popped = self
+            .jni_local_frames
+            .iter_mut()
+            .find(|frames| frames.thread == thread)
+            .and_then(|frames| frames.capacities.pop());
+        if popped.is_none() {
+            self.set_jni_exception(
+                "Ljava/lang/RuntimeException;",
+                "JNI PopLocalFrame called without a matching frame".to_string(),
+            )?;
+            return Ok(0);
         }
-        if method_sig == "()[Ljava/lang/String;" {
+        Ok(result)
+    }
+
+    fn jni_ensure_local_capacity(&mut self) -> Result<u32, NativeRuntimeError> {
+        let capacity = self.cpu.reg(1) as i32;
+        if capacity < 0 || capacity as u32 > JNI_LOCAL_CAPACITY_LIMIT {
+            self.set_jni_exception(
+                "Ljava/lang/OutOfMemoryError;",
+                format!("JNI local capacity {capacity} is outside the bounded model"),
+            )?;
+            return Ok(JNI_ERR);
+        }
+        Ok(JNI_OK)
+    }
+
+    fn jni_delete_ref(&self) -> Result<u32, NativeRuntimeError> {
+        let reference = self.cpu.reg(1);
+        if !self.is_known_jni_reference(reference) {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI DeleteRef received unknown reference {reference:#010x}"
+            )));
+        }
+        // Objects are immortal in the no-GC facade. Deleting a root therefore
+        // changes only liveness bookkeeping, which the facade does not expose.
+        Ok(0)
+    }
+
+    fn jni_copy_ref(&self) -> Result<u32, NativeRuntimeError> {
+        let reference = self.cpu.reg(1);
+        if !self.is_known_jni_reference(reference) {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI reference copy received unknown reference {reference:#010x}"
+            )));
+        }
+        Ok(reference)
+    }
+
+    fn jni_attach_current_thread(&mut self, _daemon: bool) -> Result<u32, NativeRuntimeError> {
+        if self.cpu.reg(0) != self.jni_java_vm || self.cpu.reg(1) == 0 {
+            return Ok(JNI_ERR);
+        }
+        let args = self.cpu.reg(2);
+        if args != 0 {
+            let version = self.load_runtime32(args)?;
+            if !is_supported_jni_version(version) {
+                return Ok(JNI_EVERSION);
+            }
+        }
+        self.jni_attached_threads.insert(self.current_jni_thread());
+        self.store_runtime32(self.cpu.reg(1), self.jni_env)?;
+        Ok(JNI_OK)
+    }
+
+    fn jni_detach_current_thread(&mut self) -> u32 {
+        if self.cpu.reg(0) != self.jni_java_vm
+            || !self.jni_attached_threads.remove(&self.current_jni_thread())
+        {
+            JNI_ERR
+        } else {
+            JNI_OK
+        }
+    }
+
+    fn jni_get_env(&mut self) -> Result<u32, NativeRuntimeError> {
+        let out = self.cpu.reg(1);
+        if self.cpu.reg(0) != self.jni_java_vm || out == 0 {
+            return Ok(JNI_ERR);
+        }
+        if !is_supported_jni_version(self.cpu.reg(2)) {
+            self.store_runtime32(out, 0)?;
+            return Ok(JNI_EVERSION);
+        }
+        if !self
+            .jni_attached_threads
+            .contains(&self.current_jni_thread())
+        {
+            self.store_runtime32(out, 0)?;
+            return Ok(JNI_EDETACHED);
+        }
+        self.store_runtime32(out, self.jni_env)?;
+        Ok(JNI_OK)
+    }
+
+    fn register_jni_natives(&mut self) -> Result<u32, NativeRuntimeError> {
+        let class = self.cpu.reg(1);
+        let methods = self.cpu.reg(2);
+        let count = self.cpu.reg(3) as i32;
+        let Some(class_descriptor) = self
+            .jni_classes
+            .iter()
+            .find(|entry| entry.handle == class)
+            .map(|entry| entry.descriptor.clone())
+        else {
+            return Ok(JNI_ERR);
+        };
+        if methods == 0 || !(0..=4096).contains(&count) {
+            return Ok(JNI_ERR);
+        }
+        for index in 0..count as u32 {
+            let entry = methods.wrapping_add(index.wrapping_mul(12));
+            let name_ptr = self.load_runtime32(entry)?;
+            let signature_ptr = self.load_runtime32(entry.wrapping_add(4))?;
+            let function = self.load_runtime32(entry.wrapping_add(8))?;
+            if name_ptr == 0 || signature_ptr == 0 || function == 0 {
+                return Ok(JNI_ERR);
+            }
+            let name = self.load_guest_c_string(name_ptr, 256)?;
+            let signature = self.load_guest_c_string(signature_ptr, 256)?;
+            if !self.jni_declarations.is_declared_native_method(
+                &class_descriptor,
+                &name,
+                &signature,
+            ) {
+                self.set_jni_exception(
+                    "Ljava/lang/NoSuchMethodError;",
+                    format!("RegisterNatives cannot resolve {class_descriptor}.{name}{signature}"),
+                )?;
+                return Ok(JNI_ERR);
+            }
+            if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+                eprintln!(
+                    "JNI register native class={class:#010x} descriptor={class_descriptor:?} name={name:?} sig={signature:?} function={function:#010x}"
+                );
+            }
+            if let Some(method) = self.jni_native_methods.iter_mut().find(|method| {
+                method.class == class && method.name == name && method.signature == signature
+            }) {
+                method.function = function;
+            } else {
+                self.jni_native_methods.push(JniNativeMethod {
+                    class,
+                    name,
+                    signature,
+                    function,
+                });
+            }
+        }
+        Ok(JNI_OK)
+    }
+
+    fn new_jni_object(&mut self, layout: JniCallArgLayout) -> Result<u32, NativeRuntimeError> {
+        let class = self.cpu.reg(1);
+        let constructor = self.cpu.reg(2);
+        if class == 0 {
+            return Err(NativeRuntimeError::Memory(
+                "JNI constructor class is null".to_string(),
+            ));
+        }
+        let class_descriptor = self
+            .jni_classes
+            .iter()
+            .find(|entry| entry.handle == class)
+            .map(|entry| entry.descriptor.clone())
+            .ok_or_else(|| {
+                NativeRuntimeError::Memory(format!(
+                    "JNI constructor received invalid class {class:#010x}"
+                ))
+            })?;
+        let method = self.require_jni_method("constructor", constructor)?.clone();
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI new object class={class:#010x} constructor={:?} sig={:?} layout={layout:?}",
+                method.name, method.sig
+            );
+        }
+        if method.kind != DexMemberKind::Method
+            || method.is_static
+            || method.name != "<init>"
+            || method.class_descriptor != class_descriptor
+        {
+            return Err(self.unsupported_jni_method("constructor", &method));
+        }
+        let constructor_long = match method.sig.as_str() {
+            "()V" => None,
+            "(J)V" => Some(self.jni_first_u64_arg(layout)?),
+            _ => return Err(self.unsupported_jni_method("constructor", &method)),
+        };
+        let object = self.alloc_guest_zeroed(if constructor_long.is_some() { 16 } else { 8 }, 8)?;
+        self.store_runtime32(object, class)?;
+        self.store_runtime32(object.wrapping_add(4), constructor)?;
+        if let Some(value) = constructor_long {
+            self.store_runtime32(object.wrapping_add(8), value as u32)?;
+            self.store_runtime32(object.wrapping_add(12), (value >> 32) as u32)?;
+        }
+        self.register_jni_object(object, &class_descriptor);
+        Ok(object)
+    }
+
+    fn call_jni_object_method(
+        &mut self,
+        layout: JniCallArgLayout,
+        is_static: bool,
+    ) -> Result<u32, NativeRuntimeError> {
+        let operation = if is_static {
+            "static object call"
+        } else {
+            "object call"
+        };
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {operation} target is null"
+            )));
+        }
+        let method = self
+            .require_jni_call_method(operation, self.cpu.reg(2), is_static)?
+            .clone();
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI call object class={:?} static={} name={:?} sig={:?} layout={layout:?}",
+                method.class_descriptor, method.is_static, method.name, method.sig
+            );
+        }
+        let method_class = method.class_descriptor;
+        let method_name = method.name;
+        let method_sig = method.sig;
+        let is_activity = method_class == self.jni_activity_descriptor;
+        if is_activity
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("_getImageData" | "getImageData", "(Ljava/lang/String;)[I")
+            )
+        {
+            return self.call_jni_get_image_data(layout);
+        }
+        if is_activity
+            && method_name == "getFileDataBytes"
+            && method_sig == "(Ljava/lang/String;)[B"
+        {
+            return self.call_jni_get_file_data_bytes(layout);
+        }
+        if is_activity
+            && method_name == "getBroadcastAddresses"
+            && method_sig == "()[Ljava/lang/String;"
+        {
             return self.call_jni_string_array(&[]);
         }
-        let value = match method_name.as_str() {
-            "getLocale" => "en_US",
-            "getDeviceModel" | "getDeviceModelName" => "AEMU",
-            "getAndroidVersion" => "19",
-            "getExternalStoragePath" => "/sdcard",
-            "getPackageName" => "com.mojang.minecraftpe",
-            "getFilesDir" | "getAbsolutePath" => "/data/data/com.mojang.minecraftpe/files",
-            "getCacheDir" => "/data/data/com.mojang.minecraftpe/cache",
-            "getUserInputString" => "",
-            "getDeviceId" | "createUUID" => "00000000-0000-0000-0000-000000000000",
-            _ if method_sig.ends_with("Ljava/lang/String;") => "",
-            _ => return Ok(0),
+        if is_activity
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("getIPAddresses", "()[Ljava/lang/String;")
+            )
+        {
+            return self.call_jni_string_array(&[]);
+        }
+        if is_activity
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("getUserInputString", "()[Ljava/lang/String;")
+            )
+        {
+            return Ok(0);
+        }
+        if method_class == "Ljava/io/File;"
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("getPath" | "getAbsolutePath", "()Ljava/lang/String;")
+            )
+        {
+            let path = self.load_guest_c_string(self.cpu.reg(1), 4096)?;
+            return self.write_jni_string(&path);
+        }
+        if (method_class == "Ljava/lang/Class;" || method_class == "Landroid/content/Context;")
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("getClassLoader", "()Ljava/lang/ClassLoader;")
+            )
+        {
+            return self.new_jni_proxy("Ljava/lang/ClassLoader;");
+        }
+        if (is_activity || method_class == "Landroid/content/Context;")
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("getApplicationContext", "()Landroid/content/Context;")
+            )
+        {
+            return Ok(self.cpu.reg(1));
+        }
+        if method_class == "Ljava/lang/ClassLoader;"
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("loadClass", "(Ljava/lang/String;)Ljava/lang/Class;")
+            )
+        {
+            return self.jni_load_class(layout);
+        }
+        if method_class == "Landroid/content/Context;"
+            && method_name == "getSystemService"
+            && method_sig == "(Ljava/lang/String;)Ljava/lang/Object;"
+        {
+            let service_ref = self.jni_reference_arg(layout, 0)?;
+            let service = self.load_jni_utf8_reference(service_ref, "system service name")?;
+            return match service.as_str() {
+                "input_method" => {
+                    self.new_jni_proxy("Landroid/view/inputmethod/InputMethodManager;")
+                }
+                "vibrator" => self.new_jni_proxy("Landroid/os/Vibrator;"),
+                _ => Ok(0),
+            };
+        }
+        if method_class == "Landroid/app/Activity;"
+            && method_name == "getWindow"
+            && method_sig == "()Landroid/view/Window;"
+        {
+            return self.new_jni_proxy("Landroid/view/Window;");
+        }
+        if method_class == "Landroid/view/Window;"
+            && method_name == "getDecorView"
+            && method_sig == "()Landroid/view/View;"
+        {
+            return self.new_jni_proxy("Landroid/view/View;");
+        }
+        if method_class == "Landroid/view/View;"
+            && method_name == "getWindowToken"
+            && method_sig == "()Landroid/os/IBinder;"
+        {
+            return self.new_jni_proxy("Landroid/os/IBinder;");
+        }
+        if method_class == "Lcom/mojang/minecraftpe/store/StoreFactory;"
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                (
+                    "createGooglePlayStore",
+                    "(Ljava/lang/String;Lcom/mojang/minecraftpe/store/StoreListener;)Lcom/mojang/minecraftpe/store/Store;"
+                )
+            )
+        {
+            let public_key_ref = self.jni_reference_arg(layout, 0)?;
+            let _public_key = self.load_jni_utf8_reference(public_key_ref, "billing public key")?;
+            let listener = self.jni_reference_arg(layout, 1)?;
+            let listener_class = self.jni_object_descriptor(listener).ok_or_else(|| {
+                NativeRuntimeError::Memory(format!(
+                    "Google Play store listener {listener:#010x} is not a JNI object"
+                ))
+            })?;
+            if !self.jni_declarations.is_assignable_to(
+                listener_class,
+                "Lcom/mojang/minecraftpe/store/StoreListener;",
+            ) {
+                return Err(NativeRuntimeError::Memory(format!(
+                    "Google Play store listener has class {listener_class}"
+                )));
+            }
+            let store =
+                self.new_jni_proxy("Lcom/mojang/minecraftpe/store/googleplay/GooglePlayStore;")?;
+            self.jni_stores.push(JniStore {
+                handle: store,
+                listener,
+            });
+            self.notify_store_initialized(listener, false)?;
+            return Ok(store);
+        }
+        if method_class == "Lcom/mojang/minecraftpe/store/Store;"
+            && method_name == "getStoreId"
+            && method_sig == "()Ljava/lang/String;"
+            && self
+                .jni_stores
+                .iter()
+                .any(|store| store.handle == self.cpu.reg(1))
+        {
+            return self.write_jni_string("android.googleplay");
+        }
+        if is_activity && method_name == "getDeviceId" && method_sig == "()Ljava/lang/String;" {
+            let value = self.jni_device_id();
+            return self.write_jni_string(&value);
+        }
+        if is_activity && method_name == "createUUID" && method_sig == "()Ljava/lang/String;" {
+            let value = self.next_jni_uuid();
+            return self.write_jni_string(&value);
+        }
+        if is_activity
+            && method_name == "getPlatformStringVar"
+            && method_sig == "(I)Ljava/lang/String;"
+        {
+            return if self.jni_u32_arg(layout, 0)? == 0 {
+                self.write_jni_string("AEMU")
+            } else {
+                Ok(0)
+            };
+        }
+        if method_class == "Lcom/microsoft/xbox/idp/interop/Interop;"
+            && method_name == "ReadConfigFile"
+            && method_sig == "(Landroid/content/Context;)Ljava/lang/String;"
+        {
+            return match self.hle.load_apk_asset_bytes("res/raw/xboxservices.config") {
+                Ok(bytes) => {
+                    let value = String::from_utf8_lossy(&bytes);
+                    self.write_jni_string(&value)
+                }
+                Err(err) => {
+                    self.set_jni_exception(
+                        "Landroid/content/res/Resources$NotFoundException;",
+                        format!("raw resource xboxservices is unavailable: {err}"),
+                    )?;
+                    Ok(0)
+                }
+            };
+        }
+        if method_class == "Landroid/content/ContextWrapper;"
+            && matches!(
+                (method_name.as_str(), method_sig.as_str()),
+                ("getFilesDir" | "getCacheDir", "()Ljava/io/File;")
+            )
+        {
+            let leaf = if method_name == "getFilesDir" {
+                "files"
+            } else {
+                "cache"
+            };
+            let path = format!("/data/data/{}/{leaf}", self.jni_package_name);
+            return self.new_jni_file(&path);
+        }
+        let value = match (
+            method_class.as_str(),
+            method_name.as_str(),
+            method_sig.as_str(),
+        ) {
+            (_, "getLocale", "()Ljava/lang/String;") if is_activity => "en_US".to_string(),
+            (
+                "Lcom/mojang/minecraftpe/HardwareInformation;",
+                "getDeviceModelName",
+                "()Ljava/lang/String;",
+            ) => "AEMU".to_string(),
+            (_, "getDeviceModel", "()Ljava/lang/String;") if is_activity => "AEMU".to_string(),
+            (
+                "Lcom/mojang/minecraftpe/HardwareInformation;",
+                "getAndroidVersion",
+                "()Ljava/lang/String;",
+            ) => "Android 4.4.4".to_string(),
+            (_, "getExternalStoragePath", "()Ljava/lang/String;") if is_activity => {
+                "/sdcard".to_string()
+            }
+            (_, "getPackageName", "()Ljava/lang/String;")
+                if is_activity || method_class == "Landroid/content/Context;" =>
+            {
+                self.jni_package_name.clone()
+            }
+            (
+                "Lcom/mojang/minecraftpe/HardwareInformation;",
+                "getCPUType",
+                "()Ljava/lang/String;",
+            ) => "armeabi-v7a".to_string(),
+            (
+                "Lcom/mojang/minecraftpe/HardwareInformation;",
+                "getCPUName",
+                "()Ljava/lang/String;",
+            ) => "ARMv7 Processor".to_string(),
+            (
+                "Lcom/mojang/minecraftpe/HardwareInformation;",
+                "getCPUFeatures",
+                "()Ljava/lang/String;",
+            ) => "vfpv3 neon".to_string(),
+            (
+                "Lcom/microsoft/xbox/idp/interop/Interop;",
+                "getSystemProxy",
+                "()Ljava/lang/String;",
+            ) => String::new(),
+            _ => {
+                return Err(NativeRuntimeError::UnsupportedJniMethod {
+                    operation,
+                    name: method_name,
+                    signature: method_sig,
+                });
+            }
         };
-        self.write_guest_c_string(value)
+        self.write_jni_string(&value)
+    }
+
+    fn get_jni_static_object_field(&mut self) -> Result<u32, NativeRuntimeError> {
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(
+                "JNI static object field class is null".to_string(),
+            ));
+        }
+        let field = self.require_jni_field("static object field read", self.cpu.reg(2), true)?;
+        let field_class = field.class_descriptor.clone();
+        let field_name = field.name.clone();
+        let field_sig = field.sig.clone();
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI get static object field name={:?} sig={:?}",
+                field_name, field_sig
+            );
+        }
+        let value = match (
+            field_class.as_str(),
+            field_name.as_str(),
+            field_sig.as_str(),
+        ) {
+            ("Landroid/content/Context;", "INPUT_METHOD_SERVICE", "Ljava/lang/String;") => {
+                "input_method"
+            }
+            ("Landroid/os/Build;", "MANUFACTURER" | "MODEL", "Ljava/lang/String;") => "AEMU",
+            _ => {
+                return Err(NativeRuntimeError::UnsupportedJniMethod {
+                    operation: "static object field read",
+                    name: field_name,
+                    signature: field_sig,
+                });
+            }
+        };
+        self.write_jni_string(value)
+    }
+
+    fn get_jni_static_int_field(&self) -> Result<u32, NativeRuntimeError> {
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(
+                "JNI static int field class is null".to_string(),
+            ));
+        }
+        let field = self.require_jni_field("static int field read", self.cpu.reg(2), true)?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI get static int field name={:?} sig={:?}",
+                field.name, field.sig
+            );
+        }
+        match (
+            field.class_descriptor.as_str(),
+            field.name.as_str(),
+            field.sig.as_str(),
+        ) {
+            ("Landroid/os/Build$VERSION;", "SDK_INT", "I") => Ok(19),
+            _ => Err(self.unsupported_jni_method("static int field read", field)),
+        }
     }
 
     fn call_jni_string_array(&mut self, values: &[&str]) -> Result<u32, NativeRuntimeError> {
@@ -3647,7 +5528,7 @@ impl NativeRuntime {
         let array = self.alloc_guest_zeroed(bytes, 4)?;
         self.store_runtime32(array, count)?;
         for (idx, value) in values.iter().enumerate() {
-            let string = self.write_guest_c_string(value)?;
+            let string = self.write_jni_string(value)?;
             let offset = 4u32
                 .checked_add(
                     u32::try_from(idx)
@@ -3658,11 +5539,68 @@ impl NativeRuntime {
                 .ok_or(NativeRuntimeError::AddressOverflow)?;
             self.store_runtime32(array.wrapping_add(offset), string)?;
         }
+        self.jni_arrays.push(JniArray {
+            handle: array,
+            data: array.wrapping_add(4),
+            len: count,
+            kind: JniArrayKind::Object,
+            descriptor: "[Ljava/lang/String;".to_string(),
+        });
         Ok(array)
     }
 
-    fn call_jni_get_image_data(&mut self) -> Result<u32, NativeRuntimeError> {
-        let Some((width, height, pixels)) = self.load_jni_image_data_arg()? else {
+    fn call_jni_get_file_data_bytes(
+        &mut self,
+        layout: JniCallArgLayout,
+    ) -> Result<u32, NativeRuntimeError> {
+        let path_ref = self.jni_reference_arg(layout, 0)?;
+        let path = self.load_jni_utf8_reference(path_ref, "file-data path")?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!("JNI getFileDataBytes path_ref={path_ref:#010x} path={path:?}");
+        }
+        if path.is_empty() {
+            return Ok(0);
+        }
+        let bytes = match self.hle.load_android_file_or_asset_bytes(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+                    eprintln!("JNI getFileDataBytes path={path:?} unavailable: {err}");
+                }
+                return Ok(0);
+            }
+        };
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!("JNI getFileDataBytes path={path:?} bytes={}", bytes.len());
+        }
+        self.new_jni_byte_array(&bytes)
+    }
+
+    fn new_jni_byte_array(&mut self, bytes: &[u8]) -> Result<u32, NativeRuntimeError> {
+        let len = u32::try_from(bytes.len()).map_err(|_| NativeRuntimeError::AddressOverflow)?;
+        let data = self.alloc_guest_zeroed(len.max(1), 1)?;
+        self.link
+            .memory
+            .load_bytes(data, bytes)
+            .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        let handle = self.alloc_guest_zeroed(8, 4)?;
+        self.store_runtime32(handle, len)?;
+        self.store_runtime32(handle.wrapping_add(4), data)?;
+        self.jni_arrays.push(JniArray {
+            handle,
+            data,
+            len,
+            kind: JniArrayKind::Byte,
+            descriptor: "[B".to_string(),
+        });
+        Ok(handle)
+    }
+
+    fn call_jni_get_image_data(
+        &mut self,
+        layout: JniCallArgLayout,
+    ) -> Result<u32, NativeRuntimeError> {
+        let Some((width, height, pixels)) = self.load_jni_image_data_arg(layout)? else {
             return Ok(0);
         };
         let pixel_len =
@@ -3691,49 +5629,86 @@ impl NativeRuntime {
         let handle = self.alloc_guest_zeroed(8, 4)?;
         self.store_runtime32(handle, array_len)?;
         self.store_runtime32(handle.wrapping_add(4), data)?;
+        self.jni_arrays.push(JniArray {
+            handle,
+            data,
+            len: array_len,
+            kind: JniArrayKind::Int,
+            descriptor: "[I".to_string(),
+        });
         Ok(handle)
     }
 
     fn load_jni_image_data_arg(
         &mut self,
+        layout: JniCallArgLayout,
     ) -> Result<Option<(u32, u32, Vec<u32>)>, NativeRuntimeError> {
-        let arg = self.cpu.reg(3);
-        for path_ptr in [Some(arg), self.load_runtime32(arg).ok()]
-            .into_iter()
-            .flatten()
-        {
-            let Ok(path) = self.load_guest_c_string(path_ptr, 4096) else {
-                continue;
-            };
-            if let Ok(image) = self.hle.load_apk_image_argb_pixels(&path) {
-                return Ok(Some(image));
-            }
+        let arg = self.jni_reference_arg(layout, 0)?;
+        let path = self.load_jni_utf8_reference(arg, "image path")?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!("JNI getImageData path_ref={arg:#010x} path={path:?}");
         }
-        Ok(None)
+        Ok(self.hle.load_apk_image_argb_pixels(&path).ok())
     }
 
     fn jni_array_len(&mut self) -> Result<u32, NativeRuntimeError> {
         let array = self.cpu.reg(1);
         if array == 0 {
+            self.set_jni_exception(
+                "Ljava/lang/NullPointerException;",
+                "JNI GetArrayLength array is null".to_string(),
+            )?;
             return Ok(0);
         }
-        self.load_runtime32(array)
+        self.jni_arrays
+            .iter()
+            .find(|entry| entry.handle == array)
+            .map(|entry| entry.len)
+            .ok_or_else(|| {
+                NativeRuntimeError::Memory(format!(
+                    "JNI GetArrayLength received unknown array {array:#010x}"
+                ))
+            })
     }
 
     fn jni_object_array_element(&mut self) -> Result<u32, NativeRuntimeError> {
         let array = self.cpu.reg(1);
         let index = self.cpu.reg(2);
         if array == 0 {
+            self.set_jni_exception(
+                "Ljava/lang/NullPointerException;",
+                "JNI GetObjectArrayElement array is null".to_string(),
+            )?;
             return Ok(0);
         }
-        let len = self.load_runtime32(array)?;
-        if index >= len {
+        let entry = self
+            .jni_arrays
+            .iter()
+            .find(|entry| entry.handle == array && entry.kind == JniArrayKind::Object)
+            .cloned()
+            .ok_or_else(|| {
+                NativeRuntimeError::Memory(format!(
+                    "JNI GetObjectArrayElement received non-object array {array:#010x}"
+                ))
+            })?;
+        if index >= entry.len {
+            self.set_jni_exception(
+                "Ljava/lang/ArrayIndexOutOfBoundsException;",
+                format!("JNI object-array index {index} >= {}", entry.len),
+            )?;
             return Ok(0);
         }
-        self.load_runtime32(array.wrapping_add(4).wrapping_add(index.wrapping_mul(4)))
+        self.load_runtime32(entry.data.wrapping_add(index.wrapping_mul(4)))
     }
 
     fn jni_int_array_elements(&mut self) -> Result<u32, NativeRuntimeError> {
+        self.jni_primitive_array_elements(JniArrayKind::Int)
+    }
+
+    fn jni_primitive_array_elements(
+        &mut self,
+        kind: JniArrayKind,
+    ) -> Result<u32, NativeRuntimeError> {
         if self.cpu.reg(2) != 0 {
             self.link
                 .memory
@@ -3742,30 +5717,489 @@ impl NativeRuntime {
         }
         let array = self.cpu.reg(1);
         if array == 0 {
+            self.set_jni_exception(
+                "Ljava/lang/NullPointerException;",
+                "JNI GetPrimitiveArrayElements array is null".to_string(),
+            )?;
             return Ok(0);
         }
-        self.load_runtime32(array.wrapping_add(4))
+        self.jni_arrays
+            .iter()
+            .find(|entry| entry.handle == array && entry.kind == kind)
+            .map(|entry| entry.data)
+            .ok_or_else(|| {
+                NativeRuntimeError::Memory(format!(
+                    "JNI GetPrimitiveArrayElements received wrong array {array:#010x}"
+                ))
+            })
     }
 
-    fn call_jni_int_method(&self) -> u32 {
-        let Some(method) = self.jni_method(self.cpu.reg(2)) else {
-            return 0;
+    fn jni_release_primitive_array_elements(
+        &mut self,
+        kind: JniArrayKind,
+    ) -> Result<u32, NativeRuntimeError> {
+        let array = self.cpu.reg(1);
+        let elements = self.cpu.reg(2);
+        let mode = self.cpu.reg(3) as i32;
+        let valid = self
+            .jni_arrays
+            .iter()
+            .any(|entry| entry.handle == array && entry.data == elements && entry.kind == kind);
+        if !valid || !matches!(mode, 0..=2) {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI ReleasePrimitiveArrayElements invalid array={array:#010x} elements={elements:#010x} mode={mode}"
+            )));
+        }
+        Ok(0)
+    }
+
+    fn jni_get_byte_array_region(&mut self) -> Result<u32, NativeRuntimeError> {
+        let array = self.cpu.reg(1);
+        let start = self.cpu.reg(2);
+        let len = self.cpu.reg(3);
+        let buffer = self.load_runtime32(self.cpu.reg(13))?;
+        let entry = self
+            .jni_arrays
+            .iter()
+            .find(|entry| entry.handle == array && entry.kind == JniArrayKind::Byte)
+            .cloned();
+        let Some(entry) = entry else {
+            if array == 0 {
+                self.set_jni_exception(
+                    "Ljava/lang/NullPointerException;",
+                    "JNI GetByteArrayRegion array is null".to_string(),
+                )?;
+                return Ok(0);
+            }
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI GetByteArrayRegion received non-byte array {array:#010x}"
+            )));
         };
-        match method.name.as_str() {
-            "getScreenWidth" | "_getScreenWidth" => 854,
-            "getScreenHeight" | "_getScreenHeight" => 480,
-            "getAndroidVersion" => 19,
-            _ => 0,
+        if buffer == 0 || start.checked_add(len).is_none_or(|end| end > entry.len) {
+            self.set_jni_exception(
+                "Ljava/lang/ArrayIndexOutOfBoundsException;",
+                format!(
+                    "JNI byte-array region start={start} len={len} array_len={} buffer={buffer:#010x}",
+                    entry.len
+                ),
+            )?;
+            return Ok(0);
+        }
+        for offset in 0..len {
+            let byte = self
+                .link
+                .memory
+                .load8(entry.data.wrapping_add(start).wrapping_add(offset))
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+            self.link
+                .memory
+                .store8(buffer.wrapping_add(offset), byte)
+                .map_err(|err| NativeRuntimeError::Memory(err.to_string()))?;
+        }
+        Ok(0)
+    }
+
+    fn call_jni_int_method(&self, is_static: bool) -> Result<u32, NativeRuntimeError> {
+        let operation = if is_static {
+            "static int call"
+        } else {
+            "int call"
+        };
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {operation} target is null"
+            )));
+        }
+        let method = self.require_jni_call_method(operation, self.cpu.reg(2), is_static)?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI call int static={} name={:?} sig={:?}",
+                method.is_static, method.name, method.sig
+            );
+        }
+        match (
+            method.class_descriptor.as_str(),
+            method.name.as_str(),
+            method.sig.as_str(),
+            method.is_static,
+        ) {
+            (class, "getScreenWidth" | "_getScreenWidth", "()I", false)
+                if class == self.jni_activity_descriptor =>
+            {
+                Ok(854)
+            }
+            (class, "getScreenHeight" | "_getScreenHeight", "()I", false)
+                if class == self.jni_activity_descriptor =>
+            {
+                Ok(480)
+            }
+            (class, "getAndroidVersion", "()I", false) if class == self.jni_activity_descriptor => {
+                Ok(19)
+            }
+            ("Lcom/mojang/minecraftpe/HardwareInformation;", "getNumCores", "()I", true) => Ok(4),
+            _ => Err(self.unsupported_jni_method(operation, method)),
         }
     }
 
-    fn call_jni_boolean_method(&self) -> u32 {
-        let Some(method) = self.jni_method(self.cpu.reg(2)) else {
-            return 0;
+    fn call_jni_boolean_method(
+        &mut self,
+        layout: JniCallArgLayout,
+        is_static: bool,
+    ) -> Result<u32, NativeRuntimeError> {
+        let operation = if is_static {
+            "static boolean call"
+        } else {
+            "boolean call"
         };
-        match method.name.as_str() {
-            "isTouchscreenAvailable" => 1,
-            _ => 0,
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {operation} target is null"
+            )));
+        }
+        let method = self
+            .require_jni_call_method(operation, self.cpu.reg(2), is_static)?
+            .clone();
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI call boolean static={} name={:?} sig={:?}",
+                method.is_static, method.name, method.sig
+            );
+        }
+        let is_activity = method.class_descriptor == self.jni_activity_descriptor;
+        match (method.name.as_str(), method.sig.as_str(), method.is_static) {
+            ("isTouchscreenAvailable", "()Z", false) if is_activity => Ok(1),
+            ("isFirstSnooperStart", "()Z", false) if is_activity => {
+                Ok(u32::from(self.jni_device_id.is_none()))
+            }
+            ("hasHardwareChanged", "()Z", false) if is_activity => {
+                let changed = self.jni_last_android_release.as_deref() != Some("4.4.4");
+                self.jni_last_android_release = Some("4.4.4".to_string());
+                Ok(u32::from(changed))
+            }
+            ("isTablet", "()Z", false) if is_activity => Ok(0),
+            ("isNetworkEnabled", "(Z)Z", false) if is_activity => {
+                let _requested = self.jni_u32_arg(layout, 0)?;
+                Ok(0)
+            }
+            ("showSoftInput", "(Landroid/view/View;I)Z", false)
+                if method.class_descriptor == "Landroid/view/inputmethod/InputMethodManager;" =>
+            {
+                let _view = self.jni_reference_arg(layout, 0)?;
+                let _flags = self.jni_u32_arg(layout, 1)?;
+                Ok(0)
+            }
+            ("hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z", false)
+                if method.class_descriptor == "Landroid/view/inputmethod/InputMethodManager;" =>
+            {
+                let _token = self.jni_reference_arg(layout, 0)?;
+                let _flags = self.jni_u32_arg(layout, 1)?;
+                Ok(0)
+            }
+            _ => Err(self.unsupported_jni_method(operation, &method)),
+        }
+    }
+
+    fn call_jni_long_method(&self) -> Result<u64, NativeRuntimeError> {
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(
+                "JNI long call target is null".to_string(),
+            ));
+        }
+        let method = self.require_jni_call_method("long call", self.cpu.reg(2), false)?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI call long static={} name={:?} sig={:?}",
+                method.is_static, method.name, method.sig
+            );
+        }
+        match (
+            method.class_descriptor.as_str(),
+            method.name.as_str(),
+            method.sig.as_str(),
+        ) {
+            (class, "getTotalMemory", "()J") if class == self.jni_activity_descriptor => {
+                Ok(ANDROID_TOTAL_MEMORY_BYTES)
+            }
+            _ => Err(self.unsupported_jni_method("long call", method)),
+        }
+    }
+
+    fn call_jni_float_method(&self) -> Result<f32, NativeRuntimeError> {
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(
+                "JNI float call target is null".to_string(),
+            ));
+        }
+        let method = self.require_jni_call_method("float call", self.cpu.reg(2), false)?;
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI call float static={} name={:?} sig={:?}",
+                method.is_static, method.name, method.sig
+            );
+        }
+        match (
+            method.class_descriptor.as_str(),
+            method.name.as_str(),
+            method.sig.as_str(),
+        ) {
+            (class, "getPixelsPerMillimeter", "()F") if class == self.jni_activity_descriptor => {
+                Ok(160.0 / 25.4)
+            }
+            (class, "getKeyboardHeight", "()F") if class == self.jni_activity_descriptor => Ok(0.0),
+            _ => Err(self.unsupported_jni_method("float call", method)),
+        }
+    }
+
+    fn call_jni_void_method(
+        &mut self,
+        layout: JniCallArgLayout,
+        is_static: bool,
+    ) -> Result<u32, NativeRuntimeError> {
+        let operation = if is_static {
+            "static void call"
+        } else {
+            "void call"
+        };
+        if self.cpu.reg(1) == 0 {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {operation} target is null"
+            )));
+        }
+        let method = self
+            .require_jni_call_method(operation, self.cpu.reg(2), is_static)?
+            .clone();
+        if std::env::var_os("AEMU_TRACE_JNI").is_some() {
+            eprintln!(
+                "JNI call void static={} name={:?} sig={:?}",
+                method.is_static, method.name, method.sig
+            );
+        }
+        let method_class = method.class_descriptor;
+        let method_name = method.name;
+        let method_sig = method.sig;
+        if method_class == "Lcom/mojang/minecraftpe/store/Store;"
+            && method_name == "destructor"
+            && method_sig == "()V"
+        {
+            let target = self.cpu.reg(1);
+            let before = self.jni_stores.len();
+            self.jni_stores.retain(|store| store.handle != target);
+            if self.jni_stores.len() == before {
+                return Err(NativeRuntimeError::Memory(format!(
+                    "JNI store destructor received unknown store {target:#010x}"
+                )));
+            }
+            return Ok(0);
+        }
+        match (method_name.as_str(), method_sig.as_str()) {
+            ("vibrate", "(I)V") if method_class == self.jni_activity_descriptor => {
+                let millis = (self.jni_u32_arg(layout, 0)? as i32) as i64;
+                self.record_jni_vibration(millis);
+                Ok(0)
+            }
+            ("vibrate", "(J)V") if method_class == "Landroid/os/Vibrator;" => {
+                let millis = self.jni_first_u64_arg(layout)? as i64;
+                self.record_jni_vibration(millis);
+                Ok(0)
+            }
+            ("updateLocalization", "(Ljava/lang/String;Ljava/lang/String;)V")
+                if method_class == self.jni_activity_descriptor =>
+            {
+                let key_ref = self.jni_reference_arg(layout, 0)?;
+                let value_ref = self.jni_reference_arg(layout, 1)?;
+                let key = self.load_jni_utf8_reference(key_ref, "localization key")?;
+                let value = self.load_jni_utf8_reference(value_ref, "localization value")?;
+                self.jni_localization.insert(key, value);
+                Ok(0)
+            }
+            _ => Err(NativeRuntimeError::UnsupportedJniMethod {
+                operation,
+                name: method_name,
+                signature: method_sig,
+            }),
+        }
+    }
+
+    fn record_jni_vibration(&mut self, millis: i64) {
+        self.jni_vibration_count = self.jni_vibration_count.saturating_add(1);
+        self.jni_last_vibration_millis = Some(millis);
+    }
+
+    fn jni_reference_arg(
+        &mut self,
+        layout: JniCallArgLayout,
+        index: u32,
+    ) -> Result<u32, NativeRuntimeError> {
+        self.jni_u32_arg(layout, index)
+    }
+
+    fn jni_first_u64_arg(&mut self, layout: JniCallArgLayout) -> Result<u64, NativeRuntimeError> {
+        let raw_address = match layout {
+            // env/class/method consume r0-r2. AAPCS32 rounds the next core-register
+            // number from r3 to r4 for an 8-byte vararg, placing the value on stack.
+            JniCallArgLayout::Direct => self.cpu.reg(13),
+            JniCallArgLayout::VaList | JniCallArgLayout::Array => self.cpu.reg(3),
+        };
+        let address = raw_address
+            .checked_add(7)
+            .ok_or(NativeRuntimeError::AddressOverflow)?
+            & !7;
+        let high_address = address
+            .checked_add(4)
+            .ok_or(NativeRuntimeError::AddressOverflow)?;
+        Ok(u64::from(self.load_runtime32(address)?)
+            | (u64::from(self.load_runtime32(high_address)?) << 32))
+    }
+
+    fn jni_u32_arg(
+        &mut self,
+        layout: JniCallArgLayout,
+        index: u32,
+    ) -> Result<u32, NativeRuntimeError> {
+        let address = match layout {
+            JniCallArgLayout::Direct if index == 0 => return Ok(self.cpu.reg(3)),
+            JniCallArgLayout::Direct => self
+                .cpu
+                .reg(13)
+                .checked_add(
+                    (index - 1)
+                        .checked_mul(4)
+                        .ok_or(NativeRuntimeError::AddressOverflow)?,
+                )
+                .ok_or(NativeRuntimeError::AddressOverflow)?,
+            JniCallArgLayout::VaList => self
+                .cpu
+                .reg(3)
+                .checked_add(
+                    index
+                        .checked_mul(4)
+                        .ok_or(NativeRuntimeError::AddressOverflow)?,
+                )
+                .ok_or(NativeRuntimeError::AddressOverflow)?,
+            JniCallArgLayout::Array => self
+                .cpu
+                .reg(3)
+                .checked_add(
+                    index
+                        .checked_mul(8)
+                        .ok_or(NativeRuntimeError::AddressOverflow)?,
+                )
+                .ok_or(NativeRuntimeError::AddressOverflow)?,
+        };
+        self.load_runtime32(address)
+    }
+
+    fn load_jni_utf8_reference(
+        &mut self,
+        reference: u32,
+        label: &str,
+    ) -> Result<String, NativeRuntimeError> {
+        if reference == 0 {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {label} reference is null"
+            )));
+        }
+        if self.jni_object_descriptor(reference) != Some("Ljava/lang/String;") {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {label} reference {reference:#010x} is not a java.lang.String"
+            )));
+        }
+        self.load_guest_c_string(reference, 64 * 1024)
+            .map_err(|err| NativeRuntimeError::Memory(format!("invalid JNI {label}: {err}")))
+    }
+
+    fn require_jni_method(
+        &self,
+        operation: &'static str,
+        id: u32,
+    ) -> Result<&JniMethod, NativeRuntimeError> {
+        self.jni_method(id)
+            .ok_or(NativeRuntimeError::UnknownJniMethodId {
+                operation,
+                method_id: id,
+            })
+    }
+
+    fn require_jni_call_method(
+        &self,
+        operation: &'static str,
+        id: u32,
+        is_static: bool,
+    ) -> Result<&JniMethod, NativeRuntimeError> {
+        let method = self.require_jni_method(operation, id)?;
+        if method.kind != DexMemberKind::Method || method.is_static != is_static {
+            return Err(self.unsupported_jni_method(operation, method));
+        }
+        self.validate_jni_member_target(operation, method, self.cpu.reg(1), is_static)?;
+        Ok(method)
+    }
+
+    fn require_jni_field(
+        &self,
+        operation: &'static str,
+        id: u32,
+        is_static: bool,
+    ) -> Result<&JniMethod, NativeRuntimeError> {
+        let field = self.require_jni_method(operation, id)?;
+        if field.kind != DexMemberKind::Field || field.is_static != is_static {
+            return Err(self.unsupported_jni_method(operation, field));
+        }
+        self.validate_jni_member_target(operation, field, self.cpu.reg(1), is_static)?;
+        Ok(field)
+    }
+
+    fn validate_jni_member_target(
+        &self,
+        operation: &'static str,
+        member: &JniMethod,
+        target: u32,
+        is_static: bool,
+    ) -> Result<(), NativeRuntimeError> {
+        let actual = if is_static {
+            self.jni_classes
+                .iter()
+                .find(|class| class.handle == target)
+                .map(|class| class.descriptor.as_str())
+        } else if self.jni_classes.iter().any(|class| class.handle == target) {
+            Some("Ljava/lang/Class;")
+        } else if let Some(object) = self
+            .jni_objects
+            .iter()
+            .find(|object| object.handle == target)
+        {
+            Some(object.class_descriptor.as_str())
+        } else {
+            self.jni_arrays
+                .iter()
+                .find(|array| array.handle == target)
+                .map(|array| array.descriptor.as_str())
+        };
+        let Some(actual) = actual else {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {operation} received unknown target {target:#010x}"
+            )));
+        };
+        if !self
+            .jni_declarations
+            .is_assignable_to(actual, &member.class_descriptor)
+        {
+            return Err(NativeRuntimeError::Memory(format!(
+                "JNI {operation} target {target:#010x} has class {actual}, not {}",
+                member.class_descriptor
+            )));
+        }
+        Ok(())
+    }
+
+    fn unsupported_jni_method(
+        &self,
+        operation: &'static str,
+        method: &JniMethod,
+    ) -> NativeRuntimeError {
+        NativeRuntimeError::UnsupportedJniMethod {
+            operation,
+            name: method.name.clone(),
+            signature: method.sig.clone(),
         }
     }
 
@@ -4128,6 +6562,70 @@ impl NativeRuntime {
         row["sha1"] = serde_json::json!(hex_lower(&sha1.finalize()));
         row
     }
+}
+
+fn is_supported_jni_version(version: u32) -> bool {
+    matches!(
+        version,
+        JNI_VERSION_1_1 | JNI_VERSION_1_2 | JNI_VERSION_1_4 | JNI_VERSION_1_6
+    )
+}
+
+fn jni_find_class_descriptor(name: &str) -> Option<String> {
+    if name.starts_with('[') {
+        return valid_jni_array_descriptor(name).then(|| name.to_string());
+    }
+    valid_jni_internal_class_name(name).then(|| format!("L{name};"))
+}
+
+fn jni_binary_class_descriptor(name: &str) -> Option<String> {
+    if name.starts_with('[') {
+        let descriptor = name.replace('.', "/");
+        return valid_jni_array_descriptor(&descriptor).then_some(descriptor);
+    }
+    if name.starts_with('L') && name.ends_with(';') || name.contains('/') && name.contains('.') {
+        return None;
+    }
+    let internal = if name.contains('/') {
+        name.to_string()
+    } else {
+        name.replace('.', "/")
+    };
+    valid_jni_internal_class_name(&internal).then(|| format!("L{internal};"))
+}
+
+fn valid_jni_internal_class_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains(['.', ';', '[', '\0'])
+        && name.split('/').all(|component| !component.is_empty())
+}
+
+fn valid_jni_array_descriptor(descriptor: &str) -> bool {
+    let component = descriptor.trim_start_matches('[');
+    if component.len() == descriptor.len() || component.is_empty() {
+        return false;
+    }
+    if matches!(component, "Z" | "B" | "C" | "S" | "I" | "J" | "F" | "D") {
+        return true;
+    }
+    component
+        .strip_prefix('L')
+        .and_then(|name| name.strip_suffix(';'))
+        .is_some_and(valid_jni_internal_class_name)
+}
+
+fn package_name_from_class_descriptor(descriptor: &str) -> Option<String> {
+    let internal = descriptor.strip_prefix('L')?.strip_suffix(';')?;
+    let (package, _) = internal.rsplit_once('/')?;
+    valid_jni_internal_class_name(internal).then(|| package.replace('/', "."))
+}
+
+fn uuid_hex_from_digest(digest: &[u8]) -> String {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    hex_lower(&bytes)
 }
 
 fn parse_trace_pc_ranges() -> Vec<(u32, u32)> {
@@ -4570,6 +7068,22 @@ fn parse_trace_hle_filter() -> Option<HleTraceFilter> {
     parse_trace_hle_filter_raw(&raw)
 }
 
+fn function_diagnostics_requested() -> bool {
+    const ENV_NAMES: &[&str] = &[
+        "AEMU_TRACE_PC_RANGE",
+        "AEMU_TRACE_MEM32",
+        "AEMU_TRACE_MEM32_DEREF",
+        "AEMU_TRACE_CXX_STRING",
+        "AEMU_TRACE_NATIVE_EVENTS_JSONL",
+        "AEMU_TRACE_STEPS",
+        "AEMU_TRACE_HLE",
+        "AEMU_TRACE_TAIL",
+    ];
+    ENV_NAMES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+}
+
 fn parse_trace_hle_filter_raw(raw: &str) -> Option<HleTraceFilter> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -4589,10 +7103,10 @@ fn parse_trace_hle_filter_raw(raw: &str) -> Option<HleTraceFilter> {
     }
 }
 
-fn collect_linked_runtime_hle_traps(link: &NativeLinkReport) -> Vec<RuntimeHleTrap> {
+fn linked_cxx_dynamic_cast_trap(link: &NativeLinkReport) -> Option<RuntimeHleTrap> {
     link.global_symbols
         .iter()
-        .filter_map(|symbol| match symbol.name.as_str() {
+        .find_map(|symbol| match symbol.name.as_str() {
             "__dynamic_cast" => Some(RuntimeHleTrap {
                 address: symbol.address & !1,
                 isa: if symbol.address & 1 != 0 {
@@ -4605,7 +7119,6 @@ fn collect_linked_runtime_hle_traps(link: &NativeLinkReport) -> Vec<RuntimeHleTr
             }),
             _ => None,
         })
-        .collect()
 }
 
 #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
@@ -4623,52 +7136,9 @@ fn collect_dynarmic_executable_ranges(link: &NativeLinkReport) -> Vec<(u32, u32)
     object_ranges.chain(hle_ranges).collect()
 }
 
-fn build_minecraft_resource_bridge(link: &NativeLinkReport) -> Option<MinecraftResourceBridge> {
-    let render = link_symbol_address_in_library(link, MCPE_LIBRARY, MCPE_GAME_RENDERER_RENDER)?;
-    let on_resources_loaded =
-        link_symbol_address_in_library(link, MCPE_LIBRARY, MCPE_ON_RESOURCES_LOADED)?;
-    Some(MinecraftResourceBridge {
-        render_resource_gate_pc: (render & !1)
-            .wrapping_add(MCPE_GAME_RENDERER_RENDER_RESOURCE_GATE_OFFSET),
-        on_resources_loaded,
-    })
-}
-
-fn minecraft_resource_bridge_enabled() -> bool {
-    if std::env::var_os("AEMU_DISABLE_MCPE_RESOURCE_BRIDGE").is_some() {
-        return false;
-    }
-    std::env::var_os("AEMU_ENABLE_MCPE_RESOURCE_BRIDGE").is_some()
-        || std::env::var_os("AEMU_MCPE_HLE_GAME_LOGIC").is_some()
-}
-
-fn minecraft_on_resources_loaded_steps() -> usize {
-    std::env::var(MCPE_ON_RESOURCES_LOADED_STEPS_ENV)
-        .ok()
-        .and_then(|raw| parse_nonzero_usize(&raw))
-        .unwrap_or(MCPE_ON_RESOURCES_LOADED_STEPS)
-}
-
 fn parse_nonzero_usize(raw: &str) -> Option<usize> {
     let value = raw.trim().parse().ok()?;
     (value != 0).then_some(value)
-}
-
-fn link_symbol_address_in_library(
-    link: &NativeLinkReport,
-    library_name: &str,
-    name: &str,
-) -> Option<u32> {
-    link.objects
-        .iter()
-        .find(|object| object.library_name == library_name)
-        .and_then(|object| {
-            object
-                .defined_symbols
-                .iter()
-                .find(|symbol| symbol.name == name)
-                .map(|symbol| symbol.address)
-        })
 }
 
 fn collect_unwind_tables(link: &NativeLinkReport) -> Vec<HleUnwindTable> {
@@ -4718,7 +7188,7 @@ mod tests {
 
     use crate::armv7a::Memory;
     use crate::guest_memory::MappedMemory;
-    use crate::hle_imports::{HleCallBehavior, HleSymbolKind, HleSymbolShape};
+    use crate::hle_imports::{HleCallBehavior, HleDataInit, HleSymbolKind, HleSymbolShape};
     use crate::native_loader::{
         DEFAULT_HLE_BASE, HleSymbol, LoadedNativeObject, NativeLinkReport, NativeSymbol,
     };
@@ -4853,6 +7323,37 @@ mod tests {
             Some(NativeCpuBackendKind::Dynarmic)
         );
         assert_eq!(NativeCpuBackendKind::parse("unknown"), None);
+    }
+
+    #[test]
+    fn hle_address_index_resolves_symbol_ranges_without_covering_gaps() {
+        let symbols = vec![
+            HleSymbol {
+                name: "function".to_string(),
+                address: 0x6f00_0000,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Function,
+                behavior: HleCallBehavior::Implemented,
+            },
+            HleSymbol {
+                name: "data".to_string(),
+                address: 0x6f00_0010,
+                kind: HleSymbolKind::Libc,
+                shape: HleSymbolShape::Data {
+                    size: 6,
+                    init: HleDataInit::Zero,
+                },
+                behavior: HleCallBehavior::Implemented,
+            },
+        ];
+        let index = HleAddressIndex::new(&symbols).unwrap();
+
+        assert_eq!(index.symbol_index(0x6f00_0000, &symbols), Some(0));
+        assert_eq!(index.symbol_index(0x6f00_0003, &symbols), Some(0));
+        assert_eq!(index.symbol_index(0x6f00_0004, &symbols), None);
+        assert_eq!(index.symbol_index(0x6f00_0010, &symbols), Some(1));
+        assert_eq!(index.symbol_index(0x6f00_0015, &symbols), Some(1));
+        assert_eq!(index.symbol_index(0x6f00_0016, &symbols), None);
     }
 
     #[test]
@@ -5009,76 +7510,6 @@ mod tests {
 
         assert_eq!(words % 4, 0);
         assert_eq!(runtime.link.memory.load32(words).unwrap(), 0xe12f_ff1e);
-    }
-
-    #[test]
-    fn builds_minecraft_resource_bridge_from_target_symbols() {
-        let report = minecraft_resource_bridge_test_report();
-
-        assert_eq!(
-            build_minecraft_resource_bridge(&report),
-            Some(MinecraftResourceBridge {
-                render_resource_gate_pc: 0x70ec_c8f2,
-                on_resources_loaded: 0x70bb_eb1d,
-            })
-        );
-    }
-
-    #[test]
-    fn does_not_install_minecraft_resource_bridge_by_default() {
-        let report = minecraft_resource_bridge_test_report();
-        let config = NativeRuntimeConfig {
-            stack_base: 0x5000_1000,
-            stack_size: 0x1000,
-            tls_base: 0x5000_2000,
-            tls_size: 0x1000,
-            heap_base: 0x5000_3000,
-            heap_size: 0x1000,
-        };
-        let runtime = NativeRuntime::new(report, config).unwrap();
-
-        assert_eq!(runtime.minecraft_resource_bridge, None);
-    }
-
-    fn minecraft_resource_bridge_test_report() -> NativeLinkReport {
-        NativeLinkReport {
-            apk_path: PathBuf::from("mcpe.apk"),
-            abi: "armeabi-v7a".to_string(),
-            memory: MappedMemory::new(),
-            objects: vec![LoadedNativeObject {
-                entry_name: "lib/armeabi-v7a/libminecraftpe.so".to_string(),
-                library_name: MCPE_LIBRARY.to_string(),
-                load_bias: 0x7050_0000,
-                memory_base: 0x7050_0000,
-                memory_size: 0x200_0000,
-                executable_ranges: Vec::new(),
-                entry: 0,
-                needed: Vec::new(),
-                imports: Vec::new(),
-                defined_symbols: vec![
-                    NativeSymbol {
-                        name: MCPE_GAME_RENDERER_RENDER.to_string(),
-                        address: 0x70ec_c755,
-                        library_name: MCPE_LIBRARY.to_string(),
-                    },
-                    NativeSymbol {
-                        name: MCPE_ON_RESOURCES_LOADED.to_string(),
-                        address: 0x70bb_eb1d,
-                        library_name: MCPE_LIBRARY.to_string(),
-                    },
-                ],
-                relocations: Vec::new(),
-                relocation_count: 0,
-                init: None,
-                init_array: None,
-                arm_exidx: None,
-            }],
-            global_symbols: Vec::new(),
-            hle_symbols: Vec::new(),
-            resolved_imports: Vec::new(),
-            unresolved_imports: Vec::new(),
-            relocation_errors: Vec::new(),
-        }
     }
 
     #[test]
@@ -5478,6 +7909,68 @@ mod tests {
     }
 
     #[test]
+    fn release_batch_and_diagnostic_loop_match_hle_side_exit() {
+        fn runtime(diagnostic: bool) -> NativeRuntime {
+            let code_address = 0x4000_0000;
+            let hle_address = code_address + 8;
+            let mut memory = MappedMemory::new();
+            memory.map_zeroed(code_address, 0x1000).unwrap();
+            memory.store32(code_address, 0xe280_0001).unwrap(); // add r0, r0, #1
+            memory.store32(code_address + 4, 0xe280_0001).unwrap();
+            memory.store32(hle_address, HLE_TRAP_ARM_INSTR).unwrap();
+            let report = NativeLinkReport {
+                apk_path: PathBuf::from("test.apk"),
+                abi: "armeabi-v7a".to_string(),
+                memory,
+                objects: Vec::new(),
+                global_symbols: Vec::new(),
+                hle_symbols: vec![HleSymbol {
+                    name: "eglSwapBuffers".to_string(),
+                    address: hle_address,
+                    kind: HleSymbolKind::Egl,
+                    shape: HleSymbolShape::Function,
+                    behavior: HleCallBehavior::Implemented,
+                }],
+                resolved_imports: Vec::new(),
+                unresolved_imports: Vec::new(),
+                relocation_errors: Vec::new(),
+            };
+            let config = NativeRuntimeConfig {
+                stack_base: 0x5000_1000,
+                stack_size: 0x1000,
+                tls_base: 0x5000_2000,
+                tls_size: 0x1000,
+                heap_base: 0x5000_3000,
+                heap_size: 0x1000,
+            };
+            let mut runtime = NativeRuntime::new(report, config).unwrap();
+            runtime.function_diagnostics_enabled = diagnostic;
+            runtime
+        }
+
+        let mut release = runtime(false);
+        let mut diagnostic = runtime(true);
+        let release_exit = release
+            .run_function_with_args_until_hle(0x4000_0000, &[7, 4], 8, Some("eglSwapBuffers"))
+            .unwrap();
+        let diagnostic_exit = diagnostic
+            .run_function_with_args_until_hle(0x4000_0000, &[7, 4], 8, Some("eglSwapBuffers"))
+            .unwrap();
+
+        assert_eq!(release_exit, diagnostic_exit);
+        assert_eq!(
+            release_exit,
+            NativeRuntimeFunctionExit::HleCall {
+                name: "eglSwapBuffers".to_string(),
+                address: 0x4000_0008,
+                args: [9, 4, 0, 0],
+                step: 2,
+            }
+        );
+        assert_eq!(release.cpu, diagnostic.cpu);
+    }
+
+    #[test]
     fn continue_until_hle_resumes_after_stopped_hle_call() {
         let swap_address = 0x6f00_0000;
         let flush_address = 0x6f00_0004;
@@ -5543,7 +8036,7 @@ mod tests {
             NativeRuntimeFunctionExit::HleCall {
                 name: "glFlush".to_string(),
                 address: flush_address,
-                args: [1, 0, 0, 0],
+                args: [0, 0, 0, 0],
                 step: 0,
             }
         );
@@ -5636,8 +8129,49 @@ mod tests {
             heap_size: 0x4000,
         };
         let mut runtime = NativeRuntime::new(report, config).unwrap();
+        let activity_descriptor = runtime.jni_activity_descriptor.clone();
+        runtime
+            .jni_declarations
+            .insert_test_class(&activity_descriptor, Some("Landroid/app/NativeActivity;"));
+        for (name, signature) in [
+            ("method", "()Ljava/lang/String;"),
+            ("getLocale", "()Ljava/lang/String;"),
+            ("getScreenWidth", "()I"),
+            ("getPixelsPerMillimeter", "()F"),
+            (
+                "updateLocalization",
+                "(Ljava/lang/String;Ljava/lang/String;)V",
+            ),
+            ("vibrate", "(I)V"),
+        ] {
+            runtime.jni_declarations.insert_test_method(
+                &activity_descriptor,
+                name,
+                signature,
+                false,
+                false,
+            );
+        }
+        runtime.jni_declarations.insert_test_method(
+            &activity_descriptor,
+            "nativeMethod",
+            "()V",
+            false,
+            true,
+        );
         let harness = runtime.prepare_native_activity().unwrap();
         let env_vtable = runtime.link.memory.load32(harness.jni_env).unwrap();
+
+        let get_object_class = runtime.link.memory.load32(env_vtable + 0x7c).unwrap();
+        runtime
+            .run_function_with_args(
+                get_object_class,
+                &[harness.jni_env, harness.activity_class],
+                16,
+            )
+            .unwrap();
+        let activity_jclass = runtime.cpu.reg(0);
+        assert_ne!(activity_jclass, harness.activity_class);
 
         let new_global_ref = runtime.link.memory.load32(env_vtable + 0x54).unwrap();
         runtime
@@ -5648,6 +8182,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(runtime.cpu.reg(0), harness.activity_class);
+        runtime
+            .run_function_with_args(new_global_ref, &[harness.jni_env, 0], 16)
+            .unwrap();
+        assert_eq!(runtime.cpu.reg(0), 0);
 
         let method_name = runtime.write_guest_c_string("method").unwrap();
         let method_sig = runtime
@@ -5657,12 +8195,7 @@ mod tests {
         runtime
             .run_function_with_args(
                 get_method_id,
-                &[
-                    harness.jni_env,
-                    harness.activity_class,
-                    method_name,
-                    method_sig,
-                ],
+                &[harness.jni_env, activity_jclass, method_name, method_sig],
                 16,
             )
             .unwrap();
@@ -5674,12 +8207,7 @@ mod tests {
         runtime
             .run_function_with_args(
                 get_locale_id,
-                &[
-                    harness.jni_env,
-                    harness.activity_class,
-                    locale_name,
-                    method_sig,
-                ],
+                &[harness.jni_env, activity_jclass, locale_name, method_sig],
                 16,
             )
             .unwrap();
@@ -5709,12 +8237,28 @@ mod tests {
             "en_US"
         );
 
+        let get_string_length = runtime.link.memory.load32(env_vtable + 0x290).unwrap();
+        runtime
+            .run_function_with_args(get_string_length, &[harness.jni_env, locale_string], 16)
+            .unwrap();
+        assert_eq!(runtime.cpu.reg(0), 5);
+
+        let original = runtime.write_guest_c_string("copied").unwrap();
+        let new_string_utf = runtime.link.memory.load32(env_vtable + 0x29c).unwrap();
+        runtime
+            .run_function_with_args(new_string_utf, &[harness.jni_env, original], 16)
+            .unwrap();
+        let copied = runtime.cpu.reg(0);
+        assert_ne!(copied, original);
+        runtime.link.memory.store8(original, b'X').unwrap();
+        assert_eq!(runtime.load_guest_c_string(copied, 16).unwrap(), "copied");
+
         let width_name = runtime.write_guest_c_string("getScreenWidth").unwrap();
         let int_sig = runtime.write_guest_c_string("()I").unwrap();
         runtime
             .run_function_with_args(
                 get_method_id,
-                &[harness.jni_env, harness.activity_class, width_name, int_sig],
+                &[harness.jni_env, activity_jclass, width_name, int_sig],
                 16,
             )
             .unwrap();
@@ -5728,6 +8272,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(runtime.cpu.reg(0), 854);
+        let call_static_int_method = runtime.link.memory.load32(env_vtable + 0x204).unwrap();
+        let static_mismatch = runtime
+            .run_function_with_args(
+                call_static_int_method,
+                &[harness.jni_env, activity_jclass, width_id],
+                16,
+            )
+            .unwrap_err();
+        assert!(static_mismatch.to_string().contains("static int call"));
 
         let java_vm_out = runtime.alloc_guest_zeroed(4, 4).unwrap();
         let get_java_vm = runtime.link.memory.load32(env_vtable + 0x36c).unwrap();
@@ -5738,6 +8291,233 @@ mod tests {
         assert_eq!(
             runtime.link.memory.load32(java_vm_out).unwrap(),
             harness.java_vm
+        );
+
+        let pixels_name = runtime
+            .write_guest_c_string("getPixelsPerMillimeter")
+            .unwrap();
+        let float_sig = runtime.write_guest_c_string("()F").unwrap();
+        runtime
+            .run_function_with_args(
+                get_method_id,
+                &[harness.jni_env, activity_jclass, pixels_name, float_sig],
+                16,
+            )
+            .unwrap();
+        let pixels_id = runtime.cpu.reg(0);
+        let call_float_method_v = runtime.link.memory.load32(env_vtable + 0xe0).unwrap();
+        runtime
+            .run_function_with_args(
+                call_float_method_v,
+                &[harness.jni_env, harness.activity_class, pixels_id, 0],
+                16,
+            )
+            .unwrap();
+        assert_eq!(f32::from_bits(runtime.cpu.reg(0)), 160.0 / 25.4);
+
+        let native_name = runtime.write_guest_c_string("nativeMethod").unwrap();
+        let native_sig = runtime.write_guest_c_string("()V").unwrap();
+        let native_table = runtime.alloc_guest_zeroed(12, 4).unwrap();
+        runtime.store_runtime32(native_table, native_name).unwrap();
+        runtime
+            .store_runtime32(native_table.wrapping_add(4), native_sig)
+            .unwrap();
+        runtime
+            .store_runtime32(native_table.wrapping_add(8), 0x7000_0001)
+            .unwrap();
+        let register_natives = runtime.link.memory.load32(env_vtable + 0x35c).unwrap();
+        runtime
+            .run_function_with_args(
+                register_natives,
+                &[harness.jni_env, activity_jclass, native_table, 1],
+                16,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.jni_native_methods,
+            vec![JniNativeMethod {
+                class: activity_jclass,
+                name: "nativeMethod".to_string(),
+                signature: "()V".to_string(),
+                function: 0x7000_0001,
+            }]
+        );
+
+        let localization_name = runtime.write_guest_c_string("updateLocalization").unwrap();
+        let localization_sig = runtime
+            .write_guest_c_string("(Ljava/lang/String;Ljava/lang/String;)V")
+            .unwrap();
+        runtime
+            .run_function_with_args(
+                get_method_id,
+                &[
+                    harness.jni_env,
+                    activity_jclass,
+                    localization_name,
+                    localization_sig,
+                ],
+                16,
+            )
+            .unwrap();
+        let localization_id = runtime.cpu.reg(0);
+        let key = runtime.write_jni_string("menu.play").unwrap();
+        let first_value = runtime.write_jni_string("Play").unwrap();
+        let second_value = runtime.write_jni_string("Play now").unwrap();
+
+        let va_args = runtime.alloc_guest_zeroed(8, 4).unwrap();
+        runtime.store_runtime32(va_args, key).unwrap();
+        runtime
+            .store_runtime32(va_args.wrapping_add(4), first_value)
+            .unwrap();
+        let call_void_method_v = runtime.link.memory.load32(env_vtable + 0xf8).unwrap();
+        runtime
+            .run_function_with_args(
+                call_void_method_v,
+                &[
+                    harness.jni_env,
+                    harness.activity_class,
+                    localization_id,
+                    va_args,
+                ],
+                16,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .jni_localization
+                .get("menu.play")
+                .map(String::as_str),
+            Some("Play")
+        );
+
+        let array_args = runtime.alloc_guest_zeroed(16, 8).unwrap();
+        runtime.store_runtime32(array_args, key).unwrap();
+        runtime
+            .store_runtime32(array_args.wrapping_add(8), second_value)
+            .unwrap();
+        let call_void_method_a = runtime.link.memory.load32(env_vtable + 0xfc).unwrap();
+        runtime
+            .run_function_with_args(
+                call_void_method_a,
+                &[
+                    harness.jni_env,
+                    harness.activity_class,
+                    localization_id,
+                    array_args,
+                ],
+                16,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .jni_localization
+                .get("menu.play")
+                .map(String::as_str),
+            Some("Play now")
+        );
+
+        let direct_value = runtime.write_jni_string("Play direct").unwrap();
+        let direct_sp = runtime.cpu.reg(13).wrapping_sub(8);
+        runtime.cpu.set_reg(13, direct_sp);
+        runtime.store_runtime32(direct_sp, direct_value).unwrap();
+        let call_void_method = runtime.link.memory.load32(env_vtable + 0xf4).unwrap();
+        runtime
+            .run_function_with_args(
+                call_void_method,
+                &[
+                    harness.jni_env,
+                    harness.activity_class,
+                    localization_id,
+                    key,
+                ],
+                16,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .jni_localization
+                .get("menu.play")
+                .map(String::as_str),
+            Some("Play direct")
+        );
+
+        let vibrate_name = runtime.write_guest_c_string("vibrate").unwrap();
+        let vibrate_sig = runtime.write_guest_c_string("(I)V").unwrap();
+        runtime
+            .run_function_with_args(
+                get_method_id,
+                &[harness.jni_env, activity_jclass, vibrate_name, vibrate_sig],
+                16,
+            )
+            .unwrap();
+        let vibrate_id = runtime.cpu.reg(0);
+        runtime
+            .run_function_with_args(
+                call_void_method,
+                &[harness.jni_env, harness.activity_class, vibrate_id, 75],
+                16,
+            )
+            .unwrap();
+        assert_eq!(runtime.jni_vibration_count, 1);
+        assert_eq!(runtime.jni_last_vibration_millis, Some(75));
+
+        let vibrator = runtime.new_jni_proxy("Landroid/os/Vibrator;").unwrap();
+        runtime.jni_methods.push(JniMethod {
+            id: 0x7654,
+            class_descriptor: "Landroid/os/Vibrator;".to_string(),
+            name: "vibrate".to_string(),
+            sig: "(J)V".to_string(),
+            kind: DexMemberKind::Method,
+            is_static: false,
+        });
+        runtime.cpu.set_reg(1, vibrator);
+        runtime.cpu.set_reg(2, 0x7654);
+        let long_args = runtime.cpu.reg(13) & !7;
+        runtime.cpu.set_reg(13, long_args);
+        runtime.store_runtime32(long_args, 120).unwrap();
+        runtime
+            .store_runtime32(long_args.wrapping_add(4), 0)
+            .unwrap();
+        runtime
+            .call_jni_void_method(JniCallArgLayout::Direct, false)
+            .unwrap();
+        assert_eq!(runtime.jni_vibration_count, 2);
+        assert_eq!(runtime.jni_last_vibration_millis, Some(120));
+
+        let err = runtime
+            .run_function_with_args(
+                call_object_method,
+                &[harness.jni_env, harness.activity_class, method_id],
+                16,
+            )
+            .unwrap_err();
+        let NativeRuntimeError::Traced { source, .. } = err else {
+            panic!("unexpected unknown-method error: {err:?}");
+        };
+        assert_eq!(
+            *source,
+            NativeRuntimeError::UnsupportedJniMethod {
+                operation: "object call",
+                name: "method".to_string(),
+                signature: "()Ljava/lang/String;".to_string(),
+            }
+        );
+
+        let get_version = runtime.link.memory.load32(env_vtable + 0x10).unwrap();
+        let define_class = runtime.link.memory.load32(env_vtable + 0x14).unwrap();
+        assert_ne!(get_version, define_class);
+        let err = runtime
+            .run_function_with_args(get_version, &[harness.jni_env], 16)
+            .unwrap_err();
+        let NativeRuntimeError::Traced { source, .. } = err else {
+            panic!("unexpected unsupported-JNI error: {err:?}");
+        };
+        assert_eq!(
+            *source,
+            NativeRuntimeError::UnsupportedJniEntry {
+                table: "JNIEnv",
+                offset: 0x10,
+            }
         );
     }
 
@@ -5856,6 +8636,77 @@ mod tests {
     }
 
     #[test]
+    fn runs_registered_pthread_key_destructor_when_guest_thread_returns() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x4000_0000, 0x2000).unwrap();
+        // Worker: bx lr. Destructor: movs r1,#42; str r1,[r0]; bx lr.
+        memory.store16(0x4000_0100, 0x4770).unwrap();
+        memory.store16(0x4000_0120, 0x212a).unwrap();
+        memory.store16(0x4000_0122, 0x6001).unwrap();
+        memory.store16(0x4000_0124, 0x4770).unwrap();
+
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory,
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_0000,
+            stack_size: 0x0010_0000,
+            tls_base: 0x5010_0000,
+            tls_size: 0x1000,
+            heap_base: 0x5020_0000,
+            heap_size: 0x1000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.cpu.set_isa(Isa::Arm);
+        runtime.cpu.set_reg(14, 0);
+        runtime.cpu.set_reg(0, 0x4000_0300);
+        runtime.cpu.set_reg(2, 0x4000_0101);
+        runtime.cpu.set_reg(3, 0);
+        runtime
+            .hle
+            .dispatch("pthread_create", &mut runtime.cpu, &mut runtime.link.memory)
+            .unwrap();
+        let thread = runtime.link.memory.load32(0x4000_0300).unwrap();
+
+        runtime.hle.set_current_pthread(thread);
+        runtime.cpu.set_reg(0, 0x4000_0310);
+        runtime.cpu.set_reg(1, 0x4000_0121);
+        runtime
+            .hle
+            .dispatch(
+                "pthread_key_create",
+                &mut runtime.cpu,
+                &mut runtime.link.memory,
+            )
+            .unwrap();
+        let key = runtime.link.memory.load32(0x4000_0310).unwrap();
+        runtime.cpu.set_reg(0, key);
+        runtime.cpu.set_reg(1, 0x4000_0400);
+        runtime
+            .hle
+            .dispatch(
+                "pthread_setspecific",
+                &mut runtime.cpu,
+                &mut runtime.link.memory,
+            )
+            .unwrap();
+        runtime.hle.set_current_pthread(1);
+
+        runtime.service_guest_threads(8).unwrap();
+
+        assert_eq!(runtime.link.memory.load32(0x4000_0400).unwrap(), 42);
+        assert!(runtime.guest_threads.is_empty());
+    }
+
+    #[test]
     fn blocks_guest_thread_on_pthread_cond_wait_until_signal() {
         let wait_addr = 0x6f00_0000;
         let signal_addr = 0x6f00_0004;
@@ -5878,14 +8729,14 @@ mod tests {
                     address: wait_addr,
                     kind: HleSymbolKind::Libc,
                     shape: HleSymbolShape::Function,
-                    behavior: HleCallBehavior::ReturnZero,
+                    behavior: HleCallBehavior::RuntimeImplemented,
                 },
                 HleSymbol {
                     name: "pthread_cond_signal".to_string(),
                     address: signal_addr,
                     kind: HleSymbolKind::Libc,
                     shape: HleSymbolShape::Function,
-                    behavior: HleCallBehavior::ReturnZero,
+                    behavior: HleCallBehavior::RuntimeImplemented,
                 },
             ],
             resolved_imports: Vec::new(),
@@ -5909,6 +8760,7 @@ mod tests {
         cpu.set_reg(14, THREAD_RETURN_SENTINEL);
         runtime.guest_threads.push_back(GuestThread {
             id: 7,
+            arg: 0,
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
@@ -5916,6 +8768,7 @@ mod tests {
             trace_mem32_count: 0,
             trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
+            trace_hle_count: 0,
         });
 
         runtime.service_guest_threads(4).unwrap();
@@ -5971,7 +8824,7 @@ mod tests {
                 address: signal_addr,
                 kind: HleSymbolKind::Libc,
                 shape: HleSymbolShape::Function,
-                behavior: HleCallBehavior::ReturnZero,
+                behavior: HleCallBehavior::RuntimeImplemented,
             }],
             resolved_imports: Vec::new(),
             unresolved_imports: Vec::new(),
@@ -5996,6 +8849,7 @@ mod tests {
         cpu.set_reg(14, THREAD_RETURN_SENTINEL);
         runtime.guest_threads.push_back(GuestThread {
             id: 7,
+            arg: 0,
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
@@ -6003,6 +8857,7 @@ mod tests {
             trace_mem32_count: 0,
             trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
+            trace_hle_count: 0,
         });
 
         runtime
@@ -6083,7 +8938,7 @@ mod tests {
     }
 
     #[test]
-    fn stall_summary_reports_guest_and_skipped_threads() {
+    fn stall_summary_reports_guest_threads() {
         let object = LoadedNativeObject {
             entry_name: "lib/armeabi-v7a/libminecraftpe.so".to_string(),
             library_name: "libminecraftpe.so".to_string(),
@@ -6144,6 +8999,7 @@ mod tests {
         cpu.set_reg(14, 0x7100_2001);
         runtime.guest_threads.push_back(GuestThread {
             id: 7,
+            arg: 0,
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
@@ -6151,23 +9007,16 @@ mod tests {
             trace_mem32_count: 0,
             trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
+            trace_hle_count: 0,
         });
-        runtime.record_skipped_guest_thread(CreatedPthread {
-            id: 13,
-            start: 0x715c_de85,
-            arg: 0x6004_0000,
-        });
-
         let summary = runtime.guest_thread_stall_summary();
         assert!(summary.contains("main_wait=Condvar"));
         assert!(summary.contains("guest id=7"));
         assert!(summary.contains("libminecraftpe.so+0x00b01012 Worker::run+0x12"));
-        assert!(summary.contains("skipped id=13"));
-        assert!(summary.contains("libminecraftpe.so+0x010cde84 ThreadStart+0x0"));
     }
 
     #[test]
-    fn schedules_evidence_based_mcpe_pthreads_by_default() {
+    fn schedules_arbitrary_guest_pthreads_without_a_game_symbol_allowlist() {
         let mcpe_object = LoadedNativeObject {
             entry_name: "lib/armeabi-v7a/libminecraftpe.so".to_string(),
             library_name: "libminecraftpe.so".to_string(),
@@ -6241,33 +9090,20 @@ mod tests {
             heap_base: 0x5020_0000,
             heap_size: 0x1000,
         };
-        let runtime = NativeRuntime::new(report, config).unwrap();
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_reg(0, 0x5000_0100);
+        cpu.set_reg(2, 0x7150_1001);
+        cpu.set_reg(3, 0x6462_0840);
+        runtime
+            .hle
+            .dispatch("pthread_create", &mut cpu, &mut runtime.link.memory)
+            .unwrap();
+        runtime.drain_created_pthreads().unwrap();
 
-        assert!(runtime.should_run_created_pthread(CreatedPthread {
-            id: 39,
-            start: 0x715c_de85,
-            arg: 0x71bf_a0c8,
-        }));
-        assert!(runtime.should_run_created_pthread(CreatedPthread {
-            id: 7,
-            start: 0x7039_11f9,
-            arg: 0x6004_8b40,
-        }));
-        assert!(runtime.should_run_created_pthread(CreatedPthread {
-            id: 61,
-            start: 0x7169_7a39,
-            arg: 0x6462_0840,
-        }));
-        assert!(runtime.should_run_created_pthread(CreatedPthread {
-            id: 60,
-            start: 0x716b_a94d,
-            arg: 0x6462_0f40,
-        }));
-        assert!(!runtime.should_run_created_pthread(CreatedPthread {
-            id: 62,
-            start: 0x7150_1001,
-            arg: 0x6462_0840,
-        }));
+        assert_eq!(runtime.guest_threads.len(), 1);
+        assert_eq!(runtime.guest_threads[0].cpu.pc(), 0x7150_1000);
+        assert_eq!(runtime.guest_threads[0].cpu.isa(), Isa::Thumb);
     }
 
     #[test]
@@ -6292,14 +9128,14 @@ mod tests {
                     address: lock_addr,
                     kind: HleSymbolKind::Libc,
                     shape: HleSymbolShape::Function,
-                    behavior: HleCallBehavior::ReturnZero,
+                    behavior: HleCallBehavior::RuntimeImplemented,
                 },
                 HleSymbol {
                     name: "pthread_mutex_unlock".to_string(),
                     address: unlock_addr,
                     kind: HleSymbolKind::Libc,
                     shape: HleSymbolShape::Function,
-                    behavior: HleCallBehavior::ReturnZero,
+                    behavior: HleCallBehavior::RuntimeImplemented,
                 },
             ],
             resolved_imports: Vec::new(),
@@ -6327,6 +9163,7 @@ mod tests {
         cpu.set_reg(14, THREAD_RETURN_SENTINEL);
         runtime.guest_threads.push_back(GuestThread {
             id: 7,
+            arg: 0,
             cpu,
             wait: GuestThreadWait::Runnable,
             trace_tail: VecDeque::with_capacity(GUEST_THREAD_TRACE_LEN),
@@ -6334,6 +9171,7 @@ mod tests {
             trace_mem32_count: 0,
             trace_mem32_deref_count: 0,
             trace_cxx_string_count: 0,
+            trace_hle_count: 0,
         });
 
         runtime
@@ -6372,7 +9210,7 @@ mod tests {
                 address: trylock_addr,
                 kind: HleSymbolKind::Libc,
                 shape: HleSymbolShape::Function,
-                behavior: HleCallBehavior::ReturnZero,
+                behavior: HleCallBehavior::RuntimeImplemented,
             }],
             resolved_imports: Vec::new(),
             unresolved_imports: Vec::new(),
@@ -6436,7 +9274,7 @@ mod tests {
                 address: once_addr,
                 kind: HleSymbolKind::Libc,
                 shape: HleSymbolShape::Function,
-                behavior: HleCallBehavior::ReturnZero,
+                behavior: HleCallBehavior::RuntimeImplemented,
             }],
             resolved_imports: Vec::new(),
             unresolved_imports: Vec::new(),
@@ -6466,7 +9304,7 @@ mod tests {
 
     #[test]
     fn default_runtime_regions_do_not_overlap() {
-        assert_eq!(DEFAULT_HEAP_SIZE, 0x0800_0000);
+        assert_eq!(DEFAULT_HEAP_SIZE, 0x0c00_0000);
         assert_eq!(DEFAULT_STACK_SIZE, 0x0200_0000);
 
         let heap_end = DEFAULT_HEAP_BASE
@@ -6595,17 +9433,23 @@ mod tests {
         ));
         runtime.jni_methods.push(JniMethod {
             id: 0x1234,
+            class_descriptor: runtime.jni_activity_descriptor.clone(),
             name: "_getImageData".to_string(),
             sig: "(Ljava/lang/String;)[I".to_string(),
+            kind: DexMemberKind::Method,
             is_static: false,
         });
+        runtime.register_jni_object(0x100, &runtime.jni_activity_descriptor.clone());
         let path = runtime
-            .write_guest_c_string("images/font/default8.png")
+            .write_jni_string("images/font/default8.png")
             .unwrap();
+        runtime.cpu.set_reg(1, 0x100);
         runtime.cpu.set_reg(2, 0x1234);
         runtime.cpu.set_reg(3, path);
 
-        let array = runtime.call_jni_object_method().unwrap();
+        let array = runtime
+            .call_jni_object_method(JniCallArgLayout::Direct, false)
+            .unwrap();
         assert_ne!(array, 0);
         runtime.cpu.set_reg(1, array);
         assert_eq!(runtime.jni_array_len().unwrap(), 3);
@@ -6618,17 +9462,23 @@ mod tests {
         assert_eq!(runtime.link.memory.load32(data + 8).unwrap(), 0x4411_2233);
 
         let vararg_path = runtime
-            .write_guest_c_string("images/font/default8.png")
+            .write_jni_string("images/font/default8.png")
             .unwrap();
         let vararg = runtime.alloc_guest_zeroed(4, 4).unwrap();
         runtime.store_runtime32(vararg, vararg_path).unwrap();
         runtime.cpu.set_reg(2, 0x1234);
         runtime.cpu.set_reg(3, vararg);
-        assert_ne!(runtime.call_jni_object_method().unwrap(), 0);
+        runtime.cpu.set_reg(1, 0x100);
+        assert_ne!(
+            runtime
+                .call_jni_object_method(JniCallArgLayout::VaList, false)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
-    fn jni_broadcast_addresses_returns_object_string_array() {
+    fn jni_broadcast_addresses_reports_offline_absence() {
         let report = NativeLinkReport {
             apk_path: PathBuf::from("test.apk"),
             abi: "armeabi-v7a".to_string(),
@@ -6651,24 +9501,113 @@ mod tests {
         let mut runtime = NativeRuntime::new(report, config).unwrap();
         runtime.jni_methods.push(JniMethod {
             id: 0x1234,
+            class_descriptor: runtime.jni_activity_descriptor.clone(),
             name: "getBroadcastAddresses".to_string(),
             sig: "()[Ljava/lang/String;".to_string(),
+            kind: DexMemberKind::Method,
             is_static: false,
         });
+        runtime.register_jni_object(0x100, &runtime.jni_activity_descriptor.clone());
+        runtime.cpu.set_reg(1, 0x100);
         runtime.cpu.set_reg(2, 0x1234);
 
-        let array = runtime.call_jni_object_method().unwrap();
+        let array = runtime
+            .call_jni_object_method(JniCallArgLayout::Direct, false)
+            .unwrap();
         assert_ne!(array, 0);
         runtime.cpu.set_reg(1, array);
-        assert_eq!(runtime.jni_array_len().unwrap(), 1);
-        runtime.cpu.set_reg(1, array);
-        runtime.cpu.set_reg(2, 0);
-        let element = runtime.jni_object_array_element().unwrap();
+        assert_eq!(runtime.jni_array_len().unwrap(), 0);
+    }
 
+    #[test]
+    fn jni_new_object_validates_constructor_and_preserves_long_argument_layouts() {
+        let report = NativeLinkReport {
+            apk_path: PathBuf::from("test.apk"),
+            abi: "armeabi-v7a".to_string(),
+            memory: MappedMemory::new(),
+            objects: Vec::new(),
+            global_symbols: Vec::new(),
+            hle_symbols: Vec::new(),
+            resolved_imports: Vec::new(),
+            unresolved_imports: Vec::new(),
+            relocation_errors: Vec::new(),
+        };
+        let config = NativeRuntimeConfig {
+            stack_base: 0x5000_1000,
+            stack_size: 0x1000,
+            tls_base: 0x5000_2000,
+            tls_size: 0x1000,
+            heap_base: 0x5000_3000,
+            heap_size: 0x10000,
+        };
+        let mut runtime = NativeRuntime::new(report, config).unwrap();
+        runtime.jni_methods.push(JniMethod {
+            id: 0x1234,
+            class_descriptor: "Lcom/mojang/minecraftpe/store/NativeStoreListener;".to_string(),
+            name: "<init>".to_string(),
+            sig: "(J)V".to_string(),
+            kind: DexMemberKind::Method,
+            is_static: false,
+        });
+        runtime.jni_classes.push(JniClass {
+            handle: 0xcafe,
+            descriptor: "Lcom/mojang/minecraftpe/store/NativeStoreListener;".to_string(),
+        });
+        let args = runtime.alloc_guest_zeroed(32, 8).unwrap();
+        let expected = 0x1122_3344_5566_7788_u64;
+
+        runtime.cpu.set_reg(1, 0xcafe);
+        runtime.cpu.set_reg(2, 0x1234);
+        runtime.cpu.set_reg(3, 0xdead_beef);
+        runtime.cpu.set_reg(13, args);
+        runtime.store_runtime32(args, expected as u32).unwrap();
+        runtime
+            .store_runtime32(args + 4, (expected >> 32) as u32)
+            .unwrap();
+        let direct = runtime.new_jni_object(JniCallArgLayout::Direct).unwrap();
+        assert_eq!(runtime.load_runtime32(direct).unwrap(), 0xcafe);
+        assert_eq!(runtime.load_runtime32(direct + 4).unwrap(), 0x1234);
+        assert_eq!(runtime.load_runtime32(direct + 8).unwrap(), expected as u32);
         assert_eq!(
-            runtime.load_guest_c_string(element, 64).unwrap(),
-            "255.255.255.255"
+            runtime.load_runtime32(direct + 12).unwrap(),
+            (expected >> 32) as u32
         );
+
+        runtime.cpu.set_reg(3, args + 1);
+        runtime.store_runtime32(args + 8, expected as u32).unwrap();
+        runtime
+            .store_runtime32(args + 12, (expected >> 32) as u32)
+            .unwrap();
+        let va_list = runtime.new_jni_object(JniCallArgLayout::VaList).unwrap();
+        assert_eq!(
+            runtime.load_runtime32(va_list + 8).unwrap(),
+            expected as u32
+        );
+        assert_eq!(
+            runtime.load_runtime32(va_list + 12).unwrap(),
+            (expected >> 32) as u32
+        );
+
+        runtime.cpu.set_reg(3, args + 16);
+        runtime.store_runtime32(args + 16, expected as u32).unwrap();
+        runtime
+            .store_runtime32(args + 20, (expected >> 32) as u32)
+            .unwrap();
+        let array = runtime.new_jni_object(JniCallArgLayout::Array).unwrap();
+        assert_eq!(runtime.load_runtime32(array + 8).unwrap(), expected as u32);
+        assert_eq!(
+            runtime.load_runtime32(array + 12).unwrap(),
+            (expected >> 32) as u32
+        );
+
+        runtime.jni_methods[0].name = "notAConstructor".to_string();
+        assert!(matches!(
+            runtime.new_jni_object(JniCallArgLayout::Direct),
+            Err(NativeRuntimeError::UnsupportedJniMethod {
+                operation: "constructor",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -6712,30 +9651,18 @@ mod tests {
             unresolved_imports: Vec::new(),
             relocation_errors: Vec::new(),
         };
-        let runtime = NativeRuntime {
-            link: report,
-            cpu: Cpu::new(),
-            hle: HleRuntime::new(0, 0x6000_0000, 0x1000),
-            cpu_backend: NativeCpuBackendKind::AemuInterpreter,
-            #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
-            dynarmic: None,
-            #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
-            dynarmic_run_ticks: DYNARMIC_DEFAULT_RUN_TICKS,
-            runtime_hle_traps: Vec::new(),
-            jni_methods: Vec::new(),
-            jni_java_vm: 0,
-            stack_base: 0x5000_1000,
-            stack_size: 0x1000,
-            next_thread_stack_top: 0x5000_1000,
-            guest_threads: VecDeque::new(),
-            skipped_guest_threads: VecDeque::new(),
-            guest_mutexes: Vec::new(),
-            main_wait: GuestThreadWait::Runnable,
-            minecraft_resource_bridge: None,
-            minecraft_resource_bridge_active: false,
-            trace_native_event_count: 0,
-            pc_profiler: None,
-        };
+        let runtime = NativeRuntime::new(
+            report,
+            NativeRuntimeConfig {
+                stack_base: 0x5000_1000,
+                stack_size: 0x1000,
+                tls_base: 0x5000_2000,
+                tls_size: 0x1000,
+                heap_base: 0x5000_3000,
+                heap_size: 0x1000,
+            },
+        )
+        .unwrap();
 
         assert_eq!(runtime.symbol_address("JNI_OnLoad"), Some(0x700c_cb68));
         assert_eq!(

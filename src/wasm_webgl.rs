@@ -191,9 +191,38 @@ mod browser {
                         self.shaders.insert(*shader, host);
                     }
                 }
+                GlesEvent::DeleteShader { shader } => {
+                    if let Some(host) = self.shaders.remove(shader) {
+                        self.call("deleteShader", &[host])?;
+                    }
+                }
                 GlesEvent::ShaderSource { shader, source } => {
                     if let Some(host) = self.shaders.get(shader).cloned() {
                         self.compile_replay_shader(*shader, &host, source)?;
+                    }
+                }
+                GlesEvent::DeleteTextures { textures } => {
+                    for guest in textures {
+                        if let Some(host) = self.textures.remove(guest) {
+                            self.call("deleteTexture", &[host])?;
+                        }
+                    }
+                }
+                GlesEvent::DeleteFramebuffers { framebuffers } => {
+                    for guest in framebuffers {
+                        if let Some(host) = self.framebuffers.remove(guest) {
+                            self.call("deleteFramebuffer", &[host])?;
+                        }
+                    }
+                }
+                GlesEvent::DeleteRenderbuffers { renderbuffers } => {
+                    for guest in renderbuffers {
+                        if let Some(host) = self.renderbuffers.remove(guest) {
+                            self.call("deleteRenderbuffer", &[host])?;
+                        }
+                        if self.bound_renderbuffer == *guest {
+                            self.bound_renderbuffer = 0;
+                        }
                     }
                 }
                 GlesEvent::CreateProgram { program } => {
@@ -206,6 +235,14 @@ mod browser {
                                 uniforms: HashMap::new(),
                             },
                         );
+                    }
+                }
+                GlesEvent::DeleteProgram { program } => {
+                    if let Some(state) = self.programs.remove(program) {
+                        self.call("deleteProgram", &[state.host])?;
+                    }
+                    if self.current_program == *program {
+                        self.current_program = 0;
                     }
                 }
                 GlesEvent::AttachShader { program, shader } => {
@@ -232,6 +269,19 @@ mod browser {
                         GL_ARRAY_BUFFER => self.bound_array_buffer = *buffer,
                         GL_ELEMENT_ARRAY_BUFFER => self.bound_element_array_buffer = *buffer,
                         _ => {}
+                    }
+                }
+                GlesEvent::DeleteBuffers { buffers } => {
+                    for guest in buffers {
+                        if let Some(host) = self.buffers.remove(guest) {
+                            self.call("deleteBuffer", &[host])?;
+                        }
+                        if self.bound_array_buffer == *guest {
+                            self.bound_array_buffer = 0;
+                        }
+                        if self.bound_element_array_buffer == *guest {
+                            self.bound_element_array_buffer = 0;
+                        }
                     }
                 }
                 GlesEvent::BufferData {
@@ -857,27 +907,27 @@ mod browser {
             &mut self,
             client_attribs: &[GlesClientAttribPayload],
         ) -> HostResult<bool> {
-            if !self.has_unbacked_client_attrib() {
-                return Ok(true);
-            }
-            for (index, enabled) in self.enabled_vertex_attribs.clone() {
-                if !enabled
+            // Draw events contain only client arrays consumed by the linked
+            // program. Ignore stale enabled arrays at inactive locations.
+            for client_attrib in client_attribs {
+                let index = client_attrib.index;
+                if !self
+                    .enabled_vertex_attribs
+                    .get(&index)
+                    .copied()
+                    .unwrap_or(false)
                     || !self
                         .client_side_vertex_attribs
                         .get(&index)
                         .copied()
                         .unwrap_or(false)
                 {
-                    continue;
+                    return Ok(false);
                 }
                 let Some(attrib) = self.vertex_attribs.get(&index).copied() else {
                     return Ok(false);
                 };
-                let Some(payload) = client_attribs
-                    .iter()
-                    .find(|payload| payload.index == index)
-                    .and_then(|payload| payload.payload.as_deref())
-                else {
+                let Some(payload) = client_attrib.payload.as_deref() else {
                     return Ok(false);
                 };
                 let buffer = self.client_attrib_buffer(index)?;
@@ -1140,17 +1190,6 @@ mod browser {
                 }
                 self.stats.gl_error_count += 1;
             }
-        }
-
-        fn has_unbacked_client_attrib(&self) -> bool {
-            self.enabled_vertex_attribs.iter().any(|(index, enabled)| {
-                *enabled
-                    && self
-                        .client_side_vertex_attribs
-                        .get(index)
-                        .copied()
-                        .unwrap_or(false)
-            })
         }
 
         fn shader_info_log(&self, shader: &JsValue) -> String {

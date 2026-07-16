@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 
+import trace_check
 import ws_cli
 
 
@@ -38,8 +39,103 @@ PLAY_PRESET_SCRIPT = (
     "screenshot {screenshots}/03_after_play.png; "
     "debug"
 )
+FLAT_WORLD_ENTRY_SCRIPT = (
+    "screenshot {screenshots}/01_xbox.png; "
+    "tap 280,386; "
+    "wait 1.0; "
+    "screenshot {screenshots}/02_menu.png; "
+    "tap 427,240; "
+    "wait 1.0; "
+    "screenshot {screenshots}/03_play.png; "
+    "tap 427,106; "
+    "wait 1.0; "
+    "screenshot {screenshots}/04_create.png; "
+    "tap 786,26; "
+    "wait 0.5; "
+    "screenshot {screenshots}/05_advanced.png; "
+    "tap 565,280; "
+    "wait 0.5; "
+    "screenshot {screenshots}/06_flat_selected.png; "
+    "tap 634,357; "
+    "wait 1.0; "
+    "screenshot {screenshots}/07_loading.png; "
+    "wait 5.0; "
+    "screenshot {screenshots}/08_world_6s.png; "
+    "wait 15.0; "
+    "screenshot {screenshots}/09_world_21s.png; "
+    "wait 15.0; "
+    "screenshot {screenshots}/10_world_36s.png; "
+)
+FLAT_WORLD_PRESET_SCRIPT = FLAT_WORLD_ENTRY_SCRIPT + "debug"
+PLAYABLE_FLAT_WORLD_PRESET_SCRIPT = (
+    FLAT_WORLD_ENTRY_SCRIPT
+    + "pointer down 112,320; "
+    "wait 2.0; "
+    "pointer up 112,320; "
+    "wait 2.0; "
+    "screenshot {screenshots}/11_moved.png; "
+    "pointer down 500,200; "
+    "wait 0.1; "
+    "pointer move 550,200; "
+    "wait 0.1; "
+    "pointer move 600,200; "
+    "wait 0.1; "
+    "pointer move 650,200; "
+    "wait 0.1; "
+    "pointer up 650,200; "
+    "wait 2.0; "
+    "screenshot {screenshots}/12_looked.png; "
+    "pointer down 500,200; "
+    "wait 0.1; "
+    "pointer move 500,250; "
+    "wait 0.1; "
+    "pointer move 500,300; "
+    "wait 0.1; "
+    "pointer move 500,350; "
+    "wait 0.1; "
+    "pointer up 500,350; "
+    "wait 0.5; "
+    "pointer down 500,300; "
+    "wait 0.1; "
+    "pointer move 500,275; "
+    "wait 0.1; "
+    "pointer move 500,250; "
+    "wait 0.1; "
+    "pointer up 500,250; "
+    "wait 2.0; "
+    "screenshot {screenshots}/13_aimed.png; "
+    "tap 427,220; "
+    "wait 2.0; "
+    "screenshot {screenshots}/14_placed.png; "
+    "pointer down 427,220; "
+    "wait 0.8; "
+    "pointer up 427,220; "
+    "wait 2.0; "
+    "screenshot {screenshots}/15_broken.png; "
+    "debug"
+)
+
+FLAT_WORLD_MIN_SKY_RATIO = 0.75
+FLAT_WORLD_MIN_GROUND_RATIO = 0.75
+PLAYABLE_MIN_GROUND_CHANGE_RATIO = 0.20
+PLAYABLE_MIN_AIM_CHANGE_RATIO = 0.40
+PLAYABLE_MIN_PLACED_GRAY_RATIO = 0.30
+PLAYABLE_MAX_BROKEN_GRAY_RATIO = 0.15
+PLAYABLE_MIN_BROKEN_HOLE_RATIO = 0.20
 
 WS_URL_RE = re.compile(r"sdl2-live: websocket (?P<url>ws://\S+)")
+
+
+def parse_step_limit(value):
+    if value.lower() == "inf":
+        return "inf"
+    try:
+        parsed = int(value, 10)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError("steps must be a non-negative integer or inf") from err
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("steps must be a non-negative integer or inf")
+    return parsed
 
 
 def timestamp():
@@ -215,6 +311,137 @@ def summarize_screenshot(result):
         "format": result.get("format"),
         "width": result.get("width"),
         "height": result.get("height"),
+    }
+
+
+def region_ratio(image, x_start, y_start, x_end, y_end, predicate):
+    left = int(image.width * x_start)
+    top = int(image.height * y_start)
+    right = int(image.width * x_end)
+    bottom = int(image.height * y_end)
+    matched = 0
+    pixels = 0
+    for y in range(top, bottom):
+        for x in range(left, right):
+            offset = (y * image.width + x) * 3
+            red, green, blue = image.rgb[offset : offset + 3]
+            matched += bool(predicate(red, green, blue))
+            pixels += 1
+    return matched / pixels if pixels else 0.0
+
+
+def flat_world_metrics(path):
+    image = trace_check.parse_png(pathlib.Path(path))
+    sky_ratio = region_ratio(
+        image,
+        0.15,
+        0.15,
+        0.85,
+        0.45,
+        lambda red, green, blue: blue >= 150 and blue >= red + 20 and blue >= green + 5,
+    )
+    ground_ratio = region_ratio(
+        image,
+        0.20,
+        0.54,
+        0.80,
+        0.83,
+        lambda red, green, blue: green >= red + 10 and green >= blue + 5,
+    )
+    return {
+        "sky_ratio": round(sky_ratio, 6),
+        "ground_ratio": round(ground_ratio, 6),
+        "min_sky_ratio": FLAT_WORLD_MIN_SKY_RATIO,
+        "min_ground_ratio": FLAT_WORLD_MIN_GROUND_RATIO,
+        "passed": sky_ratio >= FLAT_WORLD_MIN_SKY_RATIO
+        and ground_ratio >= FLAT_WORLD_MIN_GROUND_RATIO,
+    }
+
+
+def image_region_change(first, second, x_start, y_start, x_end, y_end):
+    if first.width != second.width or first.height != second.height:
+        raise trace_check.TraceError(
+            f"image dimensions differ: {first.width}x{first.height} vs "
+            f"{second.width}x{second.height}"
+        )
+    left = int(first.width * x_start)
+    top = int(first.height * y_start)
+    right = int(first.width * x_end)
+    bottom = int(first.height * y_end)
+    changed = 0
+    channels = 0
+    absolute_difference = 0
+    for y in range(top, bottom):
+        for x in range(left, right):
+            offset = (y * first.width + x) * 3
+            for channel in range(3):
+                difference = abs(first.rgb[offset + channel] - second.rgb[offset + channel])
+                changed += difference > 8
+                absolute_difference += difference
+                channels += 1
+    return {
+        "changed_channel_ratio": round(changed / channels if channels else 0.0, 6),
+        "mean_absolute_difference": round(
+            absolute_difference / channels if channels else 0.0, 6
+        ),
+    }
+
+
+def playability_metrics(paths):
+    world, moved, looked, aimed, placed, broken = [
+        trace_check.parse_png(pathlib.Path(path)) for path in paths
+    ]
+    move = image_region_change(world, moved, 0.20, 0.54, 0.80, 0.83)
+    look = image_region_change(moved, looked, 0.20, 0.54, 0.80, 0.83)
+    aim = image_region_change(looked, aimed, 0.20, 0.12, 0.80, 0.84)
+    placed_gray_ratio = region_ratio(
+        placed,
+        0.35,
+        0.10,
+        0.65,
+        0.62,
+        lambda red, green, blue: 45 <= red <= 180
+        and abs(red - green) <= 18
+        and abs(green - blue) <= 18,
+    )
+    broken_gray_ratio = region_ratio(
+        broken,
+        0.35,
+        0.10,
+        0.65,
+        0.62,
+        lambda red, green, blue: 45 <= red <= 180
+        and abs(red - green) <= 18
+        and abs(green - blue) <= 18,
+    )
+    broken_hole_ratio = region_ratio(
+        broken,
+        0.40,
+        0.35,
+        0.60,
+        0.62,
+        lambda red, green, blue: red >= 25
+        and red >= green + 3
+        and green >= blue - 5
+        and blue < 80,
+    )
+    checks = {
+        "movement": move["changed_channel_ratio"] >= PLAYABLE_MIN_GROUND_CHANGE_RATIO,
+        "camera": look["changed_channel_ratio"] >= PLAYABLE_MIN_GROUND_CHANGE_RATIO,
+        "aim": aim["changed_channel_ratio"] >= PLAYABLE_MIN_AIM_CHANGE_RATIO,
+        "placement": placed_gray_ratio >= PLAYABLE_MIN_PLACED_GRAY_RATIO,
+        "breaking": broken_gray_ratio <= PLAYABLE_MAX_BROKEN_GRAY_RATIO
+        and broken_hole_ratio >= PLAYABLE_MIN_BROKEN_HOLE_RATIO,
+    }
+    return {
+        "move": move,
+        "look": look,
+        "aim": aim,
+        "placed_gray_ratio": round(placed_gray_ratio, 6),
+        "broken_gray_ratio": round(broken_gray_ratio, 6),
+        "broken_hole_ratio": round(broken_hole_ratio, 6),
+        "checks": checks,
+        "passed": all(checks.values()),
     }
 
 
@@ -571,12 +798,70 @@ def validate_summary(args, summary):
                 f"expected at least {args.min_screenshot_bytes}"
             )
 
+    for index in args.expect_flat_world_screenshot or []:
+        if index <= 0 or index > len(screenshots):
+            errors.append(
+                f"expected flat-world screenshot {index} to exist, "
+                f"but only {len(screenshots)} screenshots were captured"
+            )
+            continue
+        shot = screenshots[index - 1]
+        try:
+            metrics = flat_world_metrics(shot["path"])
+        except (OSError, trace_check.TraceError) as err:
+            errors.append(f"{shot['path']}: could not inspect flat-world frame: {err}")
+            continue
+        shot["flat_world"] = metrics
+        if not metrics["passed"]:
+            errors.append(
+                f"{shot['path']}: expected an entered flat-world frame; "
+                f"sky_ratio={metrics['sky_ratio']:.3f} "
+                f"ground_ratio={metrics['ground_ratio']:.3f}"
+            )
+
+    if args.expect_playability_sequence:
+        try:
+            indices = parse_playability_sequence(args.expect_playability_sequence)
+        except ValueError as err:
+            errors.append(str(err))
+        else:
+            if max(indices) > len(screenshots):
+                errors.append(
+                    "expected playability screenshot sequence "
+                    f"{args.expect_playability_sequence} to exist, but only "
+                    f"{len(screenshots)} screenshots were captured"
+                )
+            else:
+                selected = [screenshots[index - 1] for index in indices]
+                try:
+                    metrics = playability_metrics([shot["path"] for shot in selected])
+                except (OSError, trace_check.TraceError) as err:
+                    errors.append(f"could not inspect playability sequence: {err}")
+                else:
+                    metrics["screenshots"] = [shot["path"] for shot in selected]
+                    summary["playability"] = metrics
+                    for name, passed in metrics["checks"].items():
+                        if not passed:
+                            errors.append(
+                                f"playability {name} check failed: "
+                                f"{json.dumps(metrics, sort_keys=True)}"
+                            )
+
     debug_values = collect_validation_debug(summary)
     if debug_values:
         last_debug = debug_values[-1]
         gl_errors = int(last_debug.get("gl_error_count") or 0)
         if gl_errors > args.max_gl_errors:
             errors.append(f"expected gl_error_count <= {args.max_gl_errors}, got {gl_errors}")
+        skipped_client_attrib = int(last_debug.get("skipped_client_attrib_draws") or 0)
+        if (
+            args.max_skipped_client_attrib_draws is not None
+            and skipped_client_attrib > args.max_skipped_client_attrib_draws
+        ):
+            errors.append(
+                "expected skipped_client_attrib_draws <= "
+                f"{args.max_skipped_client_attrib_draws}, got {skipped_client_attrib}"
+            )
         frames = int(last_debug.get("frames") or 0)
         if frames < args.expect_frames:
             errors.append(f"expected debug frames >= {args.expect_frames}, got {frames}")
@@ -661,6 +946,22 @@ def parse_screenshot_pair(spec):
     return first, second
 
 
+def parse_playability_sequence(spec):
+    parts = spec.split(":")
+    if len(parts) != 6:
+        raise ValueError(
+            "expected playability sequence WORLD:MOVED:LOOKED:AIMED:PLACED:BROKEN, "
+            f"got {spec!r}"
+        )
+    try:
+        indices = tuple(int(part) for part in parts)
+    except ValueError as err:
+        raise ValueError(f"expected numeric playability sequence, got {spec!r}") from err
+    if any(index <= 0 for index in indices):
+        raise ValueError(f"playability indices are 1-based, got {spec!r}")
+    return indices
+
+
 def print_summary(summary):
     errors = summary["expectation_errors"]
     print(f"mcpe-ui-smoke: trace_dir={summary['trace_dir']}")
@@ -686,6 +987,15 @@ def print_summary(summary):
             f"{shot['path']} {shot.get('width')}x{shot.get('height')} "
             f"bytes={shot['bytes']} sha256={shot['sha256']}"
         )
+        if shot.get("flat_world"):
+            metrics = shot["flat_world"]
+            print(
+                "mcpe-ui-smoke: flat_world "
+                f"screenshot={shot['path']} "
+                f"sky_ratio={metrics['sky_ratio']:.3f} "
+                f"ground_ratio={metrics['ground_ratio']:.3f} "
+                f"passed={metrics['passed']}"
+            )
     artifacts = summary.get("artifacts", {})
     print(
         "mcpe-ui-smoke: artifacts "
@@ -694,6 +1004,18 @@ def print_summary(summary):
         f"pc_profile_samples={artifacts.get('pc_profile_samples', 0)} "
         f"sdl_draw_pngs={artifacts.get('sdl_draw_png_count', 0)}"
     )
+    playability = summary.get("playability")
+    if playability:
+        print(
+            "mcpe-ui-smoke: playability "
+            f"move={playability['move']['changed_channel_ratio']:.3f} "
+            f"look={playability['look']['changed_channel_ratio']:.3f} "
+            f"aim={playability['aim']['changed_channel_ratio']:.3f} "
+            f"placed_gray={playability['placed_gray_ratio']:.3f} "
+            f"broken_gray={playability['broken_gray_ratio']:.3f} "
+            f"broken_hole={playability['broken_hole_ratio']:.3f} "
+            f"passed={playability['passed']}"
+        )
     if artifacts.get("pc_profile_top"):
         top = artifacts["pc_profile_top"][0]
         where = top.get("symbol") or top.get("library") or top.get("pc_hex")
@@ -722,10 +1044,15 @@ def build_arg_parser():
     parser.add_argument("--out-dir", type=pathlib.Path)
     parser.add_argument("--display", default=":0")
     parser.add_argument("--ws", default=DEFAULT_WS_ADDR)
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument(
+        "--steps",
+        type=parse_step_limit,
+        default=DEFAULT_STEPS,
+        help="guest step limit per run/frame, or inf",
+    )
     parser.add_argument(
         "--preset",
-        choices=["play"],
+        choices=["play", "flat-world", "playable-flat-world"],
         help="apply a reusable MCPE UI smoke profile",
     )
     parser.add_argument(
@@ -822,6 +1149,7 @@ def build_arg_parser():
     )
     parser.add_argument("--expect-frames", type=int, default=1)
     parser.add_argument("--max-gl-errors", type=int, default=0)
+    parser.add_argument("--max-skipped-client-attrib-draws", type=int)
     parser.add_argument("--min-readback-rgb", type=int, default=0)
     parser.add_argument("--min-draw-elements", type=int, default=0)
     parser.add_argument("--min-screenshots", type=int, default=0)
@@ -893,6 +1221,19 @@ def build_arg_parser():
         action="append",
         help="fail unless the 1-based screenshot pair A:B has different hashes",
     )
+    parser.add_argument(
+        "--expect-flat-world-screenshot",
+        action="append",
+        type=int,
+        help="require the 1-based screenshot to contain the entered flat-world sky and ground",
+    )
+    parser.add_argument(
+        "--expect-playability-sequence",
+        help=(
+            "require WORLD:MOVED:LOOKED:AIMED:PLACED:BROKEN screenshots to prove "
+            "in-world movement, camera, placement, and breaking"
+        ),
+    )
     parser.add_argument("--echo-log", action="store_true")
     return parser
 
@@ -916,9 +1257,41 @@ def apply_preset_defaults(args):
         args.wait_ws_timeout = max(args.wait_ws_timeout, 220.0)
         args.post_journal_seconds = max(args.post_journal_seconds, 60.0)
         args.min_screenshots = max(args.min_screenshots, 3)
+        if args.max_skipped_client_attrib_draws is None:
+            args.max_skipped_client_attrib_draws = 0
         append_arg_once(args, "expect_screenshot_pair_change", "1:2")
         append_arg_once(args, "reject_run_log_contains", "THREAD stall")
         append_arg_once(args, "reject_run_log_contains", "native run failed")
+    elif args.preset in ("flat-world", "playable-flat-world"):
+        args.first_visible_draw = True
+        if not args.script and not args.script_file:
+            args.script = (
+                PLAYABLE_FLAT_WORLD_PRESET_SCRIPT
+                if args.preset == "playable-flat-world"
+                else FLAT_WORLD_PRESET_SCRIPT
+            )
+        if args.steps == DEFAULT_STEPS:
+            args.steps = "inf"
+        args.frames = max(args.frames, 20_000)
+        args.wait_ws_timeout = max(args.wait_ws_timeout, 220.0)
+        args.min_screenshots = max(
+            args.min_screenshots, 15 if args.preset == "playable-flat-world" else 10
+        )
+        if args.fake_time_step_nanos is None:
+            args.fake_time_step_nanos = 100_000
+        if args.max_skipped_client_attrib_draws is None:
+            args.max_skipped_client_attrib_draws = 0
+        if args.preset == "playable-flat-world":
+            args.tap_duration_ms = 50.0
+            if args.expect_playability_sequence is None:
+                args.expect_playability_sequence = "10:11:12:13:14:15"
+        for pair in ("1:2", "2:3", "3:4", "4:5", "5:6", "6:7"):
+            append_arg_once(args, "expect_screenshot_pair_change", pair)
+        for index in (8, 9, 10):
+            append_arg_once(args, "expect_flat_world_screenshot", index)
+        append_arg_once(args, "reject_run_log_contains", "THREAD stall")
+        append_arg_once(args, "reject_run_log_contains", "native run failed")
+        append_arg_once(args, "reject_run_log_contains", "HLE heap exhausted")
 
 
 def apply_milestone_defaults(args):

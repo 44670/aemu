@@ -103,7 +103,7 @@ fn main() {
                 Err(err) => {
                     eprintln!("{err}");
                     eprintln!(
-                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|dynarmic] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
+                        "usage: aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|dynarmic] [--steps N|inf] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
                     );
                     std::process::exit(2);
                 }
@@ -123,7 +123,7 @@ fn main() {
             eprintln!("  aemu imports-apk <app.apk> [--limit N|--all]");
             eprintln!("  aemu link-apk <app.apk> [--abi ABI] [--limit N|--all]");
             eprintln!(
-                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|dynarmic] [--steps N] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
+                "  aemu run-apk-native <app.apk> [--abi ABI] [--cpu-backend aemu|dynarmic] [--steps N|inf] [--launch] [--until-swap] [--gles-summary] [--sdl2] [--sdl2-live] [--sdl2-frames N] [--sdl2-stop-after-draw-elements N] [--sdl2-stop-screenshot PATH] [--sdl2-ignore-host-quit] [--ws ADDR]"
             );
             eprintln!("  aemu sdl2-shell [--frames N] [--width W] [--height H]");
         }
@@ -420,14 +420,64 @@ fn parse_link_apk_args(
 }
 
 fn print_native_link_report(report: &aemu::native_loader::NativeLinkReport, limit: Option<usize>) {
+    use aemu::hle_imports::HleCallBehavior;
+    use aemu::native_loader::NativeSymbolSource;
+
+    let implemented_hle = report
+        .hle_symbols
+        .iter()
+        .filter(|symbol| symbol.behavior == HleCallBehavior::Implemented)
+        .count();
+    let runtime_hle = report
+        .hle_symbols
+        .iter()
+        .filter(|symbol| symbol.behavior == HleCallBehavior::RuntimeImplemented)
+        .count();
+    let unsupported_hle = report
+        .hle_symbols
+        .iter()
+        .filter(|symbol| symbol.behavior == HleCallBehavior::Unimplemented)
+        .count();
+    let abort_hle = report
+        .hle_symbols
+        .iter()
+        .filter(|symbol| symbol.behavior == HleCallBehavior::Abort)
+        .count();
+    let hle_bound_imports: Vec<_> = report
+        .resolved_imports
+        .iter()
+        .filter(|import| matches!(import.source, NativeSymbolSource::Hle { .. }))
+        .collect();
+    let native_bound_imports = report
+        .resolved_imports
+        .len()
+        .saturating_sub(hle_bound_imports.len());
+    let hle_bound_behavior_count = |behavior| {
+        hle_bound_imports
+            .iter()
+            .filter(|import| {
+                report
+                    .hle_symbols
+                    .iter()
+                    .any(|symbol| symbol.name == import.name && symbol.behavior == behavior)
+            })
+            .count()
+    };
+    let hle_bound_implemented = hle_bound_behavior_count(HleCallBehavior::Implemented);
+    let hle_bound_runtime = hle_bound_behavior_count(HleCallBehavior::RuntimeImplemented);
+    let hle_bound_unsupported = hle_bound_behavior_count(HleCallBehavior::Unimplemented);
+    let hle_bound_abort = hle_bound_behavior_count(HleCallBehavior::Abort);
+
     println!("apk: {}", report.apk_path.display());
     println!("abi: {}", report.abi);
     println!(
         "result: {}",
-        if report.is_linked() {
-            "loaded and relocated"
-        } else {
+        if !report.is_linked() {
             "loaded with unresolved link work"
+        } else if hle_bound_unsupported != 0 {
+            "relocations complete; unsupported HLE imports trap if called"
+        } else {
+            "loaded and relocated"
         }
     );
     println!("addressing: 1:1 guest virtual addresses");
@@ -457,9 +507,19 @@ fn print_native_link_report(report: &aemu::native_loader::NativeLinkReport, limi
     }
 
     println!("native exports: {}", report.global_symbols.len());
-    println!("HLE reserved symbols: {}", report.hle_symbols.len());
+    println!(
+        "HLE reserved symbols: {} (implemented {implemented_hle}, runtime {runtime_hle}, unsupported traps {unsupported_hle}, abort {abort_hle})",
+        report.hle_symbols.len()
+    );
     print_hle_symbols(report, limit);
-    println!("resolved imports: {}", report.resolved_imports.len());
+    println!(
+        "relocation-bound imports: {}",
+        report.resolved_imports.len()
+    );
+    println!(
+        "  native bindings: {native_bound_imports}; HLE bindings: {} (implemented {hle_bound_implemented}, runtime {hle_bound_runtime}, unsupported traps {hle_bound_unsupported}, abort {hle_bound_abort})",
+        hle_bound_imports.len()
+    );
     println!("unresolved imports: {}", report.unresolved_imports.len());
     print_unresolved_imports(report, limit);
     if !report.relocation_errors.is_empty() {
@@ -574,10 +634,8 @@ fn parse_run_apk_native_args(
             "--steps" => {
                 let value = iter
                     .next()
-                    .ok_or_else(|| "--steps needs a numeric value".to_string())?;
-                max_steps = value
-                    .parse()
-                    .map_err(|_| format!("invalid --steps value: {value}"))?;
+                    .ok_or_else(|| "--steps needs an integer or inf".to_string())?;
+                max_steps = parse_step_limit(&value)?;
                 max_steps_set = true;
             }
             "--launch" => options.launch = true,
@@ -648,6 +706,16 @@ fn parse_run_apk_native_args(
     }
 
     Ok((PathBuf::from(path), config, max_steps, options))
+}
+
+fn parse_step_limit(value: &str) -> Result<usize, String> {
+    if value.eq_ignore_ascii_case("inf") {
+        Ok(usize::MAX)
+    } else {
+        value
+            .parse()
+            .map_err(|_| format!("invalid --steps value: {value}"))
+    }
 }
 
 fn run_apk_native(
@@ -916,12 +984,17 @@ fn replay_sdl2_live_gles_frames(
     let mut total_events = 0_usize;
     let mut total_payload_bytes = 0_usize;
 
+    let max_steps_label = if max_steps_per_frame == usize::MAX {
+        "inf".to_string()
+    } else {
+        max_steps_per_frame.to_string()
+    };
     println!(
         "sdl2-live: started max_frames={} max_steps_per_frame={}",
         max_frames
             .map(|frames| frames.to_string())
             .unwrap_or_else(|| "unlimited".to_string()),
-        max_steps_per_frame
+        max_steps_label
     );
 
     loop {
@@ -1106,7 +1179,7 @@ fn replay_sdl2_live_gles_frames(
 
         match runtime
             .continue_until_hle(max_steps_per_frame, Some("eglSwapBuffers"))
-            .map_err(|err| format!("android_main continuation failed: {err}"))?
+            .map_err(|err| format!("native_app_glue pthread continuation failed: {err}"))?
         {
             aemu::native_runtime::NativeRuntimeFunctionExit::HleCall { step, .. } => {
                 if frames < 3 || frames % 60 == 0 {
@@ -1114,7 +1187,7 @@ fn replay_sdl2_live_gles_frames(
                 }
             }
             aemu::native_runtime::NativeRuntimeFunctionExit::Returned => {
-                return Err("android_main returned during SDL2 live loop".to_string());
+                return Err("native_app_glue pthread returned during SDL2 live loop".to_string());
             }
         }
     }
@@ -1237,48 +1310,44 @@ fn run_native_activity_launch(
         .run_function_with_args(on_create, &[harness.activity, 0, 0], max_steps)
         .map_err(|err| format!("ANativeActivity_onCreate failed: {err}"))?;
 
-    let mut app = runtime
+    let app = runtime
         .link
         .memory
         .load32(harness.activity.wrapping_add(0x1c))
         .map_err(|err| format!("failed to read ANativeActivity.instance: {err}"))?;
     if app == 0 {
-        app = runtime
-            .prepare_android_app(harness)
-            .map_err(|err| format!("android_app harness setup failed: {err}"))?;
-    } else {
-        runtime
-            .populate_android_app(app, harness)
-            .map_err(|err| format!("android_app harness patch failed: {err}"))?;
+        return Err(
+            "ANativeActivity_onCreate returned without installing ANativeActivity.instance"
+                .to_string(),
+        );
     }
-
-    let android_main = runtime
-        .symbol_address_in_library(ACTIVITY_LIBRARY, "android_main")
-        .or_else(|| runtime.symbol_address("android_main"))
-        .ok_or_else(|| "missing android_main export".to_string())?;
-    println!("launch: android_main {android_main:#010x} android_app {app:#010x}");
+    runtime
+        .populate_android_app(app, harness)
+        .map_err(|err| format!("android_app harness setup failed: {err}"))?;
+    let app_thread = runtime
+        .promote_guest_thread_for_arg(app)
+        .map_err(|err| format!("native_app_glue pthread activation failed: {err}"))?;
+    println!(
+        "launch: native_app_glue pthread {app_thread} android_app {app:#010x} pc {:#010x}",
+        runtime.cpu.pc()
+    );
     if until_swap {
         let outcome = runtime
-            .run_function_with_args_until_hle(
-                android_main,
-                &[app],
-                max_steps,
-                Some("eglSwapBuffers"),
-            )
-            .map_err(|err| format!("android_main failed: {err}"))?;
+            .continue_until_hle(max_steps, Some("eglSwapBuffers"))
+            .map_err(|err| format!("native_app_glue pthread failed: {err}"))?;
         return match outcome {
             aemu::native_runtime::NativeRuntimeFunctionExit::HleCall { name, step, .. } => {
                 println!("native activity reached {name} at step {step}");
                 Ok(())
             }
             aemu::native_runtime::NativeRuntimeFunctionExit::Returned => {
-                Err("android_main returned before eglSwapBuffers".to_string())
+                Err("native_app_glue pthread returned before eglSwapBuffers".to_string())
             }
         };
     }
-    runtime
-        .run_function_with_args(android_main, &[app], max_steps)
-        .map_err(|err| format!("android_main failed: {err}"))?;
+    runtime.continue_until_hle(max_steps, None).map_err(|err| {
+        format!("native_app_glue pthread failed before returning normally: {err}")
+    })?;
     println!("native activity launch returned");
     Ok(())
 }
@@ -1347,4 +1416,36 @@ fn parse_sdl2_shell_args(
 fn run_sdl2_shell(_args: Vec<String>) {
     eprintln!("sdl2-shell requires rebuilding with --features sdl2");
     std::process::exit(2);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_apk_steps_accepts_infinite_limit() {
+        let (_, _, max_steps, _) = parse_run_apk_native_args(vec![
+            "test.apk".to_string(),
+            "--steps".to_string(),
+            "inf".to_string(),
+            "--until-swap".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(max_steps, usize::MAX);
+    }
+
+    #[test]
+    fn run_apk_steps_keeps_numeric_and_rejects_unknown_values() {
+        let (_, _, max_steps, _) = parse_run_apk_native_args(vec![
+            "test.apk".to_string(),
+            "--steps".to_string(),
+            "12345".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(max_steps, 12_345);
+
+        let error = parse_step_limit("forever").unwrap_err();
+        assert_eq!(error, "invalid --steps value: forever");
+    }
 }

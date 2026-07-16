@@ -66,6 +66,44 @@ pub enum Isa {
     Thumb,
 }
 
+pub const RELEASE_BATCH_NO_PC: u32 = u32::MAX;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseBatchStops {
+    pub return_pc: u32,
+    pub intercepted_pc: u32,
+    pub bridge_pc: u32,
+}
+
+impl Default for ReleaseBatchStops {
+    fn default() -> Self {
+        Self {
+            return_pc: RELEASE_BATCH_NO_PC,
+            intercepted_pc: RELEASE_BATCH_NO_PC,
+            bridge_pc: RELEASE_BATCH_NO_PC,
+        }
+    }
+}
+
+pub const RELEASE_BATCH_BUDGET: u32 = 0;
+pub const RELEASE_BATCH_BOUNDARY: u32 = 1;
+pub const RELEASE_BATCH_TRAP: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct ReleaseBatchOutcome {
+    pub reason: u32,
+    pub steps: u32,
+    pub pc: u32,
+    pub isa: u32,
+}
+
+impl ReleaseBatchOutcome {
+    pub fn isa(self) -> Isa {
+        if self.isa == 0 { Isa::Arm } else { Isa::Thumb }
+    }
+}
+
 const VFP_FPSID_ARM1136: u32 = 0x4101_20b4;
 const FPSCR_IOC: u32 = 1 << 0;
 const FPSCR_DZC: u32 = 1 << 1;
@@ -147,7 +185,7 @@ struct ExclusiveReservation {
     size: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
     regs: [u32; 16],
     sregs: [u32; 64],
@@ -281,6 +319,11 @@ impl Cpu {
     }
 
     pub fn step<M: Memory>(&mut self, mem: &mut M) -> Result<()> {
+        self.step_release_inner(mem)
+    }
+
+    #[inline(always)]
+    fn step_release_inner<M: Memory>(&mut self, mem: &mut M) -> Result<()> {
         let pc = self.regs[15];
         if self.cpsr.t {
             let instr = mem.load16(pc)?;
@@ -316,6 +359,54 @@ impl Cpu {
             let instr = mem.load32(pc)?;
             self.regs[15] = pc.wrapping_add(4);
             self.execute_arm(instr, pc, mem)
+        }
+    }
+
+    #[inline]
+    pub fn run_release_batch<M: Memory>(
+        &mut self,
+        mem: &mut M,
+        max_steps: u32,
+        stops: ReleaseBatchStops,
+        trap_out: &mut Option<Trap>,
+    ) -> ReleaseBatchOutcome {
+        *trap_out = None;
+        let mut steps = 0u32;
+        while steps < max_steps {
+            let pc = self.regs[15];
+            if pc == stops.return_pc
+                || pc == stops.intercepted_pc
+                || pc == stops.bridge_pc
+                || (pc & 0xffff_ff00) == 0xffff_0f00
+            {
+                return ReleaseBatchOutcome {
+                    reason: RELEASE_BATCH_BOUNDARY,
+                    steps,
+                    pc,
+                    isa: u32::from(self.cpsr.t),
+                };
+            }
+
+            let isa = u32::from(self.cpsr.t);
+            match self.step_release_inner(mem) {
+                Ok(()) => steps += 1,
+                Err(trap) => {
+                    *trap_out = Some(trap);
+                    return ReleaseBatchOutcome {
+                        reason: RELEASE_BATCH_TRAP,
+                        steps: steps + 1,
+                        pc,
+                        isa,
+                    };
+                }
+            }
+        }
+
+        ReleaseBatchOutcome {
+            reason: RELEASE_BATCH_BUDGET,
+            steps,
+            pc: self.regs[15],
+            isa: u32::from(self.cpsr.t),
         }
     }
 
@@ -384,23 +475,30 @@ impl Cpu {
             return Ok(());
         }
 
-        if self.exec_arm_vfp(instr, pc, mem)? {
-            return Ok(());
+        let primary = (instr >> 25) & 0b111;
+        if is_direct_arm_data_processing(instr, primary) {
+            return self.exec_arm_data_processing(instr, pc, mem);
         }
-        if self.exec_arm_coprocessor(instr, pc)? {
-            return Ok(());
-        }
-        if self.exec_arm_misc(instr, pc, mem)? {
-            return Ok(());
-        }
-        if self.exec_arm_multiply(instr, pc)? {
-            return Ok(());
-        }
-        if self.exec_arm_halfword_transfer(instr, pc, mem)? {
-            return Ok(());
+        if matches!(primary, 0b110 | 0b111) {
+            if self.exec_arm_vfp(instr, pc, mem)? {
+                return Ok(());
+            }
+            if self.exec_arm_coprocessor(instr, pc)? {
+                return Ok(());
+            }
+        } else {
+            if matches!(primary, 0b000 | 0b001 | 0b011) && self.exec_arm_misc(instr, pc, mem)? {
+                return Ok(());
+            }
+            if matches!(primary, 0b000 | 0b011) && self.exec_arm_multiply(instr, pc)? {
+                return Ok(());
+            }
+            if primary == 0b000 && self.exec_arm_halfword_transfer(instr, pc, mem)? {
+                return Ok(());
+            }
         }
 
-        match (instr >> 25) & 0b111 {
+        match primary {
             0b101 => self.exec_arm_branch(instr, pc),
             0b100 => self.exec_arm_block_transfer(instr, pc, mem),
             0b010 | 0b011 => self.exec_arm_single_transfer(instr, pc, mem),
@@ -4413,15 +4511,15 @@ impl Cpu {
                 return Ok(());
             }
         }
-        if self.exec_arm_vfp(arm_like, pc, mem)? {
+        if (first & 0xfc00) == 0xec00 && self.exec_arm_vfp(arm_like, pc, mem)? {
             return Ok(());
         }
 
-        if self.exec_thumb32_hint(first, second)? {
+        if (first & 0xff00) == 0xf300 && self.exec_thumb32_hint(first, second)? {
             return Ok(());
         }
 
-        if self.exec_thumb32_exclusive(first, second, pc, mem)? {
+        if (first & 0xff00) == 0xe800 && self.exec_thumb32_exclusive(first, second, pc, mem)? {
             return Ok(());
         }
 
@@ -4453,7 +4551,9 @@ impl Cpu {
             }
         }
 
-        if self.exec_thumb32_misc_unary(first, second, pc)? {
+        if matches!(first & 0xfff0, 0xfa90 | 0xfab0)
+            && self.exec_thumb32_misc_unary(first, second, pc)?
+        {
             return Ok(());
         }
 
@@ -8459,6 +8559,13 @@ fn is_unsupported_a32_optional_armv7(instr: u32) -> bool {
         .any(|&(mask, value)| instr & mask == value)
 }
 
+#[inline(always)]
+fn is_direct_arm_data_processing(instr: u32, primary: u32) -> bool {
+    let opcode = (instr >> 21) & 0xf;
+    let is_data_processing = !matches!(opcode, 0x8..=0xb) || instr & (1 << 20) != 0;
+    is_data_processing && (primary == 0b001 || (primary == 0b000 && instr & 0x0000_0ff0 == 0))
+}
+
 fn sign_extend(value: u32, bits: u32) -> i32 {
     let shift = 32 - bits;
     ((value << shift) as i32) >> shift
@@ -8778,6 +8885,134 @@ mod tests {
             | ((rs as u32) << 8)
             | 0x10
             | (rm as u32)
+    }
+
+    fn seeded_data_processing_cpu() -> Cpu {
+        let mut cpu = Cpu::new();
+        for reg in 0..15 {
+            cpu.set_reg(reg, 0x1020_3040u32.wrapping_mul(reg as u32 + 1));
+        }
+        cpu.cpsr = Cpsr {
+            n: true,
+            z: false,
+            c: true,
+            v: true,
+            q: true,
+            it: 0,
+            ge: 0b1010,
+            t: false,
+        };
+        cpu
+    }
+
+    #[test]
+    fn release_batch_preserves_budget_boundary_and_trap_steps() {
+        let mut cpu = Cpu::new();
+        let mut mem = VecMemory::new(0x1000, 0x1000);
+        mem.load_arm_words(
+            0x1000,
+            &[
+                0xe3a0_0001, // mov r0, #1
+                0xe280_0001, // add r0, r0, #1
+                0xe12f_ff1e, // bx lr
+            ],
+        )
+        .unwrap();
+        cpu.set_pc(0x1000);
+        cpu.set_reg(14, 0xffff_0000);
+        let stops = ReleaseBatchStops {
+            return_pc: 0xffff_0000,
+            ..ReleaseBatchStops::default()
+        };
+        let mut trap = Some(Trap::StepLimit);
+
+        let budget = cpu.run_release_batch(&mut mem, 2, stops, &mut trap);
+        assert_eq!(budget.reason, RELEASE_BATCH_BUDGET);
+        assert_eq!(budget.steps, 2);
+        assert_eq!(budget.pc, 0x1008);
+        assert_eq!(cpu.reg(0), 2);
+        assert_eq!(trap, None);
+
+        let boundary = cpu.run_release_batch(&mut mem, 10, stops, &mut trap);
+        assert_eq!(boundary.reason, RELEASE_BATCH_BOUNDARY);
+        assert_eq!(boundary.steps, 1);
+        assert_eq!(boundary.pc, 0xffff_0000);
+        assert_eq!(boundary.isa(), Isa::Arm);
+        assert_eq!(trap, None);
+
+        cpu.set_pc(0x100c);
+        mem.store32(0x100c, 0xe7f0_00f0).unwrap();
+        let trapped = cpu.run_release_batch(&mut mem, 10, ReleaseBatchStops::default(), &mut trap);
+        assert_eq!(trapped.reason, RELEASE_BATCH_TRAP);
+        assert_eq!(trapped.steps, 1);
+        assert_eq!(trapped.pc, 0x100c);
+        assert_eq!(trapped.isa(), Isa::Arm);
+        assert!(matches!(
+            trap,
+            Some(Trap::UndefinedArm {
+                pc: 0x100c,
+                instr: 0xe7f0_00f0
+            })
+        ));
+    }
+
+    #[test]
+    fn direct_arm_data_processing_routes_match_authoritative_leaf() {
+        let mut mem = VecMemory::new(0, 4);
+        for opcode in 0..16u32 {
+            for set_flags in [false, true] {
+                for operand2 in [0x001, 0x482, 0xf7f] {
+                    let instr = 0xe200_0000
+                        | (opcode << 21)
+                        | enc_bit(set_flags, 20)
+                        | (2 << 16)
+                        | (3 << 12)
+                        | operand2;
+                    let selected = !matches!(opcode, 0x8..=0xb) || set_flags;
+                    assert_eq!(
+                        is_direct_arm_data_processing(instr, (instr >> 25) & 0b111),
+                        selected
+                    );
+                    if !selected {
+                        continue;
+                    }
+                    let mut routed = seeded_data_processing_cpu();
+                    let mut leaf = routed.clone();
+                    let routed_result = routed.execute_arm(instr, 0x8000, &mut mem);
+                    let leaf_result = leaf.exec_arm_data_processing(instr, 0x8000, &mut mem);
+                    assert_eq!(routed_result, leaf_result, "instr={instr:#010x}");
+                    assert_eq!(routed, leaf, "instr={instr:#010x}");
+                }
+
+                for rm in [0, 1, 7, 14] {
+                    let instr = 0xe000_0000
+                        | (opcode << 21)
+                        | enc_bit(set_flags, 20)
+                        | (2 << 16)
+                        | (3 << 12)
+                        | rm;
+                    let selected = !matches!(opcode, 0x8..=0xb) || set_flags;
+                    assert_eq!(
+                        is_direct_arm_data_processing(instr, (instr >> 25) & 0b111),
+                        selected
+                    );
+                    if !selected {
+                        continue;
+                    }
+                    let mut routed = seeded_data_processing_cpu();
+                    let mut leaf = routed.clone();
+                    let routed_result = routed.execute_arm(instr, 0x8000, &mut mem);
+                    let leaf_result = leaf.exec_arm_data_processing(instr, 0x8000, &mut mem);
+                    assert_eq!(routed_result, leaf_result, "instr={instr:#010x}");
+                    assert_eq!(routed, leaf, "instr={instr:#010x}");
+                }
+            }
+        }
+
+        for instr in [0xe300_0000, 0xe340_0000, 0xe320_f000, 0xe10f_0000] {
+            assert!(!is_direct_arm_data_processing(instr, (instr >> 25) & 0b111));
+        }
+        assert!(!is_direct_arm_data_processing(0xe1a0_0081, 0b000));
     }
 
     #[test]

@@ -1,5 +1,16 @@
 # Minecraft PE Local Probe
 
+> Historical investigation note (2026-07-16): command output and conclusions
+> below describe intermediate runtime versions. All MCPE game/engine HLE
+> dispatch, the resource-completion bridge, selective pthread scheduling, and
+> direct host invocation of `android_main` have since been removed. Current
+> launch continues the real native-app-glue pthread, but reaches it by directly
+> calling target JNI entrypoints, overwriting the guest-created `android_app`,
+> and injecting lifecycle sources. The release completes 300 frames and the
+> input gate reaches the rendered Play screen; those are rendering/native-code
+> observations, not a no-fake acceptance result. See `docs/no_fake_hle.md` for
+> the separate symbol-dispatch, lifecycle, and DEX gate status.
+
 Local APK inspected:
 
 ```text

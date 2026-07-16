@@ -41,8 +41,19 @@ process state.
 as this project's runtime is the wrong default because it is C/C++, tied to
 AOSP build assumptions and Android system libraries, includes JIT/interpreter
 configuration paths, and does not solve ARM native `.so` execution in the
-browser. The runtime should HLE the specific Java/JNI surface demanded by the
-game instead.
+browser. The runtime should HLE the Android framework/JNI surface demanded by
+the game. APK-defined Java methods are a separate boundary: under the current
+absolute no-fake contract they must eventually execute as DEX, even when a
+bounded Rust semantic lift is useful for bring-up. The current lifts and this
+open whole-APK gate are recorded in `docs/no_fake_hle.md`.
+
+Native-activity launch has the same ownership rule. Platform HLE may construct
+framework objects and invoke callbacks installed in `ANativeActivity`, but it
+must not directly call an APK-specific JNI method, overwrite the APK's
+guest-created `android_app`, inject an app command processor, or queue app-glue
+commands behind the installed callback/pipe path. The current desktop and wasm
+launchers do those things, so native lifecycle integrity is an open gate
+separate from native symbol-dispatch purity and DEX execution.
 
 ### APK Install and Extraction
 
@@ -160,8 +171,12 @@ useful, but it does not replace the browser WebGL backend.
    interaction checks, and audio HLE.
 6. Add GLES 1.1 fixed-function emulation over shaders for older games that
    require it.
-7. Add input/audio/storage HLE and enough Android lifecycle/JNI glue to reach
-   the first frame.
+7. Add input/audio/storage HLE and a framework-owned Android lifecycle/JNI path
+   that reaches APK code through manifest selection, DEX activity execution,
+   installed `ANativeActivityCallbacks`, and the real native-app-glue command
+   pipe. Remove the current APK-specific JNI calls, `android_app` field
+   overwrites, and synthetic lifecycle poll sources before treating a rendered
+   frame as an acceptance result.
 8. Build the wasm/WebGL target and keep desktop SDL2 as the debugger target.
    Current status: the crate checks for `wasm32-unknown-unknown` with the
    `webgl` feature and builds a `cdylib` wasm target for `wasm-bindgen` via

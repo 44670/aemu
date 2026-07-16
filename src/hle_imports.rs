@@ -26,9 +26,11 @@ const HLE_HEAP_SMALL_MAX: u32 = 512;
 const HLE_HEAP_SMALL_CLASS_COUNT: usize = (HLE_HEAP_SMALL_MAX / HLE_HEAP_SMALL_ALIGN) as usize;
 const HLE_HEAP_SMALL_SLAB_SIZE: u32 = 64 * 1024;
 
-const FAKE_FILE_SIZE: u32 = 0x40;
+// Android 4.4 ARM bionic's FILE layout is 0x54 bytes.
+const BIONIC_FILE_SIZE: u32 = 0x54;
 const FAKE_FILE_FLAGS_OFFSET: u32 = 0x0c;
 const FAKE_FILE_FD_OFFSET: u32 = 0x0e;
+const BIONIC_FILE_FLAG_SNBF: u16 = 0x0002;
 const BIONIC_FILE_FLAG_SRD: u16 = 0x0004;
 const BIONIC_FILE_FLAG_SWR: u16 = 0x0008;
 const BIONIC_FILE_FLAG_SRW: u16 = 0x0010;
@@ -58,34 +60,114 @@ const ANDROID_DIRENT_D_NAME_OFFSET: u32 = 19;
 const ANDROID_DIRENT_D_NAME_SIZE: u32 = 256;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
+const AF_UNSPEC: u32 = 0;
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const SOCK_STREAM: u32 = 1;
 const SOCK_DGRAM: u32 = 2;
 const SOCK_TYPE_MASK: u32 = 0x0f;
+const SOL_SOCKET: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const SO_TYPE: u32 = 3;
+const SO_ERROR: u32 = 4;
+const SO_BROADCAST: u32 = 6;
+const SO_SNDBUF: u32 = 7;
+const SO_RCVBUF: u32 = 8;
+const SO_KEEPALIVE: u32 = 9;
+const SO_LINGER: u32 = 13;
+const IPPROTO_IP: u32 = 0;
+const IPPROTO_TCP: u32 = 6;
+const IPPROTO_UDP: u32 = 17;
+const IP_HDRINCL: u32 = 3;
+const AI_PASSIVE: u32 = 0x0000_0001;
+const AI_CANONNAME: u32 = 0x0000_0002;
+const AI_NUMERICHOST: u32 = 0x0000_0004;
+const AI_NUMERICSERV: u32 = 0x0000_0008;
+const AI_ADDRCONFIG: u32 = 0x0000_0400;
+const AI_MASK: u32 = AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST | AI_NUMERICSERV | AI_ADDRCONFIG;
+const EAI_ADDRFAMILY: u32 = 1;
+const EAI_AGAIN: u32 = 2;
+const EAI_BADFLAGS: u32 = 3;
+const EAI_FAMILY: u32 = 5;
+const EAI_MEMORY: u32 = 6;
+const EAI_NONAME: u32 = 8;
+const EAI_SERVICE: u32 = 9;
+const EAI_SOCKTYPE: u32 = 10;
+const EAI_BADHINTS: u32 = 12;
+const EAI_PROTOCOL: u32 = 13;
+const EAI_MAX: usize = 15;
+const ANDROID_ADDRINFO_SIZE: u32 = 32;
 const INET_NTOA_BUFFER_SIZE: u32 = 16;
 const STRERROR_BUFFER_SIZE: u32 = 64;
 const PRINTF_OUTPUT_LIMIT: usize = 1024 * 1024;
 const F_GETFL: u32 = 3;
 const F_SETFL: u32 = 4;
+const F_GETLK: u32 = 5;
+const F_SETLK: u32 = 6;
+const F_SETLKW: u32 = 7;
+const F_RDLCK: u16 = 0;
+const F_WRLCK: u16 = 1;
+const F_UNLCK: u16 = 2;
+const ARM_FLOCK_TYPE_OFFSET: u32 = 0;
+const ARM_FLOCK_WHENCE_OFFSET: u32 = 2;
+const ARM_FLOCK_START_OFFSET: u32 = 4;
+const ARM_FLOCK_LEN_OFFSET: u32 = 8;
 const O_ACCMODE: u32 = 0x03;
 const O_RDONLY: u32 = 0x00;
+const O_WRONLY: u32 = 0x01;
+const O_RDWR: u32 = 0x02;
 const O_CREAT: u32 = 0x40;
 const O_TRUNC: u32 = 0x200;
 const O_APPEND: u32 = 0x400;
+const O_NONBLOCK: u32 = 0x800;
 const ENOENT: u32 = 2;
 const EBADF: u32 = 9;
 const EAGAIN: u32 = 11;
+const ENOMEM: u32 = 12;
+const EFAULT: u32 = 14;
 const EEXIST: u32 = 17;
 const EISDIR: u32 = 21;
 const EINVAL: u32 = 22;
+const ENOTTY: u32 = 25;
+const EPIPE: u32 = 32;
+const IOV_MAX: u32 = 1024;
 const ENOSYS: u32 = 38;
+const EDESTADDRREQ: u32 = 89;
+const EMSGSIZE: u32 = 90;
+const ENOPROTOOPT: u32 = 92;
+const ENETUNREACH: u32 = 101;
+const ENOTCONN: u32 = 107;
+const PTHREAD_KEYS_MAX: u32 = 128;
 const SEEK_SET: u32 = 0;
 const SEEK_CUR: u32 = 1;
 const SEEK_END: u32 = 2;
 const POLLIN: u16 = 0x0001;
+const POLLOUT: u16 = 0x0004;
+const POLLHUP: u16 = 0x0010;
 const POLLNVAL: u16 = 0x0020;
 const POLLFD_SIZE: u32 = 8;
+const PIPE_CAPACITY: usize = 64 * 1024;
+const SOCKET_DATAGRAM_MAX_PAYLOAD: u32 = 65_507;
+const SOCKET_DATAGRAM_QUEUE_CAPACITY: usize = 64;
+const SIOCGIFCONF: u32 = 0x8912;
+const ANDROID_IFNAMSIZ: u32 = 16;
+const ANDROID_IFREQ_SIZE: u32 = 32;
+const EPOLL_CTL_ADD: u32 = 1;
+const EPOLL_CTL_DEL: u32 = 2;
+const EPOLL_CTL_MOD: u32 = 3;
+const EPOLLIN: u32 = 0x0000_0001;
+const EPOLLOUT: u32 = 0x0000_0004;
+const EPOLLERR: u32 = 0x0000_0008;
+const EPOLLHUP: u32 = 0x0000_0010;
+const EPOLL_EVENT_SIZE: u32 = 16;
+const EPOLL_EVENT_DATA_OFFSET: u32 = 8;
+const ALOOPER_POLL_WAKE: u32 = (-1_i32) as u32;
+const ALOOPER_POLL_TIMEOUT: u32 = (-3_i32) as u32;
+const ALOOPER_EVENT_INPUT: u32 = 1;
+const ALOOPER_EVENT_OUTPUT: u32 = 2;
+const ALOOPER_EVENT_HANGUP: u32 = 8;
+const ALOOPER_EVENT_INVALID: u32 = 16;
+const ALOOPER_HANDLE: u32 = 1;
 const ANDROID_ARM_STAT_SIZE: u32 = 96;
 const ANDROID_S_IFREG: u32 = 0o100000;
 const ANDROID_S_IFDIR: u32 = 0o040000;
@@ -125,7 +207,9 @@ const AINPUT_SOURCE_TOUCHSCREEN: u32 = 0x0000_1002;
 const AMOTION_EVENT_ACTION_DOWN: u32 = 0;
 const AMOTION_EVENT_ACTION_UP: u32 = 1;
 const AMOTION_EVENT_ACTION_MOVE: u32 = 2;
-const MINECRAFT_TOUCH_INPUT_MODE: i32 = 2;
+const AMOTION_EVENT_AXIS_X: u32 = 0;
+const AMOTION_EVENT_AXIS_Y: u32 = 1;
+const AMOTION_EVENT_AXIS_PRESSURE: u32 = 2;
 const ARMV7_NEON_HWCAP: u32 = HWCAP_SWP
     | HWCAP_HALF
     | HWCAP_THUMB
@@ -225,6 +309,18 @@ const EGL_CONFIG_HANDLE: u32 = 2;
 const EGL_CONTEXT_HANDLE: u32 = 3;
 const EGL_SURFACE_HANDLE: u32 = 4;
 const EGL_SUCCESS: u32 = 0x3000;
+const EGL_NOT_INITIALIZED: u32 = 0x3001;
+const EGL_BAD_ACCESS: u32 = 0x3002;
+const EGL_BAD_ALLOC: u32 = 0x3003;
+const EGL_BAD_ATTRIBUTE: u32 = 0x3004;
+const EGL_BAD_CONFIG: u32 = 0x3005;
+const EGL_BAD_CONTEXT: u32 = 0x3006;
+const EGL_BAD_CURRENT_SURFACE: u32 = 0x3007;
+const EGL_BAD_DISPLAY: u32 = 0x3008;
+const EGL_BAD_MATCH: u32 = 0x3009;
+const EGL_BAD_NATIVE_WINDOW: u32 = 0x300b;
+const EGL_BAD_PARAMETER: u32 = 0x300c;
+const EGL_BAD_SURFACE: u32 = 0x300d;
 const EGL_BUFFER_SIZE: u32 = 0x3020;
 const EGL_ALPHA_SIZE: u32 = 0x3021;
 const EGL_BLUE_SIZE: u32 = 0x3022;
@@ -234,6 +330,7 @@ const EGL_DEPTH_SIZE: u32 = 0x3025;
 const EGL_STENCIL_SIZE: u32 = 0x3026;
 const EGL_CONFIG_CAVEAT: u32 = 0x3027;
 const EGL_CONFIG_ID: u32 = 0x3028;
+const EGL_CONFIG_ID_VALUE: u32 = 1;
 const EGL_LEVEL: u32 = 0x3029;
 const EGL_MAX_PBUFFER_HEIGHT: u32 = 0x302a;
 const EGL_MAX_PBUFFER_PIXELS: u32 = 0x302b;
@@ -260,8 +357,18 @@ const EGL_VERSION: u32 = 0x3054;
 const EGL_EXTENSIONS: u32 = 0x3055;
 const EGL_HEIGHT: u32 = 0x3056;
 const EGL_WIDTH: u32 = 0x3057;
+const EGL_DRAW: u32 = 0x3059;
+const EGL_READ: u32 = 0x305a;
 const EGL_CLIENT_APIS: u32 = 0x308d;
 const EGL_RGB_BUFFER: u32 = 0x308e;
+const EGL_CONTEXT_CLIENT_VERSION: u32 = 0x3098;
+const EGL_OPENGL_ES_API: u32 = 0x30a0;
+const EGL_CORE_NATIVE_ENGINE: u32 = 0x305b;
+const EGL_RENDER_BUFFER: u32 = 0x3086;
+const EGL_BACK_BUFFER: u32 = 0x3084;
+const EGL_SWAP_BEHAVIOR: u32 = 0x3093;
+const EGL_BUFFER_DESTROYED: u32 = 0x3095;
+const EGL_DONT_CARE: u32 = u32::MAX;
 const EGL_WINDOW_BIT: u32 = 0x0004;
 const EGL_PBUFFER_BIT: u32 = 0x0001;
 const EGL_OPENGL_ES_BIT: u32 = 0x0001;
@@ -269,17 +376,18 @@ const EGL_OPENGL_ES2_BIT: u32 = 0x0004;
 const ANDROID_WINDOW_FORMAT_RGBA_8888: u32 = 1;
 const ACONFIGURATION_SIZE: u32 = 8;
 const AASSET_HANDLE_SIZE: u32 = 0x10;
-const FAKE_GEOMETRY_SIZE: u32 = 0x20;
-const FAKE_TEXTURE_PAIR_SIZE: u32 = 0x4c;
-const FAKE_TEXTURE_SIDE: u32 = 16;
-const FAKE_TEXTURE_BYTES: u32 = FAKE_TEXTURE_SIDE * FAKE_TEXTURE_SIDE * 4;
-const FAKE_TEXTURE_OGL_SIZE: u32 = 0x40;
 const EGL_DEFAULT_SURFACE_WIDTH: u32 = 854;
 const EGL_DEFAULT_SURFACE_HEIGHT: u32 = 480;
 const GL_VENDOR: u32 = 0x1f00;
 const GL_RENDERER: u32 = 0x1f01;
 const GL_VERSION: u32 = 0x1f02;
 const GL_EXTENSIONS: u32 = 0x1f03;
+const GL_NO_ERROR: u32 = 0;
+const GL_INVALID_ENUM: u32 = 0x0500;
+const GL_INVALID_VALUE: u32 = 0x0501;
+const GL_INVALID_OPERATION: u32 = 0x0502;
+const GL_OUT_OF_MEMORY: u32 = 0x0505;
+const GL_INVALID_FRAMEBUFFER_OPERATION: u32 = 0x0506;
 const GL_MAX_TEXTURE_SIZE: u32 = 0x0d33;
 const GL_TEXTURE0: u32 = 0x84c0;
 const GL_TEXTURE_2D: u32 = 0x0de1;
@@ -287,8 +395,15 @@ const GL_TEXTURE_MAG_FILTER: u32 = 0x2800;
 const GL_TEXTURE_MIN_FILTER: u32 = 0x2801;
 const GL_TEXTURE_WRAP_S: u32 = 0x2802;
 const GL_TEXTURE_WRAP_T: u32 = 0x2803;
+const GL_NEAREST: u32 = 0x2600;
 const GL_LINEAR: u32 = 0x2601;
+const GL_NEAREST_MIPMAP_NEAREST: u32 = 0x2700;
+const GL_LINEAR_MIPMAP_NEAREST: u32 = 0x2701;
+const GL_NEAREST_MIPMAP_LINEAR: u32 = 0x2702;
+const GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703;
 const GL_REPEAT: u32 = 0x2901;
+const GL_CLAMP_TO_EDGE: u32 = 0x812f;
+const GL_MIRRORED_REPEAT: u32 = 0x8370;
 const GL_MAX_TEXTURE_IMAGE_UNITS: u32 = 0x8872;
 const GL_MAX_VERTEX_ATTRIBS: u32 = 0x8869;
 const GL_ALPHA: u32 = 0x1906;
@@ -309,9 +424,20 @@ const GL_UNSIGNED_SHORT_4_4_4_4: u32 = 0x8033;
 const GL_UNSIGNED_SHORT_5_5_5_1: u32 = 0x8034;
 const GL_UNSIGNED_SHORT_5_6_5: u32 = 0x8363;
 const GL_BGRA_EXT: u32 = 0x80e1;
+const GL_RGB8_OES: u32 = 0x8051;
+const GL_RGBA4: u32 = 0x8056;
+const GL_RGB5_A1: u32 = 0x8057;
+const GL_RGBA8_OES: u32 = 0x8058;
+const GL_DEPTH_COMPONENT16: u32 = 0x81a5;
+const GL_DEPTH24_STENCIL8_OES: u32 = 0x88f0;
+const GL_STENCIL_INDEX8: u32 = 0x8d48;
+const GL_RGB565: u32 = 0x8d62;
+const GL_DELETE_STATUS: u32 = 0x8b80;
 const GL_COMPILE_STATUS: u32 = 0x8b81;
 const GL_LINK_STATUS: u32 = 0x8b82;
 const GL_INFO_LOG_LENGTH: u32 = 0x8b84;
+const GL_SHADER_SOURCE_LENGTH: u32 = 0x8b88;
+const GL_SHADER_TYPE: u32 = 0x8b4f;
 const GL_ACTIVE_UNIFORMS: u32 = 0x8b86;
 const GL_ACTIVE_UNIFORM_MAX_LENGTH: u32 = 0x8b87;
 const GL_ACTIVE_ATTRIBUTES: u32 = 0x8b89;
@@ -332,8 +458,13 @@ const GL_FLOAT_MAT4: u32 = 0x8b5c;
 const GL_SAMPLER_2D: u32 = 0x8b5e;
 const GL_SAMPLER_CUBE: u32 = 0x8b60;
 const GL_SHADING_LANGUAGE_VERSION: u32 = 0x8b8c;
+const GL_FRAGMENT_SHADER: u32 = 0x8b30;
+const GL_VERTEX_SHADER: u32 = 0x8b31;
 const GL_ARRAY_BUFFER: u32 = 0x8892;
 const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
+const GL_STREAM_DRAW: u32 = 0x88e0;
+const GL_STATIC_DRAW: u32 = 0x88e4;
+const GL_DYNAMIC_DRAW: u32 = 0x88e8;
 const GL_LOW_FLOAT: u32 = 0x8df0;
 const GL_MEDIUM_FLOAT: u32 = 0x8df1;
 const GL_HIGH_FLOAT: u32 = 0x8df2;
@@ -341,6 +472,62 @@ const GL_LOW_INT: u32 = 0x8df3;
 const GL_MEDIUM_INT: u32 = 0x8df4;
 const GL_HIGH_INT: u32 = 0x8df5;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8cd5;
+const GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT: u32 = 0x8cd6;
+const GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT: u32 = 0x8cd7;
+const GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS: u32 = 0x8cd9;
+const GL_FRAMEBUFFER: u32 = 0x8d40;
+const GL_RENDERBUFFER: u32 = 0x8d41;
+const GL_COLOR_ATTACHMENT0: u32 = 0x8ce0;
+const GL_DEPTH_ATTACHMENT: u32 = 0x8d00;
+const GL_STENCIL_ATTACHMENT: u32 = 0x8d20;
+const GL_FRAMEBUFFER_BINDING: u32 = 0x8ca6;
+const GL_RENDERBUFFER_BINDING: u32 = 0x8ca7;
+const GL_ARRAY_BUFFER_BINDING: u32 = 0x8894;
+const GL_ELEMENT_ARRAY_BUFFER_BINDING: u32 = 0x8895;
+const GL_CURRENT_PROGRAM: u32 = 0x8b8d;
+const GL_ACTIVE_TEXTURE: u32 = 0x84e0;
+const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
+const GL_BLEND: u32 = 0x0be2;
+const GL_CULL_FACE: u32 = 0x0b44;
+const GL_DEPTH_TEST: u32 = 0x0b71;
+const GL_DITHER: u32 = 0x0bd0;
+const GL_SCISSOR_TEST: u32 = 0x0c11;
+const GL_STENCIL_TEST: u32 = 0x0b90;
+const GL_POLYGON_OFFSET_FILL: u32 = 0x8037;
+const GL_SAMPLE_ALPHA_TO_COVERAGE: u32 = 0x809e;
+const GL_SAMPLE_COVERAGE: u32 = 0x80a0;
+const GL_ZERO: u32 = 0;
+const GL_ONE: u32 = 1;
+const GL_SRC_COLOR: u32 = 0x0300;
+const GL_ONE_MINUS_SRC_COLOR: u32 = 0x0301;
+const GL_SRC_ALPHA: u32 = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
+const GL_DST_ALPHA: u32 = 0x0304;
+const GL_ONE_MINUS_DST_ALPHA: u32 = 0x0305;
+const GL_DST_COLOR: u32 = 0x0306;
+const GL_ONE_MINUS_DST_COLOR: u32 = 0x0307;
+const GL_SRC_ALPHA_SATURATE: u32 = 0x0308;
+const GL_FRONT: u32 = 0x0404;
+const GL_BACK: u32 = 0x0405;
+const GL_FRONT_AND_BACK: u32 = 0x0408;
+const GL_NEVER: u32 = 0x0200;
+const GL_LESS: u32 = 0x0201;
+const GL_EQUAL: u32 = 0x0202;
+const GL_LEQUAL: u32 = 0x0203;
+const GL_GREATER: u32 = 0x0204;
+const GL_NOTEQUAL: u32 = 0x0205;
+const GL_GEQUAL: u32 = 0x0206;
+const GL_ALWAYS: u32 = 0x0207;
+const GL_KEEP: u32 = 0x1e00;
+const GL_REPLACE: u32 = 0x1e01;
+const GL_INCR: u32 = 0x1e02;
+const GL_DECR: u32 = 0x1e03;
+const GL_INVERT: u32 = 0x150a;
+const GL_INCR_WRAP: u32 = 0x8507;
+const GL_DECR_WRAP: u32 = 0x8508;
+const GL_DEPTH_BUFFER_BIT: u32 = 0x0000_0100;
+const GL_STENCIL_BUFFER_BIT: u32 = 0x0000_0400;
+const GL_COLOR_BUFFER_BIT: u32 = 0x0000_4000;
 const WCTYPE_ALNUM: u32 = 1 << 0;
 const WCTYPE_ALPHA: u32 = 1 << 1;
 const WCTYPE_BLANK: u32 = 1 << 2;
@@ -357,8 +544,6 @@ const CXX_STRING_REP_HEADER_SIZE: u32 = 12;
 const CXX_STRING_NPOS: u32 = u32::MAX;
 const CXX_STRING_MAX_SIZE: u32 = 0x3fff_fffc;
 static HLE_STRING_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
-static MCPE_RESOURCE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
-static MCPE_INPUT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static HLE_SCANF_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static HLE_PRINTF_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const FAKE_TIME_BASE_SECS: u64 = 1_600_000_000;
@@ -379,7 +564,6 @@ pub enum HleSymbolKind {
     Zlib,
     CxxAbi,
     CxxStd,
-    Target,
 }
 
 impl fmt::Display for HleSymbolKind {
@@ -396,7 +580,6 @@ impl fmt::Display for HleSymbolKind {
             Self::Zlib => write!(f, "zlib"),
             Self::CxxAbi => write!(f, "cxxabi"),
             Self::CxxStd => write!(f, "c++std"),
-            Self::Target => write!(f, "target"),
         }
     }
 }
@@ -421,7 +604,6 @@ pub enum HleFunctionCode {
     MallocBump,
     Memcpy,
     Memset,
-    ReturnNull,
     Strcmp,
     Strlen,
     Strncmp,
@@ -451,6 +633,7 @@ impl fmt::Display for HleSymbolShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HleDataInit {
     Zero,
+    BionicStdio,
     StackGuard,
     Ctype,
     ToLower,
@@ -463,10 +646,8 @@ pub enum HleDataInit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HleCallBehavior {
     Implemented,
-    ReturnZero,
-    ReturnOne,
-    ReturnMinusOneErrno,
-    ReturnNull,
+    RuntimeImplemented,
+    Unimplemented,
     Abort,
 }
 
@@ -474,10 +655,8 @@ impl fmt::Display for HleCallBehavior {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Implemented => write!(f, "implemented"),
-            Self::ReturnZero => write!(f, "stub:0"),
-            Self::ReturnOne => write!(f, "stub:1"),
-            Self::ReturnMinusOneErrno => write!(f, "stub:-1"),
-            Self::ReturnNull => write!(f, "stub:null"),
+            Self::RuntimeImplemented => write!(f, "runtime-implemented"),
+            Self::Unimplemented => write!(f, "unimplemented"),
             Self::Abort => write!(f, "abort"),
         }
     }
@@ -486,6 +665,8 @@ impl fmt::Display for HleCallBehavior {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HleError {
     UnknownSymbol(String),
+    UnimplementedSymbol(String),
+    MissingImplementation(String),
     Memory(String),
     HeapExhausted { requested: u32 },
     Abort(String),
@@ -495,6 +676,13 @@ impl fmt::Display for HleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownSymbol(name) => write!(f, "unknown HLE symbol: {name}"),
+            Self::UnimplementedSymbol(name) => write!(f, "unimplemented HLE symbol: {name}"),
+            Self::MissingImplementation(name) => {
+                write!(
+                    f,
+                    "HLE symbol is marked implemented but has no dispatcher: {name}"
+                )
+            }
             Self::Memory(err) => write!(f, "{err}"),
             Self::HeapExhausted { requested } => {
                 write!(f, "HLE heap exhausted while allocating {requested} bytes")
@@ -518,30 +706,57 @@ pub struct HleRuntime {
     apk_bytes: Option<Vec<u8>>,
     apk_entries: Option<Vec<ZipEntry>>,
     assets: Vec<AndroidAsset>,
+    configurations: Vec<AndroidConfiguration>,
     next_gl_name: u32,
+    gl_error: u32,
     gl_shaders: Vec<GlShader>,
     gl_programs: Vec<GlProgram>,
     gl_bound_array_buffer: u32,
     gl_bound_element_array_buffer: u32,
+    gl_bound_framebuffer: u32,
+    gl_bound_renderbuffer: u32,
     gl_active_texture: u32,
     gl_current_program: u32,
     gl_bound_textures: Vec<GuestGlTextureBinding>,
+    gl_textures: Vec<u32>,
+    gl_texture_bound_once: Vec<u32>,
+    gl_texture_parameters: Vec<GuestGlTextureParameter>,
     gl_buffers: Vec<GuestGlBuffer>,
+    gl_framebuffers: Vec<u32>,
+    gl_renderbuffers: Vec<u32>,
+    gl_texture_images: Vec<GuestGlTextureImage>,
+    gl_renderbuffer_storage: Vec<GuestGlRenderbufferStorage>,
+    gl_framebuffer_attachments: Vec<GuestGlFramebufferAttachment>,
     gl_vertex_attribs: Vec<GuestVertexAttrib>,
+    egl_state: EglState,
     gles_events: VecDeque<GlesEvent>,
     gles_event_index: usize,
     gles_trace_event_count: usize,
     gles_texture_upload_dump_index: usize,
     next_fd: u32,
+    standard_fd_open: [bool; 3],
     files: Vec<FakeFile>,
+    next_pipe_id: u32,
+    pipes: Vec<GuestPipe>,
     virtual_files: Vec<VirtualFile>,
     virtual_dirs: Vec<String>,
     current_pthread: u32,
+    pthread_ids: Vec<u32>,
+    pthread_names: Vec<PthreadName>,
     created_pthreads: VecDeque<CreatedPthread>,
-    next_pthread_key: u32,
+    pthread_keys: Vec<PthreadKey>,
     pthread_specific: Vec<PthreadSpecific>,
-    native_activity: Option<u32>,
+    pthread_cleanup_stacks: Vec<PthreadCleanupStack>,
+    pthread_signal_masks: Vec<PthreadSignalMask>,
+    signal_actions: Vec<SignalAction>,
+    cxa_atexit_entries: Vec<CxaAtExitEntry>,
+    native_window: Option<NativeWindowState>,
+    android_logs: VecDeque<AndroidLogEntry>,
     alooper_events: VecDeque<u32>,
+    alooper_prepared: bool,
+    alooper_ref_count: u32,
+    alooper_wake_pending: bool,
+    alooper_registrations: Vec<ALooperRegistration>,
     unwind_tables: Vec<HleUnwindTable>,
     random_state: u32,
     clock_mode: HleClockMode,
@@ -550,47 +765,16 @@ pub struct HleRuntime {
     clock_step_after_draw_ns: Option<u64>,
     clock_start_monotonic_ns: u64,
     clock_wall_floor_ns: u64,
-    fake_geometries: Vec<NamedGuestObject>,
-    fake_texture_pairs: Vec<NamedGuestObject>,
-    resource_texture_aliases: Option<Vec<(String, String)>>,
     cxx_string_recycling: bool,
-    input_pointer: HlePointer,
-    input_pointer_ids: Option<u32>,
     input_poll_source: Option<u32>,
     pending_input_events: VecDeque<HleInputEvent>,
     active_input_events: Vec<HleInputEvent>,
-    minecraft_input_events: VecDeque<HleMinecraftInputEvent>,
     gles_draw_submissions: usize,
     inet_ntoa_buffer: Option<u32>,
     strerror_buffer: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct HlePointer {
-    id: i64,
-    down: bool,
-    was_pressed: bool,
-    was_released: bool,
-    pressed_this_update: bool,
-    released_this_update: bool,
-    dirty_since_commit: bool,
-    x: f32,
-    y: f32,
-    dx: f32,
-    dy: f32,
-    pressure: f32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NamedGuestObject {
-    key: String,
-    address: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResourceLocationDebug {
-    path: String,
-    package: String,
+    gai_strerror_buffers: [Option<u32>; EAI_MAX + 1],
+    guest_environment: Vec<GuestEnvironmentValue>,
+    guest_hostents: Vec<GuestHostent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,12 +785,53 @@ struct DecodedTexture {
     source: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EglState {
+    display_obtained: bool,
+    initialized: bool,
+    bound_api: u32,
+    context_alive: bool,
+    context_destroy_pending: bool,
+    context_client_version: u32,
+    surface_alive: bool,
+    surface_destroy_pending: bool,
+    surface_width: u32,
+    surface_height: u32,
+    current_thread: Option<u32>,
+    current_draw: u32,
+    current_read: u32,
+    current_context: u32,
+    swap_interval: i32,
+    thread_errors: Vec<EglThreadError>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImageFormat {
-    Any,
-    Png,
-    Tga,
-    Jpeg,
+struct EglThreadError {
+    thread: u32,
+    error: u32,
+}
+
+impl Default for EglState {
+    fn default() -> Self {
+        Self {
+            display_obtained: false,
+            initialized: false,
+            bound_api: EGL_OPENGL_ES_API,
+            context_alive: false,
+            context_destroy_pending: false,
+            context_client_version: 0,
+            surface_alive: false,
+            surface_destroy_pending: false,
+            surface_width: EGL_DEFAULT_SURFACE_WIDTH,
+            surface_height: EGL_DEFAULT_SURFACE_HEIGHT,
+            current_thread: None,
+            current_draw: 0,
+            current_read: 0,
+            current_context: 0,
+            swap_interval: 1,
+            thread_errors: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -616,17 +841,13 @@ struct HleInputEvent {
     source: u32,
     device_id: u32,
     action: u32,
+    key_code: i32,
+    meta_state: u32,
+    repeat_count: i32,
     pointer_id: i32,
     x: f32,
     y: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum HleMinecraftInputEvent {
-    Button { id: i16, state: u8, repeat: bool },
-    PointerLocation { mode: i32, x: i16, y: i16 },
-    Direction { id: i16, x: f32, y: f32 },
-    Vector { id: i16, x: f32, y: f32, z: f32 },
+    pressure: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,10 +903,16 @@ pub enum GlesEvent {
         program: u32,
         shader: u32,
     },
+    DeleteShader {
+        shader: u32,
+    },
     LinkProgram {
         program: u32,
         uniforms: Vec<GlesActive>,
         attributes: Vec<GlesActive>,
+    },
+    DeleteProgram {
+        program: u32,
     },
     ActiveTexture {
         texture: u32,
@@ -693,6 +920,9 @@ pub enum GlesEvent {
     BindBuffer {
         target: u32,
         buffer: u32,
+    },
+    DeleteBuffers {
+        buffers: Vec<u32>,
     },
     BufferData {
         target: u32,
@@ -711,6 +941,15 @@ pub enum GlesEvent {
     BindTexture {
         target: u32,
         texture: u32,
+    },
+    DeleteTextures {
+        textures: Vec<u32>,
+    },
+    DeleteFramebuffers {
+        framebuffers: Vec<u32>,
+    },
+    DeleteRenderbuffers {
+        renderbuffers: Vec<u32>,
     },
     BindFramebuffer {
         target: u32,
@@ -911,12 +1150,18 @@ impl GlesEvent {
             Self::CreateShader { .. } => "CreateShader",
             Self::ShaderSource { .. } => "ShaderSource",
             Self::AttachShader { .. } => "AttachShader",
+            Self::DeleteShader { .. } => "DeleteShader",
             Self::LinkProgram { .. } => "LinkProgram",
+            Self::DeleteProgram { .. } => "DeleteProgram",
             Self::ActiveTexture { .. } => "ActiveTexture",
             Self::BindBuffer { .. } => "BindBuffer",
+            Self::DeleteBuffers { .. } => "DeleteBuffers",
             Self::BufferData { .. } => "BufferData",
             Self::BufferSubData { .. } => "BufferSubData",
             Self::BindTexture { .. } => "BindTexture",
+            Self::DeleteTextures { .. } => "DeleteTextures",
+            Self::DeleteFramebuffers { .. } => "DeleteFramebuffers",
+            Self::DeleteRenderbuffers { .. } => "DeleteRenderbuffers",
             Self::BindFramebuffer { .. } => "BindFramebuffer",
             Self::BindRenderbuffer { .. } => "BindRenderbuffer",
             Self::FramebufferTexture2D { .. } => "FramebufferTexture2D",
@@ -1095,11 +1340,23 @@ struct AndroidAsset {
     closed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AndroidConfiguration {
+    handle: u32,
+    asset_manager: u32,
+    language: [u8; 2],
+    country: [u8; 2],
+    alive: bool,
+}
+
 #[derive(Debug, Clone)]
 struct GlShader {
     name: u32,
     shader_type: u32,
     source: String,
+    compiled: bool,
+    info_log: String,
+    delete_pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1108,6 +1365,16 @@ struct GlProgram {
     shaders: Vec<u32>,
     uniforms: Vec<GlesActive>,
     attributes: Vec<GlesActive>,
+    linked: bool,
+    info_log: String,
+    delete_pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlNameKind {
+    Buffer,
+    Framebuffer,
+    Renderbuffer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1117,10 +1384,45 @@ struct GuestGlBuffer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestGlTextureImage {
+    texture: u32,
+    level: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestGlRenderbufferStorage {
+    renderbuffer: u32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestGlAttachmentObject {
+    Texture { texture: u32, level: i32 },
+    Renderbuffer { renderbuffer: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestGlFramebufferAttachment {
+    framebuffer: u32,
+    attachment: u32,
+    object: GuestGlAttachmentObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GuestGlTextureBinding {
     active_texture: u32,
     target: u32,
     texture: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuestGlTextureParameter {
+    texture: u32,
+    name: u32,
+    value: u32,
 }
 
 struct GlesTextureUploadDump<'a> {
@@ -1161,18 +1463,31 @@ struct FakeFile {
 impl FakeFile {
     fn flags(&self) -> u32 {
         match self.kind {
-            FakeFileKind::Socket { flags, .. } => flags,
+            FakeFileKind::Virtual { flags, .. }
+            | FakeFileKind::Socket { flags, .. }
+            | FakeFileKind::PipeRead { flags, .. }
+            | FakeFileKind::PipeWrite { flags, .. } => flags,
             _ => 0,
         }
     }
 
     fn set_flags(&mut self, flags: u32) {
-        if let FakeFileKind::Socket {
-            flags: socket_flags,
-            ..
-        } = &mut self.kind
-        {
-            *socket_flags = flags;
+        match &mut self.kind {
+            FakeFileKind::Virtual {
+                flags: file_flags, ..
+            }
+            | FakeFileKind::Socket {
+                flags: file_flags, ..
+            }
+            | FakeFileKind::PipeRead {
+                flags: file_flags, ..
+            }
+            | FakeFileKind::PipeWrite {
+                flags: file_flags, ..
+            } => {
+                *file_flags = (*file_flags & O_ACCMODE) | (flags & (O_APPEND | O_NONBLOCK));
+            }
+            _ => {}
         }
     }
 }
@@ -1182,6 +1497,7 @@ enum FakeFileKind {
     Random,
     Virtual {
         path: String,
+        flags: u32,
     },
     Directory {
         path: String,
@@ -1194,14 +1510,66 @@ enum FakeFileKind {
         ty: u32,
         protocol: u32,
         flags: u32,
+        local_addr: Option<Vec<u8>>,
+        peer_addr: Option<Vec<u8>>,
+        options: Vec<GuestSocketOption>,
+        received_datagrams: VecDeque<GuestDatagram>,
     },
-    Epoll,
+    PipeRead {
+        pipe_id: u32,
+        flags: u32,
+    },
+    PipeWrite {
+        pipe_id: u32,
+        flags: u32,
+    },
+    Epoll {
+        registrations: Vec<EpollRegistration>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct GuestPipe {
+    id: u32,
+    bytes: VecDeque<u8>,
+    read_open: bool,
+    write_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ALooperRegistration {
+    looper: u32,
+    fd: u32,
+    ident: i32,
+    events: u32,
+    data: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EpollRegistration {
+    fd: u32,
+    events: u32,
+    data: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestSocketOption {
+    level: u32,
+    name: u32,
+    value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestDatagram {
+    data: Vec<u8>,
+    source_addr: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 struct VirtualFile {
     path: String,
     data: Vec<u8>,
+    advisory_lock: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -1230,6 +1598,95 @@ struct PthreadSpecific {
     thread: u32,
     key: u32,
     value: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PthreadKey {
+    key: u32,
+    destructor: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PthreadCleanupStack {
+    thread: u32,
+    top: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PthreadName {
+    thread: u32,
+    name: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestEnvironmentValue {
+    name: String,
+    value_ptr: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestHostent {
+    name: String,
+    address: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestIpAddress {
+    V4([u8; 4]),
+    V6([u8; 16]),
+}
+
+impl GuestIpAddress {
+    fn family(self) -> u32 {
+        match self {
+            Self::V4(_) => AF_INET,
+            Self::V6(_) => AF_INET6,
+        }
+    }
+
+    fn sockaddr_len(self) -> u32 {
+        match self {
+            Self::V4(_) => 16,
+            Self::V6(_) => 28,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PthreadSignalMask {
+    thread: u32,
+    mask: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SignalAction {
+    signal: u32,
+    handler: u32,
+    mask: u32,
+    flags: u32,
+    restorer: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CxaAtExitEntry {
+    function: u32,
+    argument: u32,
+    dso: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeWindowState {
+    handle: u32,
+    width: u32,
+    height: u32,
+    format: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AndroidLogEntry {
+    priority: u32,
+    tag: Vec<u8>,
+    message: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1276,30 +1733,57 @@ impl HleRuntime {
             apk_bytes: None,
             apk_entries: None,
             assets: Vec::new(),
+            configurations: Vec::new(),
             next_gl_name: 1,
+            gl_error: GL_NO_ERROR,
             gl_shaders: Vec::new(),
             gl_programs: Vec::new(),
             gl_bound_array_buffer: 0,
             gl_bound_element_array_buffer: 0,
+            gl_bound_framebuffer: 0,
+            gl_bound_renderbuffer: 0,
             gl_active_texture: GL_TEXTURE0,
             gl_current_program: 0,
             gl_bound_textures: Vec::new(),
+            gl_textures: Vec::new(),
+            gl_texture_bound_once: Vec::new(),
+            gl_texture_parameters: Vec::new(),
             gl_buffers: Vec::new(),
+            gl_framebuffers: Vec::new(),
+            gl_renderbuffers: Vec::new(),
+            gl_texture_images: Vec::new(),
+            gl_renderbuffer_storage: Vec::new(),
+            gl_framebuffer_attachments: Vec::new(),
             gl_vertex_attribs: Vec::new(),
+            egl_state: EglState::default(),
             gles_events: VecDeque::new(),
             gles_event_index: 0,
             gles_trace_event_count: 0,
             gles_texture_upload_dump_index: 0,
             next_fd: FIRST_FAKE_FD,
+            standard_fd_open: [true; 3],
             files: Vec::new(),
+            next_pipe_id: 1,
+            pipes: Vec::new(),
             virtual_files: Vec::new(),
             virtual_dirs: Vec::new(),
             current_pthread: 1,
+            pthread_ids: vec![1],
+            pthread_names: Vec::new(),
             created_pthreads: VecDeque::new(),
-            next_pthread_key: 0,
+            pthread_keys: Vec::new(),
             pthread_specific: Vec::new(),
-            native_activity: None,
+            pthread_cleanup_stacks: Vec::new(),
+            pthread_signal_masks: Vec::new(),
+            signal_actions: Vec::new(),
+            cxa_atexit_entries: Vec::new(),
+            native_window: None,
+            android_logs: VecDeque::new(),
             alooper_events: VecDeque::new(),
+            alooper_prepared: false,
+            alooper_ref_count: 0,
+            alooper_wake_pending: false,
+            alooper_registrations: Vec::new(),
             unwind_tables: Vec::new(),
             random_state: 0x1234_5678,
             clock_mode,
@@ -1308,19 +1792,16 @@ impl HleRuntime {
             clock_step_after_draw_ns,
             clock_start_monotonic_ns,
             clock_wall_floor_ns,
-            fake_geometries: Vec::new(),
-            fake_texture_pairs: Vec::new(),
-            resource_texture_aliases: None,
             cxx_string_recycling: false,
-            input_pointer: HlePointer::default(),
-            input_pointer_ids: None,
             input_poll_source: None,
             pending_input_events: VecDeque::new(),
             active_input_events: Vec::new(),
-            minecraft_input_events: VecDeque::new(),
             gles_draw_submissions: 0,
             inet_ntoa_buffer: None,
             strerror_buffer: None,
+            gai_strerror_buffers: [None; EAI_MAX + 1],
+            guest_environment: Vec::new(),
+            guest_hostents: Vec::new(),
         }
     }
 
@@ -1331,20 +1812,18 @@ impl HleRuntime {
     pub fn set_apk_path(&mut self, apk_path: PathBuf) {
         self.apk_path = Some(apk_path);
         self.apk_entries = None;
-        self.resource_texture_aliases = None;
     }
 
     pub fn set_apk_bytes(&mut self, apk_bytes: Vec<u8>) {
         self.apk_bytes = Some(apk_bytes);
         self.apk_entries = None;
-        self.resource_texture_aliases = None;
     }
 
     pub(crate) fn load_apk_image_argb_pixels(
         &mut self,
         path: &str,
     ) -> Result<(u32, u32, Vec<u32>), String> {
-        let texture = self.load_image_texture_for_path(path, ImageFormat::Any)?;
+        let texture = self.load_image_texture_for_path(path)?;
         let mut pixels = Vec::with_capacity(texture.rgba.len() / 4);
         for rgba in texture.rgba.chunks_exact(4) {
             let r = u32::from(rgba[0]);
@@ -1354,6 +1833,35 @@ impl HleRuntime {
             pixels.push((a << 24) | (r << 16) | (g << 8) | b);
         }
         Ok((texture.width, texture.height, pixels))
+    }
+
+    pub(crate) fn load_apk_asset_bytes(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        let mut last_error = None;
+        for entry_name in android_asset_entry_candidates(path) {
+            match self.read_apk_asset_entry(&entry_name) {
+                Ok(bytes) => return Ok(bytes),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| format!("empty APK asset path {path:?}")))
+    }
+
+    pub(crate) fn load_android_file_or_asset_bytes(
+        &mut self,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        match self.load_apk_asset_bytes(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(asset_error) => {
+                let normalized = normalize_virtual_path(path);
+                if let Some(index) = self.virtual_file_index(&normalized) {
+                    return Ok(self.virtual_files[index].data.clone());
+                }
+                return Err(format!(
+                    "asset unavailable ({asset_error}); virtual file not found: {normalized}"
+                ));
+            }
+        }
     }
 
     pub fn set_unwind_tables(&mut self, unwind_tables: Vec<HleUnwindTable>) {
@@ -1372,6 +1880,41 @@ impl HleRuntime {
         self.created_pthreads.drain(..).collect()
     }
 
+    pub(crate) fn take_pthread_destructor_callbacks(&mut self, thread: u32) -> Vec<(u32, u32)> {
+        let destructors: Vec<(u32, u32)> = self
+            .pthread_keys
+            .iter()
+            .filter(|key| key.destructor != 0)
+            .map(|key| (key.key, key.destructor))
+            .collect();
+        let mut callbacks = Vec::new();
+        for (key, destructor) in destructors {
+            let Some(specific) = self
+                .pthread_specific
+                .iter_mut()
+                .find(|specific| specific.thread == thread && specific.key == key)
+            else {
+                continue;
+            };
+            if specific.value != 0 {
+                callbacks.push((destructor, specific.value));
+                specific.value = 0;
+            }
+        }
+        self.pthread_specific.retain(|specific| specific.value != 0);
+        callbacks
+    }
+
+    pub(crate) fn finish_pthread(&mut self, thread: u32) {
+        self.pthread_ids.retain(|id| *id != thread);
+        self.pthread_names.retain(|entry| entry.thread != thread);
+        self.pthread_specific.retain(|entry| entry.thread != thread);
+        self.pthread_cleanup_stacks
+            .retain(|entry| entry.thread != thread);
+        self.pthread_signal_masks
+            .retain(|entry| entry.thread != thread);
+    }
+
     pub fn take_gles_events(&mut self) -> Vec<GlesEvent> {
         self.gles_events.drain(..).collect()
     }
@@ -1384,76 +1927,28 @@ impl HleRuntime {
         y: f32,
         pressure: f32,
     ) {
-        self.update_pointer_event(id, phase, x, y, pressure, true);
-    }
-
-    fn update_pointer_event(
-        &mut self,
-        id: i64,
-        phase: HlePointerPhase,
-        x: f32,
-        y: f32,
-        pressure: f32,
-        queue_android_input: bool,
-    ) {
-        let old_x = self.input_pointer.x;
-        let old_y = self.input_pointer.y;
-        self.input_pointer.id = id;
-        self.input_pointer.x = x;
-        self.input_pointer.y = y;
-        self.input_pointer.dx = x - old_x;
-        self.input_pointer.dy = y - old_y;
-        self.input_pointer.pressure = pressure;
-        self.input_pointer.dirty_since_commit = true;
-        match phase {
-            HlePointerPhase::Down => {
-                if !self.input_pointer.down {
-                    self.input_pointer.was_pressed = true;
-                    self.input_pointer.pressed_this_update = true;
-                }
-                self.input_pointer.down = true;
-                self.input_pointer.released_this_update = false;
-            }
-            HlePointerPhase::Up => {
-                if self.input_pointer.down {
-                    self.input_pointer.was_released = true;
-                    self.input_pointer.released_this_update = true;
-                }
-                self.input_pointer.down = false;
-            }
-            HlePointerPhase::Move => {}
-        }
-        if queue_android_input {
-            self.enqueue_minecraft_pointer_location(x, y);
-            let action = match phase {
-                HlePointerPhase::Down => AMOTION_EVENT_ACTION_DOWN,
-                HlePointerPhase::Up => AMOTION_EVENT_ACTION_UP,
-                HlePointerPhase::Move => AMOTION_EVENT_ACTION_MOVE,
-            };
-            self.pending_input_events.push_back(HleInputEvent {
-                handle: 0,
-                event_type: AINPUT_EVENT_TYPE_MOTION,
-                source: AINPUT_SOURCE_TOUCHSCREEN,
-                device_id: 1,
-                action,
-                pointer_id: id as i32,
-                x,
-                y,
-            });
-            if let Some(source) = self.input_poll_source {
-                self.alooper_events.push_back(source);
-            }
-        }
-    }
-
-    fn enqueue_minecraft_pointer_location(&mut self, x: f32, y: f32) {
-        let event = HleMinecraftInputEvent::PointerLocation {
-            mode: MINECRAFT_TOUCH_INPUT_MODE,
-            x: minecraft_pointer_coord(x),
-            y: minecraft_pointer_coord(y),
+        let action = match phase {
+            HlePointerPhase::Down => AMOTION_EVENT_ACTION_DOWN,
+            HlePointerPhase::Up => AMOTION_EVENT_ACTION_UP,
+            HlePointerPhase::Move => AMOTION_EVENT_ACTION_MOVE,
         };
-        trace_mcpe_input(format_args!("enqueue_host_pointer {event:?}"));
-        self.minecraft_input_events.push_back(event);
+        self.pending_input_events.push_back(HleInputEvent {
+            handle: 0,
+            event_type: AINPUT_EVENT_TYPE_MOTION,
+            source: AINPUT_SOURCE_TOUCHSCREEN,
+            device_id: 1,
+            action,
+            key_code: 0,
+            meta_state: 0,
+            repeat_count: 0,
+            pointer_id: id as i32,
+            x,
+            y,
+            pressure,
+        });
+        if let Some(source) = self.input_poll_source {
+            self.alooper_events.push_back(source);
+        }
     }
 
     pub(crate) fn current_pthread(&self) -> u32 {
@@ -1478,10 +1973,42 @@ impl HleRuntime {
 
     pub(crate) fn set_current_pthread(&mut self, thread: u32) {
         self.current_pthread = thread;
+        if !self.pthread_ids.contains(&thread) {
+            self.pthread_ids.push(thread);
+        }
     }
 
-    pub fn set_native_activity(&mut self, activity: u32) {
-        self.native_activity = Some(activity);
+    pub fn set_native_activity(&mut self, _activity: u32) {
+        self.alooper_prepared = true;
+        self.alooper_ref_count = self.alooper_ref_count.max(1);
+    }
+
+    pub fn register_android_configuration(&mut self, handle: u32, asset_manager: u32) {
+        if let Some(configuration) = self
+            .configurations
+            .iter_mut()
+            .find(|configuration| configuration.handle == handle)
+        {
+            configuration.asset_manager = asset_manager;
+            configuration.alive = true;
+            return;
+        }
+        self.configurations.push(AndroidConfiguration {
+            handle,
+            asset_manager,
+            language: *b"en",
+            country: *b"US",
+            alive: true,
+        });
+    }
+
+    pub fn set_native_window(&mut self, window: u32, width: u32, height: u32, format: u32) {
+        self.native_window = Some(NativeWindowState {
+            handle: window,
+            width,
+            height,
+            format,
+        });
     }
 
     pub fn queue_alooper_event(&mut self, source: u32) {
@@ -1498,6 +2025,13 @@ impl HleRuntime {
             describe_hle_import(name).ok_or_else(|| HleError::UnknownSymbol(name.to_string()))?;
         if matches!(descriptor.shape, HleSymbolShape::Data { .. }) {
             return Err(HleError::UnknownSymbol(name.to_string()));
+        }
+        match descriptor.behavior {
+            HleCallBehavior::Unimplemented => {
+                return Err(HleError::UnimplementedSymbol(name.to_string()));
+            }
+            HleCallBehavior::Abort => return Err(HleError::Abort(name.to_string())),
+            HleCallBehavior::Implemented | HleCallBehavior::RuntimeImplemented => {}
         }
 
         match name {
@@ -1566,7 +2100,6 @@ impl HleRuntime {
             "__aeabi_uidivmod" => self.aeabi_uidivmod(cpu),
             "__aeabi_ldivmod" => self.aeabi_ldivmod(cpu),
             "__aeabi_uldivmod" => self.aeabi_uldivmod(cpu),
-            "__aeabi_idiv0" | "__aeabi_ldiv0" => Ok(self.return32(cpu, 0)),
             "__aeabi_i2d" => self.aeabi_i2d(cpu),
             "__aeabi_l2f" => self.aeabi_l2f(cpu),
             "__aeabi_l2d" => self.aeabi_l2d(cpu),
@@ -1583,6 +2116,7 @@ impl HleRuntime {
             "__aeabi_dcmpge" => self.aeabi_dcmpge(cpu),
             "__aeabi_llsl" => self.aeabi_llsl(cpu),
             "__aeabi_llsr" => self.aeabi_llsr(cpu),
+            "__aeabi_atexit" => self.aeabi_atexit(cpu),
             "__divsi3" => self.aeabi_idiv(cpu),
             "__udivsi3" => self.aeabi_uidiv(cpu),
             "__modsi3" => self.modsi3(cpu),
@@ -1591,24 +2125,60 @@ impl HleRuntime {
             "__udivdi3" => self.udivdi3(cpu),
             "__moddi3" => self.moddi3(cpu),
             "__umoddi3" => self.umoddi3(cpu),
-            name if descriptor.kind == HleSymbolKind::Libm => self.libm(name, cpu),
+            name if descriptor.kind == HleSymbolKind::Libm => self.libm(name, cpu, memory),
             "getauxval" => Ok(self.return32(cpu, self.getauxval(cpu.reg(0)))),
+            "getpid" => Ok(self.return32(cpu, 1000)),
+            "getuid" | "geteuid" => Ok(self.return32(cpu, 10000)),
+            "getenv" => self.getenv_call(cpu, memory),
+            "gethostname" => self.gethostname_call(cpu, memory),
+            "gethostbyname" => self.gethostbyname_call(cpu, memory),
+            "getaddrinfo" => self.getaddrinfo_call(cpu, memory),
+            "freeaddrinfo" => self.freeaddrinfo_call(cpu, memory),
+            "gai_strerror" => self.gai_strerror_call(cpu, memory),
+            // Android 4.4 bionic deliberately has no locale support.
+            "setlocale" => Ok(self.return32(cpu, 0)),
             "gettimeofday" => self.gettimeofday(cpu, memory),
             "clock_gettime" => self.clock_gettime(cpu, memory),
             "time" => self.time(cpu, memory),
             "sysconf" => self.sysconf(cpu, memory),
+            "sigprocmask" => self.sigprocmask(cpu, memory),
+            "sigaction" => self.sigaction(cpu, memory),
+            "bsd_signal" => self.bsd_signal(cpu, memory),
+            "sigsetjmp" => self.sigsetjmp(cpu, memory),
+            "siglongjmp" => self.siglongjmp(cpu, memory),
             "pthread_self" => Ok(self.return32(cpu, self.current_pthread)),
             "pthread_equal" => Ok(self.return32(cpu, u32::from(cpu.reg(0) == cpu.reg(1)))),
             "pthread_key_create" => self.pthread_key_create(cpu, memory),
             "pthread_key_delete" => self.pthread_key_delete(cpu),
             "pthread_getspecific" => Ok(self.return32(cpu, self.pthread_getspecific(cpu.reg(0)))),
             "pthread_setspecific" => self.pthread_setspecific(cpu),
+            "pthread_setname_np" => self.pthread_setname_np(cpu, memory),
+            "__pthread_cleanup_push" => self.pthread_cleanup_push(cpu, memory),
+            "__pthread_cleanup_pop" => self.pthread_cleanup_pop(cpu, memory),
+            "pthread_mutexattr_init"
+            | "pthread_mutexattr_destroy"
+            | "pthread_mutexattr_settype"
+            | "pthread_mutex_init"
+            | "pthread_mutex_destroy"
+            | "pthread_cond_init"
+            | "pthread_cond_destroy" => self.pthread_init_destroy(name, cpu, memory),
+            "pthread_attr_init"
+            | "pthread_attr_destroy"
+            | "pthread_attr_getdetachstate"
+            | "pthread_attr_setdetachstate"
+            | "pthread_attr_setschedparam"
+            | "pthread_attr_setstacksize" => self.pthread_attr(name, cpu, memory),
+            "ANativeWindow_setBuffersGeometry" => self.native_window_set_buffers_geometry(cpu),
+            "__android_log_print" => self.android_log_print(cpu, memory),
+            "__android_log_write" => self.android_log_write(cpu, memory),
             "ALooper_pollAll" | "ALooper_pollOnce" => self.alooper_poll(cpu, memory),
-            "ALooper_prepare" | "ALooper_forThread" | "ALooper_acquire" => {
-                Ok(self.return32(cpu, 1))
-            }
-            "ALooper_addFd" => Ok(self.return32(cpu, 1)),
-            "ALooper_removeFd" | "ALooper_wake" | "ALooper_release" => Ok(self.return32(cpu, 0)),
+            "ALooper_prepare" => self.alooper_prepare(cpu),
+            "ALooper_forThread" => self.alooper_for_thread(cpu),
+            "ALooper_acquire" => self.alooper_acquire(cpu),
+            "ALooper_addFd" => self.alooper_add_fd(cpu, memory),
+            "ALooper_removeFd" => self.alooper_remove_fd(cpu),
+            "ALooper_wake" => self.alooper_wake(cpu),
+            "ALooper_release" => self.alooper_release(cpu),
             "fopen" => self.fopen_call(cpu, memory),
             "fdopen" => self.fdopen_call(cpu, memory),
             "fclose" => self.fclose_call(cpu, memory),
@@ -1617,13 +2187,13 @@ impl HleRuntime {
             "ferror" => self.ferror_call(cpu, memory),
             "fseek" | "fseeko" => self.fseek_call(cpu, memory),
             "ftell" | "ftello" => self.ftell_call(cpu, memory),
-            "close" => self.close_call(cpu),
+            "close" => self.close_call(cpu, memory),
             "open" => self.open_call(cpu, memory),
             "lseek" => self.lseek_call(cpu, memory),
             "pread" => self.pread_call(cpu, memory),
             "access" => self.access_call(cpu, memory),
             "mkdir" => self.mkdir_call(cpu, memory),
-            "fdatasync" | "fsync" => self.fdatasync_call(cpu, memory),
+            "fdatasync" | "fsync" => self.sync_call(name, cpu, memory),
             "fstat" => self.fstat_call(cpu, memory),
             "stat" | "lstat" => self.stat_call(cpu, memory),
             "rename" => self.rename_call(cpu, memory),
@@ -1638,11 +2208,16 @@ impl HleRuntime {
             "socket" => self.socket_call(cpu, memory),
             "bind" => self.bind_call(cpu, memory),
             "connect" => self.connect_call(cpu, memory),
+            "getsockname" => self.getsockname_call(cpu, memory, false),
+            "getpeername" => self.getsockname_call(cpu, memory, true),
             "setsockopt" => self.setsockopt_call(cpu, memory),
+            "getsockopt" => self.getsockopt_call(cpu, memory),
             "fcntl" => self.fcntl_call(cpu, memory),
+            "ioctl" => self.ioctl_call(cpu, memory),
             "inet_addr" => self.inet_addr_call(cpu, memory),
             "inet_ntoa" => self.inet_ntoa_call(cpu, memory),
             "strerror" => self.strerror_call(cpu, memory),
+            "perror" => self.perror_call(cpu, memory),
             "sendto" => self.sendto_call(cpu, memory),
             "recvfrom" => self.recvfrom_call(cpu, memory),
             "select" => self.select_call(cpu, memory),
@@ -1652,13 +2227,15 @@ impl HleRuntime {
             "read" => self.read_call(cpu, memory),
             "fread" => self.fread_call(cpu, memory),
             "write" => self.write_call(cpu, memory),
+            "writev" => self.writev_call(cpu, memory),
             "fwrite" => self.fwrite_call(cpu, memory),
             "fputs" => self.fputs_call(cpu, memory),
             "fputc" => self.fputc_call(cpu, memory),
             "pthread_create" => self.pthread_create(cpu, memory),
             "__cxa_guard_acquire" => self.cxa_guard_acquire(cpu, memory),
             "__cxa_guard_release" => self.cxa_guard_release(cpu, memory),
-            "__cxa_guard_abort" => Ok(self.return32(cpu, 0)),
+            "__cxa_guard_abort" => self.cxa_guard_abort(cpu, memory),
+            "__cxa_atexit" => self.cxa_atexit(cpu),
             "_ZNSs14_M_replace_auxEjjjc" => self.libstdcxx_string_replace_aux(cpu, memory),
             "_ZNSsC1Ev" | "_ZNSsC2Ev" => self.libstdcxx_string_default_ctor(cpu, memory),
             "_ZNSsC1ERKSs" | "_ZNSsC2ERKSs" => self.libstdcxx_string_copy_ctor(cpu, memory),
@@ -1710,221 +2287,6 @@ impl HleRuntime {
             }
             "_ZSt11_Hash_bytesPKvjj" => self.libstdcxx_hash_bytes(cpu, memory),
             "_ZSt15_Fnv_hash_bytesPKvjj" => self.libstdcxx_fnv_hash_bytes(cpu, memory),
-            "_ZN8WebTokenC1ERKS_" | "_ZN8WebTokenC2ERKS_" => {
-                self.minecraft_webtoken_copy_ctor(cpu, memory)
-            }
-            "_ZN4Font4initEv" => self.minecraft_font_init(cpu, memory),
-            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
-                self.minecraft_texture_group_get_texture_pair(cpu, memory)
-            }
-            "_ZN3mce12TextureGroup10getTextureERK11TextureData" => {
-                self.minecraft_texture_group_get_texture_data(cpu, memory)
-            }
-            "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation" => Ok(self.return32(cpu, 1)),
-            "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
-            | "_ZN11AppPlatform7loadPNGER11TextureDataRKSs"
-            | "_ZN11AppPlatform7loadTGAER11TextureDataRKSs"
-            | "_ZN11AppPlatform8loadJPEGER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android7loadPNGER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android7loadTGAER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android8loadJPEGER11TextureDataRKSs" => {
-                self.minecraft_app_platform_load_image(name, cpu, memory)
-            }
-            "_ZN10ImageUtils17loadImageFromFileER11TextureDataRKSs" => {
-                self.minecraft_image_utils_load_image_from_file(cpu, memory)
-            }
-            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai" => {
-                self.minecraft_image_utils_load_image_from_memory(cpu, memory)
-            }
-            "_ZN13GeometryGroup11getGeometryERKSs" | "_ZN13GeometryGroup14tryGetGeometryERKSs" => {
-                self.minecraft_geometry_group_get_geometry(cpu, memory)
-            }
-            "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
-            | "_ZN9UIControl18_resolvePostCreateEv" => self.minecraft_ui_control_resolve_noop(cpu),
-            "_ZN14GamePadManager16getGamePadsInUseEv"
-            | "_ZN14GamePadManager20getConnectedGamePadsEv" => {
-                self.minecraft_empty_vector_return(cpu, memory)
-            }
-            "_ZN13GamePadMapper4tickER15InputEventQueue"
-            | "_ZN13GamePadMapper8tickTurnER15InputEventQueue" => Ok(self.return32(cpu, 0)),
-            "_ZNK7GamePad11isConnectedEv" | "_ZNK7GamePad7isInUseEv" => Ok(self.return32(cpu, 0)),
-            "_ZN6Screen15controllerEventEv"
-            | "_ZN6Screen27_processControllerDirectionEi"
-            | "_ZN11MenuGamePad12getDirectionEi"
-            | "_ZN11MenuGamePad4getXEi"
-            | "_ZN11MenuGamePad4getYEi"
-            | "_ZN11MenuGamePad9isTouchedEi" => Ok(self.return32(cpu, 0)),
-            "_ZN11MenuPointer4getXEv" => {
-                Ok(self.return32(cpu, (self.input_pointer.x.round() as i16 as i32) as u32))
-            }
-            "_ZN11MenuPointer4getYEv" => {
-                Ok(self.return32(cpu, (self.input_pointer.y.round() as i16 as i32) as u32))
-            }
-            "_ZN11MenuPointer9isPressedEv" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
-            }
-            "_ZN11MenuPointer4setXEs" => {
-                self.input_pointer.x = (cpu.reg(0) as u16 as i16) as f32;
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN11MenuPointer4setYEs" => {
-                self.input_pointer.y = (cpu.reg(0) as u16 as i16) as f32;
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN11MenuPointer10setPressedEb" => {
-                let pressed = cpu.reg(0) != 0;
-                if pressed && !self.input_pointer.down {
-                    self.input_pointer.was_pressed = true;
-                    self.input_pointer.pressed_this_update = true;
-                    self.input_pointer.released_this_update = false;
-                } else if !pressed && self.input_pointer.down {
-                    self.input_pointer.was_released = true;
-                    self.input_pointer.released_this_update = true;
-                    self.input_pointer.pressed_this_update = false;
-                }
-                self.input_pointer.down = pressed;
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN10Multitouch4feedEccssi" => self.minecraft_multitouch_feed(cpu, memory),
-            "_ZN11MouseDevice4feedEccss" | "_ZN11MouseDevice4feedEccssss" => {
-                self.minecraft_mouse_device_feed(cpu, memory)
-            }
-            "_ZN15InputEventQueue9nextEventER10InputEvent" => {
-                self.minecraft_input_queue_next_event(cpu, memory)
-            }
-            "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb" => {
-                self.minecraft_input_queue_enqueue_button(cpu)
-            }
-            "_ZN15InputEventQueue28enqueueButtonPressAndReleaseEs" => {
-                self.minecraft_input_queue_enqueue_button_press_and_release(cpu)
-            }
-            "_ZN15InputEventQueue22enqueuePointerLocationE9InputModess" => {
-                self.minecraft_input_queue_enqueue_pointer_location(cpu)
-            }
-            "_ZN15InputEventQueue16enqueueDirectionE11DirectionIdff" => {
-                self.minecraft_input_queue_enqueue_direction(cpu)
-            }
-            "_ZN15InputEventQueue13enqueueVectorEsfff" => {
-                self.minecraft_input_queue_enqueue_vector(cpu)
-            }
-            "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
-            | "_ZN14KeyboardMapper4tickER15InputEventQueue"
-            | "_ZN11MouseMapper21clearInputDeviceQueueEv"
-            | "_ZN11MouseMapper4tickER15InputEventQueue"
-            | "_ZN11TouchMapper21clearInputDeviceQueueEv"
-            | "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv"
-            | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
-            | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
-            | "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv"
-            | "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue" => Ok(self.return32(cpu, 0)),
-            "_ZN11MouseDevice12isButtonDownEi"
-            | "_ZN11MouseDevice14getButtonStateEi"
-            | "_ZN11MouseDevice19getEventButtonStateEv" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
-            }
-            "_ZN11MouseDevice14getEventButtonEv" => Ok(self.return32(cpu, 0)),
-            "_ZN11MouseDevice16wasFirstMovementEv" => Ok(self.return32(
-                cpu,
-                u32::from(self.input_pointer.dx != 0.0 || self.input_pointer.dy != 0.0),
-            )),
-            "_ZN11MouseDevice4getXEv" => Ok(self.return32(
-                cpu,
-                minecraft_pointer_coord(self.input_pointer.x) as i32 as u32,
-            )),
-            "_ZN11MouseDevice4getYEv" => Ok(self.return32(
-                cpu,
-                minecraft_pointer_coord(self.input_pointer.y) as i32 as u32,
-            )),
-            "_ZN11MouseDevice5getDXEv" => Ok(self.return32(
-                cpu,
-                minecraft_pointer_coord(self.input_pointer.dx) as i32 as u32,
-            )),
-            "_ZN11MouseDevice5getDYEv" => Ok(self.return32(
-                cpu,
-                minecraft_pointer_coord(self.input_pointer.dy) as i32 as u32,
-            )),
-            "_ZN11MouseDevice4nextEv"
-            | "_ZN11MouseDevice5resetEv"
-            | "_ZN11MouseDevice6reset2Ev"
-            | "_ZN11MouseDevice6rewindEv"
-            | "_ZN11MouseDevice8getEventEv" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch10isReleasedEi" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.was_released)))
-            }
-            "_ZN10Multitouch20isReleasedThisUpdateEi" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.released_this_update)))
-            }
-            "_ZN10Multitouch11isEdgeTouchEi" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch13isPointerDownEi" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.down)))
-            }
-            "_ZN10Multitouch9isPressedEi" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.was_pressed)))
-            }
-            "_ZN10Multitouch19isPressedThisUpdateEi" => {
-                Ok(self.return32(cpu, u32::from(self.input_pointer.pressed_this_update)))
-            }
-            "_ZN10Multitouch15resetThisUpdateEv" => {
-                self.clear_pointer_update_flags();
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN10Multitouch4nextEv" => Ok(self.return32(cpu, 0)),
-            "_ZN10Multitouch5resetEv" => {
-                self.clear_pointer_state();
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN10Multitouch6commitEv" => {
-                if self.input_pointer.dirty_since_commit {
-                    self.input_pointer.dirty_since_commit = false;
-                } else {
-                    self.clear_pointer_update_flags();
-                }
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN10Multitouch19getActivePointerIdsEPPKi" => {
-                self.minecraft_pointer_ids_return(cpu, memory, self.input_pointer.down)
-            }
-            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi" => {
-                self.minecraft_pointer_ids_return(cpu, memory, self.pointer_active_this_update())
-            }
-            "_ZN10Multitouch25getFirstActivePointerIdExEv" => Ok(self.return32(
-                cpu,
-                if self.input_pointer.down || self.input_pointer.was_released {
-                    self.input_pointer.id as u32
-                } else {
-                    u32::MAX
-                },
-            )),
-            "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv" => Ok(self.return32(
-                cpu,
-                if self.input_pointer.down || self.input_pointer.released_this_update {
-                    self.input_pointer.id as u32
-                } else {
-                    u32::MAX
-                },
-            )),
-            "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f" => {
-                self.minecraft_interpolate_transforms(cpu, memory)
-            }
-            "_ZN3mce16RenderContextOGL17unbindAllTexturesEv" => {
-                self.minecraft_ogl_unbind_all_textures(cpu, memory)
-            }
-            "_ZN12ProfilerLite4tickEbb" | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd" => {
-                Ok(self.return32(cpu, 0))
-            }
-            "_ZN18MinecraftTelemetry4tickEv"
-            | "_ZN18MinecraftTelemetry15forceSendEventsEv"
-            | "_ZN19RakNetServerLocator11findServersEi"
-            | "_ZN6Social11Multiplayer18needToHandleInviteEv"
-            | "_ZN6Social11Multiplayer4tickEb"
-            | "_ZN6Social11Multiplayer22tickMultiplayerManagerEv"
-            | "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE"
-            | "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE"
-            | "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE"
-            | "_ZN6Social11UserManager4tickEv"
-            | "_ZNK6Social11UserManager10isSignedInEv"
-            | "_ZN9RealmsAPI6updateEv" => Ok(self.return32(cpu, 0)),
             name if name.starts_with("AConfiguration_") => {
                 self.android_configuration(name, cpu, memory)
             }
@@ -1945,17 +2307,14 @@ impl HleRuntime {
         &mut self,
         name: &str,
         behavior: HleCallBehavior,
-        cpu: &mut Cpu,
-        memory: &mut M,
+        _cpu: &mut Cpu,
+        _memory: &mut M,
     ) -> Result<(), HleError> {
         match behavior {
-            HleCallBehavior::Implemented | HleCallBehavior::ReturnZero => Ok(self.return32(cpu, 0)),
-            HleCallBehavior::ReturnOne => Ok(self.return32(cpu, 1)),
-            HleCallBehavior::ReturnMinusOneErrno => {
-                self.set_errno(memory, 38)?;
-                Ok(self.return32(cpu, u32::MAX))
+            HleCallBehavior::Implemented => Err(HleError::MissingImplementation(name.to_string())),
+            HleCallBehavior::RuntimeImplemented | HleCallBehavior::Unimplemented => {
+                Err(HleError::UnimplementedSymbol(name.to_string()))
             }
-            HleCallBehavior::ReturnNull => Ok(self.return32(cpu, 0)),
             HleCallBehavior::Abort => Err(HleError::Abort(name.to_string())),
         }
     }
@@ -1966,6 +2325,362 @@ impl HleRuntime {
             AT_HWCAP2 => env_hwcap_value("AEMU_HWCAP2", 0),
             _ => 0,
         }
+    }
+
+    fn getenv_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let name = load_c_string(memory, cpu.reg(0), 4096)?;
+        let Some(value) = android_environment_value(&name) else {
+            return Ok(self.return32(cpu, 0));
+        };
+        if let Some(entry) = self
+            .guest_environment
+            .iter()
+            .find(|entry| entry.name == name)
+        {
+            return Ok(self.return32(cpu, entry.value_ptr));
+        }
+        let value_ptr = self.alloc_c_string(memory, value)?;
+        self.guest_environment
+            .push(GuestEnvironmentValue { name, value_ptr });
+        Ok(self.return32(cpu, value_ptr))
+    }
+
+    fn gethostname_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        const HOSTNAME: &[u8] = b"localhost\0";
+        let buffer = cpu.reg(0);
+        let buffer_len = cpu.reg(1);
+        if buffer == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if buffer_len < HOSTNAME.len() as u32 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        for (offset, byte) in HOSTNAME.iter().copied().enumerate() {
+            store8(memory, buffer.wrapping_add(offset as u32), byte)?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gethostbyname_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        if cpu.reg(0) == 0 {
+            return Ok(self.return32(cpu, 0));
+        }
+        let name = load_c_string(memory, cpu.reg(0), 1024)?;
+        let ipv4 = if name.eq_ignore_ascii_case("localhost") {
+            u32::from_le_bytes([127, 0, 0, 1])
+        } else if let Some(ipv4) = parse_ipv4_addr(&name) {
+            ipv4
+        } else {
+            return Ok(self.return32(cpu, 0));
+        };
+        if let Some(entry) = self.guest_hostents.iter().find(|entry| entry.name == name) {
+            return Ok(self.return32(cpu, entry.address));
+        }
+
+        let canonical_name = self.alloc_c_string(memory, &name)?;
+        let aliases = self.alloc(4, 4)?;
+        store32(memory, aliases, 0)?;
+        let address_bytes = self.alloc(4, 4)?;
+        store32(memory, address_bytes, ipv4)?;
+        let address_list = self.alloc(8, 4)?;
+        store32(memory, address_list, address_bytes)?;
+        store32(memory, address_list.wrapping_add(4), 0)?;
+        let hostent = self.alloc(20, 4)?;
+        store32(memory, hostent, canonical_name)?;
+        store32(memory, hostent.wrapping_add(4), aliases)?;
+        store32(memory, hostent.wrapping_add(8), AF_INET)?;
+        store32(memory, hostent.wrapping_add(12), 4)?;
+        store32(memory, hostent.wrapping_add(16), address_list)?;
+        self.guest_hostents.push(GuestHostent {
+            name,
+            address: hostent,
+        });
+        Ok(self.return32(cpu, hostent))
+    }
+
+    fn getaddrinfo_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let node_ptr = cpu.reg(0);
+        let service_ptr = cpu.reg(1);
+        let hints_ptr = cpu.reg(2);
+        let result_ptr = cpu.reg(3);
+        store32(memory, result_ptr, 0)?;
+
+        let node = if node_ptr == 0 {
+            None
+        } else {
+            Some(load_c_string(memory, node_ptr, 1024)?)
+        };
+        let service = if service_ptr == 0 {
+            None
+        } else {
+            Some(load_c_string(memory, service_ptr, 64)?)
+        };
+        if node.is_none() && service.is_none() {
+            return Ok(self.return32(cpu, EAI_NONAME));
+        }
+
+        let (flags, family, socktype, protocol) = if hints_ptr == 0 {
+            (0, AF_UNSPEC, 0, 0)
+        } else {
+            let flags = load32(memory, hints_ptr)?;
+            let family = load32(memory, hints_ptr.wrapping_add(4))?;
+            let socktype = load32(memory, hints_ptr.wrapping_add(8))?;
+            let protocol = load32(memory, hints_ptr.wrapping_add(12))?;
+            if load32(memory, hints_ptr.wrapping_add(16))? != 0
+                || load32(memory, hints_ptr.wrapping_add(20))? != 0
+                || load32(memory, hints_ptr.wrapping_add(24))? != 0
+                || load32(memory, hints_ptr.wrapping_add(28))? != 0
+            {
+                return Ok(self.return32(cpu, EAI_BADHINTS));
+            }
+            (flags, family, socktype, protocol)
+        };
+        if flags & !AI_MASK != 0 {
+            return Ok(self.return32(cpu, EAI_BADFLAGS));
+        }
+        if !matches!(family, AF_UNSPEC | AF_INET | AF_INET6) {
+            return Ok(self.return32(cpu, EAI_FAMILY));
+        }
+        if !matches!(socktype, 0 | SOCK_STREAM | SOCK_DGRAM) {
+            return Ok(self.return32(cpu, EAI_SOCKTYPE));
+        }
+        if !matches!(protocol, 0 | IPPROTO_TCP | IPPROTO_UDP) {
+            return Ok(self.return32(cpu, EAI_PROTOCOL));
+        }
+        if matches!(
+            (socktype, protocol),
+            (SOCK_STREAM, IPPROTO_UDP) | (SOCK_DGRAM, IPPROTO_TCP)
+        ) {
+            return Ok(self.return32(cpu, EAI_BADHINTS));
+        }
+
+        let socket_specs = match (socktype, protocol) {
+            (0, 0) => vec![(SOCK_DGRAM, IPPROTO_UDP), (SOCK_STREAM, IPPROTO_TCP)],
+            (0, IPPROTO_TCP) => vec![(SOCK_STREAM, IPPROTO_TCP)],
+            (0, IPPROTO_UDP) => vec![(SOCK_DGRAM, IPPROTO_UDP)],
+            (SOCK_STREAM, 0) => vec![(SOCK_STREAM, IPPROTO_TCP)],
+            (SOCK_DGRAM, 0) => vec![(SOCK_DGRAM, IPPROTO_UDP)],
+            (socktype, protocol) => vec![(socktype, protocol)],
+        };
+        let port = match service.as_deref() {
+            None => 0,
+            Some(service) => match parse_service_port(service, socktype, flags) {
+                Ok(port) => port,
+                Err(error) => return Ok(self.return32(cpu, error)),
+            },
+        };
+
+        let addresses = match node.as_deref() {
+            None => {
+                let v4 = if flags & AI_PASSIVE != 0 {
+                    GuestIpAddress::V4([0; 4])
+                } else {
+                    GuestIpAddress::V4([127, 0, 0, 1])
+                };
+                let v6 = if flags & AI_PASSIVE != 0 {
+                    GuestIpAddress::V6([0; 16])
+                } else {
+                    let mut loopback = [0; 16];
+                    loopback[15] = 1;
+                    GuestIpAddress::V6(loopback)
+                };
+                match family {
+                    AF_INET => vec![v4],
+                    AF_INET6 => vec![v6],
+                    _ if flags & AI_ADDRCONFIG != 0 => vec![v4],
+                    _ => vec![v6, v4],
+                }
+            }
+            Some(node) => {
+                let parsed = parse_ipv4_addr(node)
+                    .map(|address| GuestIpAddress::V4(address.to_le_bytes()))
+                    .or_else(|| {
+                        node.parse::<std::net::Ipv6Addr>()
+                            .ok()
+                            .map(|address| GuestIpAddress::V6(address.octets()))
+                    });
+                if let Some(address) = parsed {
+                    if family != AF_UNSPEC && family != address.family() {
+                        return Ok(self.return32(cpu, EAI_ADDRFAMILY));
+                    }
+                    vec![address]
+                } else if flags & AI_NUMERICHOST != 0 {
+                    return Ok(self.return32(cpu, EAI_NONAME));
+                } else if node.eq_ignore_ascii_case("localhost") {
+                    match family {
+                        AF_INET6 => {
+                            let mut loopback = [0; 16];
+                            loopback[15] = 1;
+                            vec![GuestIpAddress::V6(loopback)]
+                        }
+                        _ => vec![GuestIpAddress::V4([127, 0, 0, 1])],
+                    }
+                } else {
+                    trace_hle_file(format_args!(
+                        "getaddrinfo node={node:?} service={service:?} -> EAI_AGAIN"
+                    ));
+                    return Ok(self.return32(cpu, EAI_AGAIN));
+                }
+            }
+        };
+
+        let canonical_name = (flags & AI_CANONNAME != 0).then_some(node.as_deref().unwrap_or(
+            if flags & AI_PASSIVE != 0 {
+                "0.0.0.0"
+            } else {
+                "localhost"
+            },
+        ));
+        let mut next = 0;
+        let mut allocations = Vec::new();
+        for address in addresses.iter().rev().copied() {
+            for (entry_socktype, entry_protocol) in socket_specs.iter().rev().copied() {
+                match self.alloc_guest_addrinfo(
+                    memory,
+                    address,
+                    port,
+                    flags,
+                    entry_socktype,
+                    entry_protocol,
+                    canonical_name,
+                    next,
+                ) {
+                    Ok(entry) => {
+                        allocations.push(entry);
+                        next = entry;
+                    }
+                    Err(HleError::HeapExhausted { .. }) => {
+                        for entry in allocations {
+                            self.free_ptr(entry);
+                        }
+                        return Ok(self.return32(cpu, EAI_MEMORY));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        store32(memory, result_ptr, next)?;
+        trace_hle_file(format_args!(
+            "getaddrinfo node={node:?} service={service:?} family={family} socktype={socktype} protocol={protocol} -> {next:#010x}"
+        ));
+        Ok(self.return32(cpu, 0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn alloc_guest_addrinfo<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        address: GuestIpAddress,
+        port: u16,
+        flags: u32,
+        socktype: u32,
+        protocol: u32,
+        canonical_name: Option<&str>,
+        next: u32,
+    ) -> Result<u32, HleError> {
+        let sockaddr_len = address.sockaddr_len();
+        let canonical_len = canonical_name.map_or(0, |name| name.len() as u32 + 1);
+        let size = ANDROID_ADDRINFO_SIZE
+            .checked_add(sockaddr_len)
+            .and_then(|size| size.checked_add(canonical_len))
+            .ok_or(HleError::HeapExhausted {
+                requested: u32::MAX,
+            })?;
+        let entry = self.alloc_guest(size, 4)?;
+        for offset in 0..size {
+            store8(memory, entry.wrapping_add(offset), 0)?;
+        }
+        let sockaddr = entry.wrapping_add(ANDROID_ADDRINFO_SIZE);
+        let canonical = canonical_name.map(|_| sockaddr.wrapping_add(sockaddr_len));
+        store32(memory, entry, flags)?;
+        store32(memory, entry.wrapping_add(4), address.family())?;
+        store32(memory, entry.wrapping_add(8), socktype)?;
+        store32(memory, entry.wrapping_add(12), protocol)?;
+        store32(memory, entry.wrapping_add(16), sockaddr_len)?;
+        store32(memory, entry.wrapping_add(20), canonical.unwrap_or(0))?;
+        store32(memory, entry.wrapping_add(24), sockaddr)?;
+        store32(memory, entry.wrapping_add(28), next)?;
+        store16(memory, sockaddr, address.family() as u16)?;
+        let port = port.to_be_bytes();
+        store8(memory, sockaddr.wrapping_add(2), port[0])?;
+        store8(memory, sockaddr.wrapping_add(3), port[1])?;
+        match address {
+            GuestIpAddress::V4(octets) => {
+                for (offset, byte) in octets.into_iter().enumerate() {
+                    store8(memory, sockaddr.wrapping_add(4 + offset as u32), byte)?;
+                }
+            }
+            GuestIpAddress::V6(octets) => {
+                for (offset, byte) in octets.into_iter().enumerate() {
+                    store8(memory, sockaddr.wrapping_add(8 + offset as u32), byte)?;
+                }
+            }
+        }
+        if let (Some(name), Some(canonical)) = (canonical_name, canonical) {
+            for (offset, byte) in name.bytes().enumerate() {
+                store8(memory, canonical.wrapping_add(offset as u32), byte)?;
+            }
+            store8(memory, canonical.wrapping_add(name.len() as u32), 0)?;
+        }
+        Ok(entry)
+    }
+
+    fn freeaddrinfo_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let mut entry = cpu.reg(0);
+        let mut seen = HashSet::new();
+        while entry != 0 {
+            if seen.len() >= 1024 || !seen.insert(entry) {
+                return Err(HleError::Memory(
+                    "invalid or cyclic guest addrinfo list".to_string(),
+                ));
+            }
+            let canonical = load32(memory, entry.wrapping_add(20))?;
+            let next = load32(memory, entry.wrapping_add(28))?;
+            self.free_ptr(canonical);
+            self.free_ptr(entry);
+            entry = next;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gai_strerror_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let code = cpu.reg(0) as i32;
+        let index = if (0..=EAI_MAX as i32).contains(&code) {
+            code as usize
+        } else {
+            EAI_MAX
+        };
+        let ptr = match self.gai_strerror_buffers[index] {
+            Some(ptr) => ptr,
+            None => {
+                let ptr = self.alloc_c_string(memory, gai_error_message(index))?;
+                self.gai_strerror_buffers[index] = Some(ptr);
+                ptr
+            }
+        };
+        Ok(self.return32(cpu, ptr))
     }
 
     fn gnu_unwind_find_exidx<M: Memory>(
@@ -2379,7 +3094,13 @@ impl HleRuntime {
         let format_ptr = cpu.reg(0);
         let mut args = PrintfArgs::from_cpu(cpu, 1);
         let output = self.format_printf_output("printf", memory, format_ptr, &mut args)?;
-        Ok(self.return32(cpu, output.len() as u32))
+        match self.write_fake_fd_bytes(1, &output) {
+            Ok(written) => Ok(self.return32(cpu, written)),
+            Err(errno) => {
+                self.set_errno(memory, errno)?;
+                Ok(self.return32(cpu, u32::MAX))
+            }
+        }
     }
 
     fn fprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2387,8 +3108,8 @@ impl HleRuntime {
         let format_ptr = cpu.reg(1);
         let mut args = PrintfArgs::from_cpu(cpu, 2);
         let output = self.format_printf_output("fprintf", memory, format_ptr, &mut args)?;
-        self.write_formatted_stream(memory, stream, &output)?;
-        Ok(self.return32(cpu, output.len() as u32))
+        let written = self.write_formatted_stream(memory, stream, &output)?;
+        Ok(self.return32(cpu, written))
     }
 
     fn vfprintf_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2396,8 +3117,8 @@ impl HleRuntime {
         let format_ptr = cpu.reg(1);
         let mut args = PrintfArgs::from_va_list(cpu.reg(2));
         let output = self.format_printf_output("vfprintf", memory, format_ptr, &mut args)?;
-        self.write_formatted_stream(memory, stream, &output)?;
-        Ok(self.return32(cpu, output.len() as u32))
+        let written = self.write_formatted_stream(memory, stream, &output)?;
+        Ok(self.return32(cpu, written))
     }
 
     fn format_to_guest_buffer<M: Memory>(
@@ -2438,15 +3159,24 @@ impl HleRuntime {
         memory: &mut M,
         stream: u32,
         output: &[u8],
-    ) -> Result<(), HleError> {
-        if stream == 0 || output.is_empty() {
-            return Ok(());
-        }
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
-            return Ok(());
+    ) -> Result<u32, HleError> {
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
+            self.set_errno(memory, if stream == 0 { EFAULT } else { EBADF })?;
+            return Ok(u32::MAX);
         };
-        self.write_fake_fd_bytes(fd, output);
-        Ok(())
+        if flags & (BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SRW) == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EBADF)?;
+            return Ok(u32::MAX);
+        }
+        match self.write_fake_fd_bytes(fd, output) {
+            Ok(written) => Ok(written),
+            Err(errno) => {
+                self.mark_stdio_error(memory, stream)?;
+                self.set_errno(memory, errno)?;
+                Ok(u32::MAX)
+            }
+        }
     }
 
     fn sscanf<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -2563,17 +3293,29 @@ impl HleRuntime {
                 cpu.reg(14)
             );
         }
-        let ptr = self.alloc_guest(cpu.reg(0), 8)?;
-        Ok(self.return32(cpu, ptr))
+        let requested = cpu.reg(0);
+        match self.alloc_guest(requested, 8) {
+            Ok(ptr) => Ok(self.return32(cpu, ptr)),
+            Err(HleError::HeapExhausted { .. }) => {
+                self.return_heap_allocation_failure("malloc", requested, cpu, memory)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn calloc<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let count = cpu.reg(0);
         let size = cpu.reg(1);
         let Some(total) = count.checked_mul(size) else {
-            return Ok(self.return32(cpu, 0));
+            return self.return_heap_allocation_failure("calloc", u32::MAX, cpu, memory);
         };
-        let ptr = self.alloc_guest(total, 8)?;
+        let ptr = match self.alloc_guest(total, 8) {
+            Ok(ptr) => ptr,
+            Err(HleError::HeapExhausted { .. }) => {
+                return self.return_heap_allocation_failure("calloc", total, cpu, memory);
+            }
+            Err(error) => return Err(error),
+        };
         for idx in 0..total {
             store8(memory, ptr.wrapping_add(idx), 0)?;
         }
@@ -2584,8 +3326,13 @@ impl HleRuntime {
         let ptr = cpu.reg(0);
         let size = cpu.reg(1);
         if ptr == 0 {
-            let new_ptr = self.alloc_guest(size, 8)?;
-            Ok(self.return32(cpu, new_ptr))
+            match self.alloc_guest(size, 8) {
+                Ok(new_ptr) => Ok(self.return32(cpu, new_ptr)),
+                Err(HleError::HeapExhausted { .. }) => {
+                    self.return_heap_allocation_failure("realloc", size, cpu, memory)
+                }
+                Err(error) => Err(error),
+            }
         } else if size == 0 {
             self.free_ptr(ptr);
             Ok(self.return32(cpu, 0))
@@ -2595,7 +3342,13 @@ impl HleRuntime {
                     return Ok(self.return32(cpu, ptr));
                 }
             }
-            let new_ptr = self.alloc_guest(size, 8)?;
+            let new_ptr = match self.alloc_guest(size, 8) {
+                Ok(new_ptr) => new_ptr,
+                Err(HleError::HeapExhausted { .. }) => {
+                    return self.return_heap_allocation_failure("realloc", size, cpu, memory);
+                }
+                Err(error) => return Err(error),
+            };
             let old_size = self.allocation_size(ptr).unwrap_or(0);
             for idx in 0..old_size.min(size) {
                 let byte = load8(memory, ptr.wrapping_add(idx))?;
@@ -2611,28 +3364,53 @@ impl HleRuntime {
         Ok(self.return32(cpu, 0))
     }
 
+    fn return_heap_allocation_failure<M: Memory>(
+        &mut self,
+        name: &str,
+        requested: u32,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let report = self.heap_allocator.storage_report();
+        eprintln!(
+            "HLE {name} returning null: requested={requested} total_free={} largest_free={} live_allocations={}",
+            report.total_free_space,
+            report.largest_free_region,
+            self.heap_allocations.len()
+        );
+        self.set_errno(memory, ENOMEM)?;
+        Ok(self.return32(cpu, 0))
+    }
+
     fn aeabi_idiv(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = cpu.reg(0) as i32;
         let rhs = cpu.reg(1) as i32;
-        let result = if rhs == 0 { 0 } else { lhs.wrapping_div(rhs) };
+        if rhs == 0 {
+            return Err(HleError::Abort("__aeabi_idiv divide by zero".to_string()));
+        }
+        let result = lhs.wrapping_div(rhs);
         Ok(self.return32(cpu, result as u32))
     }
 
     fn aeabi_uidiv(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = cpu.reg(0);
         let rhs = cpu.reg(1);
-        let result = if rhs == 0 { 0 } else { lhs / rhs };
+        if rhs == 0 {
+            return Err(HleError::Abort("__aeabi_uidiv divide by zero".to_string()));
+        }
+        let result = lhs / rhs;
         Ok(self.return32(cpu, result))
     }
 
     fn aeabi_idivmod(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = cpu.reg(0) as i32;
         let rhs = cpu.reg(1) as i32;
-        let (q, r) = if rhs == 0 {
-            (0, 0)
-        } else {
-            (lhs.wrapping_div(rhs), lhs.wrapping_rem(rhs))
-        };
+        if rhs == 0 {
+            return Err(HleError::Abort(
+                "__aeabi_idivmod divide by zero".to_string(),
+            ));
+        }
+        let (q, r) = (lhs.wrapping_div(rhs), lhs.wrapping_rem(rhs));
         cpu.set_reg(1, r as u32);
         Ok(self.return32(cpu, q as u32))
     }
@@ -2640,11 +3418,12 @@ impl HleRuntime {
     fn aeabi_uidivmod(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = cpu.reg(0);
         let rhs = cpu.reg(1);
-        let (q, r) = if rhs == 0 {
-            (0, 0)
-        } else {
-            (lhs / rhs, lhs % rhs)
-        };
+        if rhs == 0 {
+            return Err(HleError::Abort(
+                "__aeabi_uidivmod divide by zero".to_string(),
+            ));
+        }
+        let (q, r) = (lhs / rhs, lhs % rhs);
         cpu.set_reg(1, r);
         Ok(self.return32(cpu, q))
     }
@@ -2652,11 +3431,12 @@ impl HleRuntime {
     fn aeabi_ldivmod(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = i64_arg(cpu, 0);
         let rhs = i64_arg(cpu, 2);
-        let (q, r) = if rhs == 0 {
-            (0, 0)
-        } else {
-            (lhs.wrapping_div(rhs), lhs.wrapping_rem(rhs))
-        };
+        if rhs == 0 {
+            return Err(HleError::Abort(
+                "__aeabi_ldivmod divide by zero".to_string(),
+            ));
+        }
+        let (q, r) = (lhs.wrapping_div(rhs), lhs.wrapping_rem(rhs));
         cpu.set_reg(2, r as u64 as u32);
         cpu.set_reg(3, ((r as u64) >> 32) as u32);
         Ok(self.return_u64(cpu, q as u64))
@@ -2665,11 +3445,12 @@ impl HleRuntime {
     fn aeabi_uldivmod(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = u64_arg(cpu, 0);
         let rhs = u64_arg(cpu, 2);
-        let (q, r) = if rhs == 0 {
-            (0, 0)
-        } else {
-            (lhs / rhs, lhs % rhs)
-        };
+        if rhs == 0 {
+            return Err(HleError::Abort(
+                "__aeabi_uldivmod divide by zero".to_string(),
+            ));
+        }
+        let (q, r) = (lhs / rhs, lhs % rhs);
         cpu.set_reg(2, r as u32);
         cpu.set_reg(3, (r >> 32) as u32);
         Ok(self.return_u64(cpu, q))
@@ -2754,42 +3535,60 @@ impl HleRuntime {
     fn modsi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = cpu.reg(0) as i32;
         let rhs = cpu.reg(1) as i32;
-        let result = if rhs == 0 { 0 } else { lhs.wrapping_rem(rhs) };
+        if rhs == 0 {
+            return Err(HleError::Abort("__modsi3 divide by zero".to_string()));
+        }
+        let result = lhs.wrapping_rem(rhs);
         Ok(self.return32(cpu, result as u32))
     }
 
     fn umodsi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = cpu.reg(0);
         let rhs = cpu.reg(1);
-        let result = if rhs == 0 { 0 } else { lhs % rhs };
+        if rhs == 0 {
+            return Err(HleError::Abort("__umodsi3 divide by zero".to_string()));
+        }
+        let result = lhs % rhs;
         Ok(self.return32(cpu, result))
     }
 
     fn divdi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = i64_arg(cpu, 0);
         let rhs = i64_arg(cpu, 2);
-        let result = if rhs == 0 { 0 } else { lhs.wrapping_div(rhs) };
+        if rhs == 0 {
+            return Err(HleError::Abort("__divdi3 divide by zero".to_string()));
+        }
+        let result = lhs.wrapping_div(rhs);
         Ok(self.return_u64(cpu, result as u64))
     }
 
     fn udivdi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = u64_arg(cpu, 0);
         let rhs = u64_arg(cpu, 2);
-        let result = if rhs == 0 { 0 } else { lhs / rhs };
+        if rhs == 0 {
+            return Err(HleError::Abort("__udivdi3 divide by zero".to_string()));
+        }
+        let result = lhs / rhs;
         Ok(self.return_u64(cpu, result))
     }
 
     fn moddi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = i64_arg(cpu, 0);
         let rhs = i64_arg(cpu, 2);
-        let result = if rhs == 0 { 0 } else { lhs.wrapping_rem(rhs) };
+        if rhs == 0 {
+            return Err(HleError::Abort("__moddi3 divide by zero".to_string()));
+        }
+        let result = lhs.wrapping_rem(rhs);
         Ok(self.return_u64(cpu, result as u64))
     }
 
     fn umoddi3(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let lhs = u64_arg(cpu, 0);
         let rhs = u64_arg(cpu, 2);
-        let result = if rhs == 0 { 0 } else { lhs % rhs };
+        if rhs == 0 {
+            return Err(HleError::Abort("__umoddi3 divide by zero".to_string()));
+        }
+        let result = lhs % rhs;
         Ok(self.return_u64(cpu, result))
     }
 
@@ -2806,16 +3605,22 @@ impl HleRuntime {
     fn clock_gettime<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let clock_id = cpu.reg(0);
         let ts = cpu.reg(1);
-        let now = self.advance_clock();
-        if ts != 0 {
-            let (secs, nsecs) = if clock_id == 0 {
-                (now.wall_secs, now.wall_nsecs)
-            } else {
-                (now.monotonic_secs, now.monotonic_nsecs)
-            };
-            store32(memory, ts, secs as u32)?;
-            store32(memory, ts.wrapping_add(4), nsecs)?;
+        if ts == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
         }
+        if !matches!(clock_id, 0 | 1) {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let now = self.advance_clock();
+        let (secs, nsecs) = if clock_id == 0 {
+            (now.wall_secs, now.wall_nsecs)
+        } else {
+            (now.monotonic_secs, now.monotonic_nsecs)
+        };
+        store32(memory, ts, secs as u32)?;
+        store32(memory, ts.wrapping_add(4), nsecs)?;
         Ok(self.return32(cpu, 0))
     }
 
@@ -2887,7 +3692,7 @@ impl HleRuntime {
 
     fn fopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let path = normalize_virtual_path(&load_c_string(memory, cpu.reg(0), 512)?);
-        let mode = load_c_string(memory, cpu.reg(1), 16).unwrap_or_else(|_| String::new());
+        let mode = load_c_string(memory, cpu.reg(1), 16)?;
         let Some(stream_flags) = fake_stdio_flags_from_mode(&mode) else {
             self.set_errno(memory, EINVAL)?;
             return Ok(self.return32(cpu, 0));
@@ -2905,7 +3710,22 @@ impl HleRuntime {
                 self.create_virtual_file(&path, mode.contains('a'));
             }
             if wants_create || self.virtual_file_index(&path).is_some() {
-                let fd = self.open_fake_fd(FakeFileKind::Virtual { path: path.clone() });
+                let access_mode = if mode
+                    .as_bytes()
+                    .get(1..)
+                    .is_some_and(|tail| tail.contains(&b'+'))
+                {
+                    O_RDWR
+                } else if mode.starts_with('r') {
+                    O_RDONLY
+                } else {
+                    O_WRONLY
+                };
+                let flags = access_mode | if mode.contains('a') { O_APPEND } else { 0 };
+                let fd = self.open_fake_fd(FakeFileKind::Virtual {
+                    path: path.clone(),
+                    flags,
+                });
                 if mode.contains('a') {
                     let _ = self.seek_fake_fd(fd, 0, SEEK_END);
                 }
@@ -2923,8 +3743,13 @@ impl HleRuntime {
 
     fn fdopen_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
-        let mode = load_c_string(memory, cpu.reg(1), 16).unwrap_or_else(|_| String::new());
-        if fd == u32::MAX || self.fake_file_index(fd).is_none() {
+        let mode = load_c_string(memory, cpu.reg(1), 16)?;
+        let fd_open = usize::try_from(fd)
+            .ok()
+            .and_then(|fd| self.standard_fd_open.get(fd))
+            .copied()
+            .unwrap_or_else(|| self.fake_file_index(fd).is_some());
+        if fd == u32::MAX || !fd_open {
             self.set_errno(memory, 9)?;
             return Ok(self.return32(cpu, 0));
         }
@@ -2938,11 +3763,17 @@ impl HleRuntime {
 
     fn fclose_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let stream = cpu.reg(0);
-        if stream != 0 {
-            if let Ok(fd) = self.fake_file_fd(memory, stream) {
-                self.close_fd(fd);
-            }
+        let Some((fd, _)) = self.stdio_stream(memory, stream)? else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if let Some(open) = self.standard_fd_open.get_mut(fd as usize) {
+            *open = false;
+        } else {
+            self.close_fd(fd);
         }
+        store16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET), 0)?;
+        store16(memory, stream.wrapping_add(FAKE_FILE_FD_OFFSET), u16::MAX)?;
         Ok(self.return32(cpu, 0))
     }
 
@@ -2951,16 +3782,15 @@ impl HleRuntime {
         if stream == 0 {
             return Ok(self.return32(cpu, 0));
         }
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+        let Some((_, flags)) = self.stdio_stream(memory, stream)? else {
             self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, u32::MAX));
         };
-        if self.fake_file_index(fd).is_some() {
-            Ok(self.return32(cpu, 0))
-        } else {
+        if flags & (BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SRW) == 0 {
             self.set_errno(memory, EBADF)?;
-            Ok(self.return32(cpu, u32::MAX))
+            return Ok(self.return32(cpu, u32::MAX));
         }
+        Ok(self.return32(cpu, 0))
     }
 
     fn fseek_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -3012,32 +3842,44 @@ impl HleRuntime {
 
     fn feof_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let stream = cpu.reg(0);
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
             return Ok(self.return32(cpu, 0));
         };
-        let Some(file_idx) = self.fake_file_index(fd) else {
-            return Ok(self.return32(cpu, 0));
-        };
-        let flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET))
-            .unwrap_or_else(|_| Self::fake_file_state_flags(&self.files[file_idx]));
+        let flags = self.fake_file_index(fd).map_or(flags, |file_idx| {
+            flags | Self::fake_file_state_flags(&self.files[file_idx])
+        });
         Ok(self.return32(cpu, u32::from(flags & BIONIC_FILE_FLAG_SEOF != 0)))
     }
 
     fn ferror_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let stream = cpu.reg(0);
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
             return Ok(self.return32(cpu, 0));
         };
-        let Some(file_idx) = self.fake_file_index(fd) else {
-            return Ok(self.return32(cpu, 0));
-        };
-        let flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET))
-            .unwrap_or_else(|_| Self::fake_file_state_flags(&self.files[file_idx]));
+        let flags = self.fake_file_index(fd).map_or(flags, |file_idx| {
+            flags | Self::fake_file_state_flags(&self.files[file_idx])
+        });
         Ok(self.return32(cpu, u32::from(flags & BIONIC_FILE_FLAG_SERR != 0)))
     }
 
-    fn close_call(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
-        self.close_fd(cpu.reg(0));
+    fn close_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        if let Some(open) = usize::try_from(fd)
+            .ok()
+            .and_then(|fd| self.standard_fd_open.get_mut(fd))
+        {
+            if !*open {
+                self.set_errno(memory, EBADF)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            *open = false;
+            return Ok(self.return32(cpu, 0));
+        }
+        if self.fake_file_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        self.close_fd(fd);
         Ok(self.return32(cpu, 0))
     }
 
@@ -3062,12 +3904,24 @@ impl HleRuntime {
         }
     }
 
-    fn fdatasync_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+    fn sync_call<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
         let fd = cpu.reg(0);
-        if self.fake_file_index(fd).is_some() {
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if matches!(self.files[file_idx].kind, FakeFileKind::Virtual { .. })
+            || (name == "fsync"
+                && matches!(self.files[file_idx].kind, FakeFileKind::Directory { .. }))
+        {
             Ok(self.return32(cpu, 0))
         } else {
-            self.set_errno(memory, EBADF)?;
+            self.set_errno(memory, EINVAL)?;
             Ok(self.return32(cpu, u32::MAX))
         }
     }
@@ -3115,7 +3969,10 @@ impl HleRuntime {
                 self.create_virtual_file(&path, false);
             }
             if wants_create || self.virtual_file_index(&path).is_some() {
-                let fd = self.open_fake_fd(FakeFileKind::Virtual { path: path.clone() });
+                let fd = self.open_fake_fd(FakeFileKind::Virtual {
+                    path: path.clone(),
+                    flags: flags & (O_ACCMODE | O_APPEND | O_NONBLOCK),
+                });
                 if wants_append {
                     let _ = self.seek_fake_fd(fd, 0, SEEK_END);
                 }
@@ -3347,11 +4204,19 @@ impl HleRuntime {
     fn pipe_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fds = cpu.reg(0);
         if fds == 0 {
-            self.set_errno(memory, 14)?;
+            self.set_errno(memory, EFAULT)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
-        let read_fd = self.alloc_fd();
-        let write_fd = self.alloc_fd();
+        let pipe_id = self.next_pipe_id;
+        self.next_pipe_id = self.next_pipe_id.wrapping_add(1).max(1);
+        self.pipes.push(GuestPipe {
+            id: pipe_id,
+            bytes: VecDeque::new(),
+            read_open: true,
+            write_open: true,
+        });
+        let read_fd = self.open_fake_fd(FakeFileKind::PipeRead { pipe_id, flags: 0 });
+        let write_fd = self.open_fake_fd(FakeFileKind::PipeWrite { pipe_id, flags: 0 });
         store32(memory, fds, read_fd)?;
         store32(memory, fds.wrapping_add(4), write_fd)?;
         Ok(self.return32(cpu, 0))
@@ -3371,16 +4236,20 @@ impl HleRuntime {
             ty,
             protocol,
             flags: raw_ty & !SOCK_TYPE_MASK,
+            local_addr: None,
+            peer_addr: None,
+            options: Vec::new(),
+            received_datagrams: VecDeque::new(),
         });
         Ok(self.return32(cpu, fd))
     }
 
     fn bind_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        self.return_socket_success(cpu, memory, cpu.reg(0))
+        self.set_socket_address(cpu, memory, false)
     }
 
     fn connect_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        self.return_socket_success(cpu, memory, cpu.reg(0))
+        self.set_socket_address(cpu, memory, true)
     }
 
     fn setsockopt_call<M: Memory>(
@@ -3388,7 +4257,188 @@ impl HleRuntime {
         cpu: &mut Cpu,
         memory: &mut M,
     ) -> Result<(), HleError> {
-        self.return_socket_success(cpu, memory, cpu.reg(0))
+        let fd = cpu.reg(0);
+        let level = cpu.reg(1);
+        let name = cpu.reg(2);
+        let value_ptr = cpu.reg(3);
+        let value_len = self.stack_arg(cpu, memory, 4)?;
+        let Some(file_idx) = self.fake_socket_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let Some(required_len) = guest_socket_option_len(level, name) else {
+            self.set_errno(memory, ENOPROTOOPT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if value_ptr == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if value_len < required_len as u32 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let value = load_bytes(memory, value_ptr, required_len as u32)?;
+        let FakeFileKind::Socket { options, .. } = &mut self.files[file_idx].kind else {
+            unreachable!("fake_socket_index returned a non-socket")
+        };
+        if let Some(option) = options
+            .iter_mut()
+            .find(|option| option.level == level && option.name == name)
+        {
+            option.value = value;
+        } else {
+            options.push(GuestSocketOption { level, name, value });
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn getsockopt_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let level = cpu.reg(1);
+        let name = cpu.reg(2);
+        let value_ptr = cpu.reg(3);
+        let value_len_ptr = self.stack_arg(cpu, memory, 4)?;
+        let Some(file_idx) = self.fake_socket_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if value_ptr == 0 || value_len_ptr == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let value = match &self.files[file_idx].kind {
+            FakeFileKind::Socket { ty, options, .. } => {
+                guest_socket_option_value(*ty, options, level, name)
+            }
+            _ => unreachable!("fake_socket_index returned a non-socket"),
+        };
+        let Some(value) = value else {
+            self.set_errno(memory, ENOPROTOOPT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let capacity = load32(memory, value_len_ptr)? as usize;
+        let copied_len = capacity.min(value.len());
+        for (offset, byte) in value.iter().copied().take(copied_len).enumerate() {
+            store8(memory, value_ptr.wrapping_add(offset as u32), byte)?;
+        }
+        store32(memory, value_len_ptr, copied_len as u32)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn set_socket_address<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        peer: bool,
+    ) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let address_ptr = cpu.reg(1);
+        let address_len = cpu.reg(2);
+        let Some(file_idx) = self.fake_socket_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if address_ptr == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if !(2..=128).contains(&address_len) {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let family = u32::from(load16(memory, address_ptr)?);
+        let (domain, ty) = match &self.files[file_idx].kind {
+            FakeFileKind::Socket { domain, ty, .. } => (*domain, *ty),
+            _ => unreachable!("fake_socket_index returned a non-socket"),
+        };
+        let minimum_len = if domain == AF_INET6 { 28 } else { 16 };
+        if family != domain || address_len < minimum_len {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if peer && ty == SOCK_STREAM {
+            self.set_errno(memory, ENETUNREACH)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let mut address = load_bytes(memory, address_ptr, address_len)?;
+        if !peer && domain == AF_INET && address.len() >= 4 && address[2..4] == [0, 0] {
+            address[2..4].copy_from_slice(&guest_ephemeral_port(fd).to_be_bytes());
+        }
+        if peer {
+            let needs_local = matches!(
+                &self.files[file_idx].kind,
+                FakeFileKind::Socket {
+                    local_addr: None,
+                    ..
+                }
+            );
+            if needs_local {
+                let local = default_guest_sockaddr(domain, Some(guest_ephemeral_port(fd)));
+                if let FakeFileKind::Socket { local_addr, .. } = &mut self.files[file_idx].kind {
+                    *local_addr = Some(local);
+                }
+            }
+        }
+        if let FakeFileKind::Socket {
+            local_addr,
+            peer_addr,
+            ..
+        } = &mut self.files[file_idx].kind
+        {
+            if peer {
+                *peer_addr = Some(address);
+            } else {
+                *local_addr = Some(address);
+            }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn getsockname_call<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        peer: bool,
+    ) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let address_ptr = cpu.reg(1);
+        let address_len_ptr = cpu.reg(2);
+        let Some(file_idx) = self.fake_socket_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if address_ptr == 0 || address_len_ptr == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let (domain, address) = match &self.files[file_idx].kind {
+            FakeFileKind::Socket {
+                domain,
+                local_addr,
+                peer_addr,
+                ..
+            } => (*domain, if peer { peer_addr } else { local_addr }.clone()),
+            _ => unreachable!("fake_socket_index returned a non-socket"),
+        };
+        let address = match address {
+            Some(address) => address,
+            None if peer => {
+                self.set_errno(memory, ENOTCONN)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            None => default_guest_sockaddr(domain, None),
+        };
+        let capacity = load32(memory, address_len_ptr)? as usize;
+        for (offset, byte) in address.iter().copied().take(capacity).enumerate() {
+            store8(memory, address_ptr.wrapping_add(offset as u32), byte)?;
+        }
+        store32(memory, address_len_ptr, address.len() as u32)?;
+        Ok(self.return32(cpu, 0))
     }
 
     fn fcntl_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -3405,9 +4455,131 @@ impl HleRuntime {
                 self.files[file_idx].set_flags(arg);
                 0
             }
-            _ => 0,
+            F_GETLK | F_SETLK | F_SETLKW => {
+                match self.fcntl_record_lock(memory, file_idx, cmd, arg) {
+                    Ok(result) => result,
+                    Err(errno) => {
+                        self.set_errno(memory, errno)?;
+                        u32::MAX
+                    }
+                }
+            }
+            _ => {
+                self.set_errno(memory, EINVAL)?;
+                u32::MAX
+            }
         };
         Ok(self.return32(cpu, result))
+    }
+
+    fn ioctl_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let request = cpu.reg(1);
+        let argument = cpu.reg(2);
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if !matches!(self.files[file_idx].kind, FakeFileKind::Socket { .. }) {
+            self.set_errno(memory, ENOTTY)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if request != SIOCGIFCONF {
+            self.set_errno(memory, ENOTTY)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if argument == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+
+        let capacity = load32(memory, argument)? as i32;
+        let entries = load32(memory, argument.wrapping_add(4))?;
+        if capacity < 0 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let written = if entries == 0 {
+            ANDROID_IFREQ_SIZE
+        } else if capacity as u32 >= ANDROID_IFREQ_SIZE {
+            for offset in 0..ANDROID_IFREQ_SIZE {
+                store8(memory, entries.wrapping_add(offset), 0)?;
+            }
+            for (offset, byte) in b"lo".iter().copied().enumerate() {
+                store8(memory, entries.wrapping_add(offset as u32), byte)?;
+            }
+            store16(
+                memory,
+                entries.wrapping_add(ANDROID_IFNAMSIZ),
+                AF_INET as u16,
+            )?;
+            for (offset, byte) in [127, 0, 0, 1].into_iter().enumerate() {
+                store8(
+                    memory,
+                    entries.wrapping_add(ANDROID_IFNAMSIZ + 4 + offset as u32),
+                    byte,
+                )?;
+            }
+            ANDROID_IFREQ_SIZE
+        } else {
+            0
+        };
+        store32(memory, argument, written)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn fcntl_record_lock<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        file_idx: usize,
+        cmd: u32,
+        flock: u32,
+    ) -> Result<u32, u32> {
+        if flock == 0 {
+            return Err(EFAULT);
+        }
+        let lock_type =
+            load16(memory, flock.wrapping_add(ARM_FLOCK_TYPE_OFFSET)).map_err(|_| EFAULT)?;
+        let whence =
+            load16(memory, flock.wrapping_add(ARM_FLOCK_WHENCE_OFFSET)).map_err(|_| EFAULT)?;
+        let start =
+            load32(memory, flock.wrapping_add(ARM_FLOCK_START_OFFSET)).map_err(|_| EFAULT)? as i32;
+        let len =
+            load32(memory, flock.wrapping_add(ARM_FLOCK_LEN_OFFSET)).map_err(|_| EFAULT)? as i32;
+        if whence != SEEK_SET as u16 || start != 0 || len != 0 {
+            return Err(EINVAL);
+        }
+
+        let (path, flags) = match &self.files[file_idx].kind {
+            FakeFileKind::Virtual { path, flags } => (path.clone(), *flags),
+            _ => return Err(EINVAL),
+        };
+        let virtual_idx = self.virtual_file_index(&path).ok_or(ENOENT)?;
+
+        if cmd == F_GETLK {
+            if !matches!(lock_type, F_RDLCK | F_WRLCK) {
+                return Err(EINVAL);
+            }
+            // This runtime models one guest process. POSIX locks held by that same
+            // process never conflict with F_GETLK, and there is no external owner.
+            store16(memory, flock.wrapping_add(ARM_FLOCK_TYPE_OFFSET), F_UNLCK)
+                .map_err(|_| EFAULT)?;
+            return Ok(0);
+        }
+
+        match lock_type {
+            F_RDLCK if flags & O_ACCMODE == O_WRONLY => Err(EBADF),
+            F_WRLCK if flags & O_ACCMODE == O_RDONLY => Err(EBADF),
+            F_RDLCK | F_WRLCK => {
+                self.virtual_files[virtual_idx].advisory_lock = Some(lock_type);
+                Ok(0)
+            }
+            F_UNLCK => {
+                self.virtual_files[virtual_idx].advisory_lock = None;
+                Ok(0)
+            }
+            _ => Err(EINVAL),
+        }
     }
 
     fn inet_addr_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -3460,24 +4632,197 @@ impl HleRuntime {
         Ok(self.return32(cpu, ptr))
     }
 
+    fn perror_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let prefix = match cpu.reg(0) {
+            0 => None,
+            ptr => Some(load_c_string_bytes(memory, ptr, 4096)?),
+        };
+        let errno = if self.errno_addr == 0 {
+            0
+        } else {
+            load32(memory, self.errno_addr)?
+        };
+        let output = format_perror_message(prefix.as_deref(), errno);
+        trace_hle_file(format_args!(
+            "perror errno={errno} output={:?}",
+            String::from_utf8_lossy(&output)
+        ));
+        if let Err(write_errno) = self.write_fake_fd_bytes(2, &output) {
+            self.set_errno(memory, write_errno)?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
     fn sendto_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
+        let buffer = cpu.reg(1);
         let len = cpu.reg(2);
-        if self.fake_socket_index(fd).is_none() {
+        let flags = cpu.reg(3);
+        let Some(file_idx) = self.fake_socket_index(fd) else {
             self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, u32::MAX));
+        };
+        if len != 0 && buffer == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
         }
+        if flags != 0 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if len > SOCKET_DATAGRAM_MAX_PAYLOAD {
+            self.set_errno(memory, EMSGSIZE)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let destination_ptr = self.stack_arg(cpu, memory, 4)?;
+        let destination_len = self.stack_arg(cpu, memory, 5)?;
+
+        let (domain, ty, peer_addr, local_addr) = match &self.files[file_idx].kind {
+            FakeFileKind::Socket {
+                domain,
+                ty,
+                peer_addr,
+                local_addr,
+                ..
+            } => (*domain, *ty, peer_addr.clone(), local_addr.clone()),
+            _ => unreachable!("fake_socket_index returned a non-socket"),
+        };
+        if ty != SOCK_DGRAM {
+            self.set_errno(memory, ENOTCONN)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+
+        let destination = if destination_ptr == 0 {
+            let Some(peer_addr) = peer_addr else {
+                self.set_errno(memory, EDESTADDRREQ)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            };
+            peer_addr
+        } else {
+            let minimum_len = guest_sockaddr_min_len(domain);
+            if destination_len < minimum_len || destination_len > 128 {
+                self.set_errno(memory, EINVAL)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            let destination = load_bytes(memory, destination_ptr, destination_len)?;
+            if guest_sockaddr_family(&destination) != Some(domain) {
+                self.set_errno(memory, EINVAL)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            destination
+        };
+
+        let source_addr = match local_addr {
+            Some(address) => address,
+            None => {
+                let address = default_guest_sockaddr(domain, Some(guest_ephemeral_port(fd)));
+                let FakeFileKind::Socket { local_addr, .. } = &mut self.files[file_idx].kind else {
+                    unreachable!("fake_socket_index returned a non-socket")
+                };
+                *local_addr = Some(address.clone());
+                address
+            }
+        };
+        let Some(target_idx) = self.files.iter().position(|file| {
+            matches!(
+                &file.kind,
+                FakeFileKind::Socket {
+                    domain: target_domain,
+                    ty: SOCK_DGRAM,
+                    local_addr: Some(target_addr),
+                    ..
+                } if *target_domain == domain
+                    && guest_sockaddr_matches_local_endpoint(domain, target_addr, &destination)
+            )
+        }) else {
+            self.set_errno(memory, ENETUNREACH)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        let data = if len == 0 {
+            Vec::new()
+        } else {
+            load_bytes(memory, buffer, len)?
+        };
+        let source_addr = guest_datagram_source_address(domain, &source_addr, &destination);
+        let FakeFileKind::Socket {
+            received_datagrams, ..
+        } = &mut self.files[target_idx].kind
+        else {
+            unreachable!("local datagram target was not a socket")
+        };
+        if received_datagrams.len() >= SOCKET_DATAGRAM_QUEUE_CAPACITY {
+            self.set_errno(memory, EAGAIN)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        received_datagrams.push_back(GuestDatagram { data, source_addr });
         Ok(self.return32(cpu, len))
     }
 
     fn recvfrom_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
-        if self.fake_socket_index(fd).is_none() {
+        let buffer = cpu.reg(1);
+        let len = cpu.reg(2);
+        let flags = cpu.reg(3);
+        let Some(file_idx) = self.fake_socket_index(fd) else {
             self.set_errno(memory, EBADF)?;
-        } else {
-            self.set_errno(memory, EAGAIN)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if len != 0 && buffer == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
         }
-        Ok(self.return32(cpu, u32::MAX))
+        if flags != 0 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let source_ptr = self.stack_arg(cpu, memory, 4)?;
+        let source_len_ptr = self.stack_arg(cpu, memory, 5)?;
+        if source_ptr != 0 && source_len_ptr == 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let datagram = match &self.files[file_idx].kind {
+            FakeFileKind::Socket {
+                received_datagrams, ..
+            } => received_datagrams.front().cloned(),
+            _ => unreachable!("fake_socket_index returned a non-socket"),
+        };
+        let Some(datagram) = datagram else {
+            self.set_errno(memory, EAGAIN)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+
+        let copied_len = len.min(datagram.data.len() as u32);
+        for (offset, byte) in datagram
+            .data
+            .iter()
+            .copied()
+            .take(copied_len as usize)
+            .enumerate()
+        {
+            store8(memory, buffer.wrapping_add(offset as u32), byte)?;
+        }
+        if source_ptr != 0 {
+            let capacity = load32(memory, source_len_ptr)? as usize;
+            for (offset, byte) in datagram
+                .source_addr
+                .iter()
+                .copied()
+                .take(capacity)
+                .enumerate()
+            {
+                store8(memory, source_ptr.wrapping_add(offset as u32), byte)?;
+            }
+            store32(memory, source_len_ptr, datagram.source_addr.len() as u32)?;
+        }
+        let FakeFileKind::Socket {
+            received_datagrams, ..
+        } = &mut self.files[file_idx].kind
+        else {
+            unreachable!("fake_socket_index returned a non-socket")
+        };
+        received_datagrams.pop_front();
+        Ok(self.return32(cpu, copied_len))
     }
 
     fn select_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
@@ -3486,10 +4831,86 @@ impl HleRuntime {
             self.set_errno(memory, EINVAL)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
-        clear_fd_set(memory, cpu.reg(1), nfds)?;
-        clear_fd_set(memory, cpu.reg(2), nfds)?;
-        clear_fd_set(memory, cpu.reg(3), nfds)?;
-        Ok(self.return32(cpu, 0))
+        let set_len = nfds.div_ceil(8) as usize;
+        let read_ptr = cpu.reg(1);
+        let write_ptr = cpu.reg(2);
+        let except_ptr = cpu.reg(3);
+        let read_set = if read_ptr == 0 {
+            None
+        } else {
+            Some(load_bytes(memory, read_ptr, set_len as u32)?)
+        };
+        let write_set = if write_ptr == 0 {
+            None
+        } else {
+            Some(load_bytes(memory, write_ptr, set_len as u32)?)
+        };
+        let except_set = if except_ptr == 0 {
+            None
+        } else {
+            Some(load_bytes(memory, except_ptr, set_len as u32)?)
+        };
+        let mut ready_read = read_set.as_ref().map(|_| vec![0; set_len]);
+        let mut ready_write = write_set.as_ref().map(|_| vec![0; set_len]);
+        let mut ready_except = except_set.as_ref().map(|_| vec![0; set_len]);
+        let mut ready_count = 0u32;
+
+        for fd in 0..nfds {
+            let wants_read = read_set
+                .as_ref()
+                .is_some_and(|set| fd_set_contains(set, fd));
+            let wants_write = write_set
+                .as_ref()
+                .is_some_and(|set| fd_set_contains(set, fd));
+            let wants_except = except_set
+                .as_ref()
+                .is_some_and(|set| fd_set_contains(set, fd));
+            if !wants_read && !wants_write && !wants_except {
+                continue;
+            }
+            if fd > 2 && self.fake_file_index(fd).is_none() {
+                self.set_errno(memory, EBADF)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+
+            let requested =
+                (if wants_read { POLLIN } else { 0 }) | if wants_write { POLLOUT } else { 0 };
+            let events = self.fd_poll_events(fd, requested);
+            let read_ready = wants_read && events & (POLLIN | POLLHUP) != 0;
+            let write_ready = wants_write && events & POLLOUT != 0;
+            // No modeled descriptor currently exposes out-of-band data.
+            let except_ready = false;
+            if read_ready {
+                fd_set_insert(ready_read.as_mut().expect("read set exists"), fd);
+            }
+            if write_ready {
+                fd_set_insert(ready_write.as_mut().expect("write set exists"), fd);
+            }
+            if except_ready {
+                fd_set_insert(ready_except.as_mut().expect("except set exists"), fd);
+            }
+            if read_ready || write_ready || except_ready {
+                ready_count = ready_count.saturating_add(1);
+            }
+        }
+
+        for (ptr, set) in [
+            (read_ptr, ready_read.as_deref()),
+            (write_ptr, ready_write.as_deref()),
+            (except_ptr, ready_except.as_deref()),
+        ] {
+            if ptr == 0 {
+                continue;
+            }
+            for (offset, byte) in set
+                .expect("non-null descriptor set exists")
+                .iter()
+                .enumerate()
+            {
+                store8(memory, ptr.wrapping_add(offset as u32), *byte)?;
+            }
+        }
+        Ok(self.return32(cpu, ready_count))
     }
 
     fn epoll_create_call<M: Memory>(
@@ -3502,16 +4923,68 @@ impl HleRuntime {
             self.set_errno(memory, EINVAL)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
-        let fd = self.open_fake_fd(FakeFileKind::Epoll);
+        let fd = self.open_fake_fd(FakeFileKind::Epoll {
+            registrations: Vec::new(),
+        });
         Ok(self.return32(cpu, fd))
     }
 
     fn epoll_ctl_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let epfd = cpu.reg(0);
+        let operation = cpu.reg(1);
         let fd = cpu.reg(2);
-        if self.fake_epoll_index(epfd).is_none() || self.fake_file_index(fd).is_none() {
+        let event = cpu.reg(3);
+        let Some(epoll_idx) = self.fake_epoll_index(epfd) else {
             self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, u32::MAX));
+        };
+        if fd == epfd {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if self.fake_file_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let registration = if operation == EPOLL_CTL_DEL {
+            None
+        } else {
+            if event == 0 {
+                self.set_errno(memory, EFAULT)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            Some(EpollRegistration {
+                fd,
+                events: load32(memory, event)?,
+                data: u64::from(load32(memory, event.wrapping_add(EPOLL_EVENT_DATA_OFFSET))?)
+                    | (u64::from(load32(
+                        memory,
+                        event.wrapping_add(EPOLL_EVENT_DATA_OFFSET + 4),
+                    )?) << 32),
+            })
+        };
+        let FakeFileKind::Epoll { registrations } = &mut self.files[epoll_idx].kind else {
+            unreachable!("fake_epoll_index returned a non-epoll file");
+        };
+        let existing = registrations.iter().position(|entry| entry.fd == fd);
+        match (operation, existing, registration) {
+            (EPOLL_CTL_ADD, None, Some(registration)) => registrations.push(registration),
+            (EPOLL_CTL_MOD, Some(index), Some(registration)) => registrations[index] = registration,
+            (EPOLL_CTL_DEL, Some(index), None) => {
+                registrations.remove(index);
+            }
+            (EPOLL_CTL_ADD, Some(_), _) => {
+                self.set_errno(memory, EEXIST)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            (EPOLL_CTL_MOD | EPOLL_CTL_DEL, None, _) => {
+                self.set_errno(memory, ENOENT)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            _ => {
+                self.set_errno(memory, EINVAL)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
         }
         Ok(self.return32(cpu, 0))
     }
@@ -3522,36 +4995,63 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         let epfd = cpu.reg(0);
-        if self.fake_epoll_index(epfd).is_none() {
+        let events_ptr = cpu.reg(1);
+        let max_events = cpu.reg(2) as i32;
+        let Some(epoll_idx) = self.fake_epoll_index(epfd) else {
             self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, u32::MAX));
-        }
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn return_socket_success<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-        fd: u32,
-    ) -> Result<(), HleError> {
-        if self.fake_socket_index(fd).is_none() {
-            self.set_errno(memory, EBADF)?;
+        };
+        if events_ptr == 0 {
+            self.set_errno(memory, EFAULT)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
-        Ok(self.return32(cpu, 0))
+        if max_events <= 0 {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let FakeFileKind::Epoll { registrations } = &self.files[epoll_idx].kind else {
+            unreachable!("fake_epoll_index returned a non-epoll file");
+        };
+        let registrations = registrations.clone();
+        let mut ready = 0u32;
+        for registration in registrations {
+            if ready >= max_events as u32 {
+                break;
+            }
+            let ready_events = self.epoll_ready_events(registration.fd, registration.events);
+            if ready_events == 0 {
+                continue;
+            }
+            let output = events_ptr.wrapping_add(ready.wrapping_mul(EPOLL_EVENT_SIZE));
+            for offset in 0..EPOLL_EVENT_SIZE {
+                store8(memory, output.wrapping_add(offset), 0)?;
+            }
+            store32(memory, output, ready_events)?;
+            store32(
+                memory,
+                output.wrapping_add(EPOLL_EVENT_DATA_OFFSET),
+                registration.data as u32,
+            )?;
+            store32(
+                memory,
+                output.wrapping_add(EPOLL_EVENT_DATA_OFFSET + 4),
+                (registration.data >> 32) as u32,
+            )?;
+            ready += 1;
+        }
+        Ok(self.return32(cpu, ready))
     }
 
     fn poll_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fds = cpu.reg(0);
         let nfds = cpu.reg(1);
         let timeout = cpu.reg(2) as i32;
-        if fds == 0 {
-            self.set_errno(memory, 14)?;
+        if fds == 0 && nfds != 0 {
+            self.set_errno(memory, EFAULT)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
         if nfds > 1024 {
-            self.set_errno(memory, 22)?;
+            self.set_errno(memory, EINVAL)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
 
@@ -3562,15 +5062,11 @@ impl HleRuntime {
             let events = load16(memory, entry.wrapping_add(4))?;
             let revents = if fd < 0 {
                 0
-            } else if self.fake_file_index(fd as u32).is_none() {
-                POLLNVAL
-            } else if self.fake_fd_readable(fd as u32) {
-                events & POLLIN
             } else {
-                0
+                self.fd_poll_events(fd as u32, events)
             };
             store16(memory, entry.wrapping_add(6), revents)?;
-            if revents != 0 && revents != POLLNVAL {
+            if revents != 0 {
                 ready = ready.saturating_add(1);
             }
         }
@@ -3580,33 +5076,309 @@ impl HleRuntime {
         Ok(self.return32(cpu, ready))
     }
 
-    fn pthread_create<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        let thread_out = cpu.reg(0);
-        let start = cpu.reg(2);
-        let arg = cpu.reg(3);
-        let id = self.alloc_fd();
-        if thread_out != 0 {
-            store32(memory, thread_out, id)?;
-        }
+    fn pthread_attr<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        const EINVAL_RETURN: u32 = 22;
+        const ATTR_SIZE: u32 = 24;
+        const DEFAULT_STACK_SIZE: u32 = 1024 * 1024 - 8192;
+        const PAGE_SIZE: u32 = 4096;
+        const PTHREAD_STACK_MIN: u32 = 2 * PAGE_SIZE;
+        const DETACHED: u32 = 1;
 
-        // Android's native_app_glue waits for the created thread to mark
-        // android_app.running before ANativeActivity_onCreate returns. Other
-        // thread arguments may be game worker objects, so only touch app-like
-        // structs that point back to the registered ANativeActivity.
-        if arg != 0 && self.is_native_app_thread_arg(memory, arg) {
-            store32(memory, arg.wrapping_add(0x6c), 1)?;
-        } else if start != 0 {
-            self.created_pthreads
-                .push_back(CreatedPthread { id, start, arg });
+        let attr = cpu.reg(0);
+        if attr == 0 {
+            return Ok(self.return32(cpu, EINVAL_RETURN));
+        }
+        match name {
+            "pthread_attr_init" => {
+                store32(memory, attr, 0)?;
+                store32(memory, attr.wrapping_add(4), 0)?;
+                store32(memory, attr.wrapping_add(8), DEFAULT_STACK_SIZE)?;
+                store32(memory, attr.wrapping_add(12), PAGE_SIZE)?;
+                store32(memory, attr.wrapping_add(16), 0)?;
+                store32(memory, attr.wrapping_add(20), 0)?;
+            }
+            "pthread_attr_destroy" => {
+                for offset in 0..ATTR_SIZE {
+                    store8(memory, attr.wrapping_add(offset), 0x42)?;
+                }
+            }
+            "pthread_attr_getdetachstate" => {
+                if cpu.reg(1) == 0 {
+                    return Ok(self.return32(cpu, EINVAL_RETURN));
+                }
+                let detach_state = load32(memory, attr)? & DETACHED;
+                store32(memory, cpu.reg(1), detach_state)?;
+            }
+            "pthread_attr_setdetachstate" => {
+                if cpu.reg(1) > DETACHED {
+                    return Ok(self.return32(cpu, EINVAL_RETURN));
+                }
+                let flags = load32(memory, attr)?;
+                store32(memory, attr, (flags & !DETACHED) | cpu.reg(1))?;
+            }
+            "pthread_attr_setschedparam" => {
+                if cpu.reg(1) == 0 {
+                    return Ok(self.return32(cpu, EINVAL_RETURN));
+                }
+                let priority = load32(memory, cpu.reg(1))?;
+                store32(memory, attr.wrapping_add(20), priority)?;
+            }
+            "pthread_attr_setstacksize" => {
+                if cpu.reg(1) < PTHREAD_STACK_MIN {
+                    return Ok(self.return32(cpu, EINVAL_RETURN));
+                }
+                store32(memory, attr.wrapping_add(8), cpu.reg(1))?;
+            }
+            _ => return Err(HleError::UnimplementedSymbol(name.to_string())),
         }
         Ok(self.return32(cpu, 0))
     }
 
-    fn is_native_app_thread_arg<M: Memory>(&self, memory: &mut M, arg: u32) -> bool {
-        let Some(activity) = self.native_activity else {
-            return false;
+    fn pthread_init_destroy<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        const EINVAL_RETURN: u32 = 22;
+        const MUTEXATTR_TYPE_MASK: u32 = 0x000f;
+        const MUTEXATTR_SHARED_MASK: u32 = 0x0010;
+        const MUTEX_SHARED_MASK: u32 = 1 << 13;
+        const MUTEX_TYPE_SHIFT: u32 = 14;
+
+        let ptr = cpu.reg(0);
+        if ptr == 0 {
+            return Ok(self.return32(cpu, EINVAL_RETURN));
+        }
+        match name {
+            "pthread_mutexattr_init" => store32(memory, ptr, 0)?,
+            "pthread_mutexattr_destroy" => store32(memory, ptr, u32::MAX)?,
+            "pthread_mutexattr_settype" => {
+                let ty = cpu.reg(1);
+                if ty > 2 {
+                    return Ok(self.return32(cpu, EINVAL_RETURN));
+                }
+                let attr = load32(memory, ptr)?;
+                store32(memory, ptr, (attr & !MUTEXATTR_TYPE_MASK) | ty)?;
+            }
+            "pthread_mutex_init" => {
+                let attr_ptr = cpu.reg(1);
+                let attr = if attr_ptr == 0 {
+                    0
+                } else {
+                    load32(memory, attr_ptr)?
+                };
+                let ty = attr & MUTEXATTR_TYPE_MASK;
+                if ty > 2 {
+                    return Ok(self.return32(cpu, EINVAL_RETURN));
+                }
+                let shared = if attr & MUTEXATTR_SHARED_MASK != 0 {
+                    MUTEX_SHARED_MASK
+                } else {
+                    0
+                };
+                store32(memory, ptr, shared | (ty << MUTEX_TYPE_SHIFT))?;
+            }
+            "pthread_mutex_destroy" => store32(memory, ptr, 0xdead_10cc)?,
+            "pthread_cond_init" => {
+                let shared = if cpu.reg(1) != 0 && load32(memory, cpu.reg(1))? == 1 {
+                    1
+                } else {
+                    0
+                };
+                store32(memory, ptr, shared)?;
+            }
+            "pthread_cond_destroy" => store32(memory, ptr, 0xdead_c04d)?,
+            _ => return Err(HleError::UnimplementedSymbol(name.to_string())),
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_create<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let thread_out = cpu.reg(0);
+        let start = cpu.reg(2);
+        let arg = cpu.reg(3);
+        if thread_out == 0 || start == 0 {
+            return Ok(self.return32(cpu, EINVAL));
+        }
+        let id = self.alloc_fd();
+        self.pthread_ids.push(id);
+        store32(memory, thread_out, id)?;
+        self.created_pthreads
+            .push_back(CreatedPthread { id, start, arg });
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_setname_np<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        const ESRCH_RETURN: u32 = 3;
+        const EINVAL_RETURN: u32 = 22;
+        const ERANGE_RETURN: u32 = 34;
+        const MAX_TASK_COMM_LEN: u32 = 16;
+
+        let thread = cpu.reg(0);
+        let name_ptr = cpu.reg(1);
+        if name_ptr == 0 {
+            return Ok(self.return32(cpu, EINVAL_RETURN));
+        }
+
+        let mut name = Vec::with_capacity((MAX_TASK_COMM_LEN - 1) as usize);
+        for offset in 0..MAX_TASK_COMM_LEN {
+            let byte = load8(memory, name_ptr.wrapping_add(offset))?;
+            if byte == 0 {
+                if !self.pthread_ids.contains(&thread) {
+                    return Ok(self.return32(cpu, ESRCH_RETURN));
+                }
+                if let Some(entry) = self
+                    .pthread_names
+                    .iter_mut()
+                    .find(|entry| entry.thread == thread)
+                {
+                    entry.name = name;
+                } else {
+                    self.pthread_names.push(PthreadName { thread, name });
+                }
+                return Ok(self.return32(cpu, 0));
+            }
+            name.push(byte);
+        }
+
+        Ok(self.return32(cpu, ERANGE_RETURN))
+    }
+
+    fn pthread_cleanup_push<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let cleanup = cpu.reg(0);
+        let previous = self
+            .pthread_cleanup_stacks
+            .iter()
+            .find(|entry| entry.thread == self.current_pthread)
+            .map_or(0, |entry| entry.top);
+        store32(memory, cleanup, previous)?;
+        store32(memory, cleanup.wrapping_add(4), cpu.reg(1))?;
+        store32(memory, cleanup.wrapping_add(8), cpu.reg(2))?;
+        self.set_pthread_cleanup_top(cleanup);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn pthread_cleanup_pop<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let previous = load32(memory, cpu.reg(0))?;
+        self.set_pthread_cleanup_top(previous);
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn set_pthread_cleanup_top(&mut self, top: u32) {
+        if let Some(entry) = self
+            .pthread_cleanup_stacks
+            .iter_mut()
+            .find(|entry| entry.thread == self.current_pthread)
+        {
+            entry.top = top;
+        } else if top != 0 {
+            self.pthread_cleanup_stacks.push(PthreadCleanupStack {
+                thread: self.current_pthread,
+                top,
+            });
+        }
+    }
+
+    fn native_window_set_buffers_geometry(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        const EINVAL_RETURN: u32 = 22;
+
+        let window = cpu.reg(0);
+        let width = cpu.reg(1) as i32;
+        let height = cpu.reg(2) as i32;
+        let format = cpu.reg(3) as i32;
+        let Some(state) = self.native_window.as_mut() else {
+            return Ok(self.return32(cpu, EINVAL_RETURN.wrapping_neg()));
         };
-        load32(memory, arg.wrapping_add(0x0c)).is_ok_and(|candidate| candidate == activity)
+        if window != state.handle
+            || width < 0
+            || height < 0
+            || format < 0
+            || ((width == 0) != (height == 0))
+        {
+            return Ok(self.return32(cpu, EINVAL_RETURN.wrapping_neg()));
+        }
+        if width != 0 {
+            state.width = width as u32;
+            state.height = height as u32;
+        }
+        if format != 0 {
+            state.format = format as u32;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn android_log_print<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let mut args = PrintfArgs::from_cpu(cpu, 3);
+        let format = load_c_string_bytes(memory, cpu.reg(2), 4096)?;
+        let mut message = format_printf(memory, &mut args, &format)?;
+        message.truncate(1023);
+        self.android_log(cpu, memory, message)
+    }
+
+    fn android_log_write<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let message = load_c_string_bytes(memory, cpu.reg(2), 1024)?;
+        self.android_log(cpu, memory, message)
+    }
+
+    fn android_log<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        message: Vec<u8>,
+    ) -> Result<(), HleError> {
+        const LOG_HISTORY_LIMIT: usize = 1024;
+
+        let tag = if cpu.reg(1) == 0 {
+            Vec::new()
+        } else {
+            load_c_string_bytes(memory, cpu.reg(1), 1024)?
+        };
+        if self.android_logs.len() == LOG_HISTORY_LIMIT {
+            self.android_logs.pop_front();
+        }
+        if std::env::var_os("AEMU_TRACE_ANDROID_LOG").is_some() {
+            eprintln!(
+                "ANDROID_LOG priority={} tag={:?} message={:?}",
+                cpu.reg(0),
+                String::from_utf8_lossy(&tag),
+                String::from_utf8_lossy(&message)
+            );
+        }
+        let written = 1usize
+            .saturating_add(tag.len().saturating_add(1))
+            .saturating_add(message.len().saturating_add(1));
+        self.android_logs.push_back(AndroidLogEntry {
+            priority: cpu.reg(0),
+            tag,
+            message,
+        });
+        Ok(self.return32(cpu, written.min(u32::MAX as usize) as u32))
     }
 
     fn pthread_key_create<M: Memory>(
@@ -3616,16 +5388,27 @@ impl HleRuntime {
     ) -> Result<(), HleError> {
         let key_out = cpu.reg(0);
         if key_out == 0 {
-            return Ok(self.return32(cpu, 22));
+            return Ok(self.return32(cpu, EINVAL));
         }
-        let key = self.next_pthread_key;
-        self.next_pthread_key = self.next_pthread_key.wrapping_add(1);
+        let Some(key) = (0..PTHREAD_KEYS_MAX)
+            .find(|candidate| !self.pthread_keys.iter().any(|key| key.key == *candidate))
+        else {
+            return Ok(self.return32(cpu, EAGAIN));
+        };
+        self.pthread_keys.push(PthreadKey {
+            key,
+            destructor: cpu.reg(1),
+        });
         store32(memory, key_out, key)?;
         Ok(self.return32(cpu, 0))
     }
 
     fn pthread_key_delete(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let key = cpu.reg(0);
+        let Some(index) = self.pthread_keys.iter().position(|entry| entry.key == key) else {
+            return Ok(self.return32(cpu, EINVAL));
+        };
+        self.pthread_keys.remove(index);
         self.pthread_specific.retain(|entry| entry.key != key);
         Ok(self.return32(cpu, 0))
     }
@@ -3641,6 +5424,9 @@ impl HleRuntime {
     fn pthread_setspecific(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
         let key = cpu.reg(0);
         let value = cpu.reg(1);
+        if !self.pthread_keys.iter().any(|entry| entry.key == key) {
+            return Ok(self.return32(cpu, EINVAL));
+        }
         if let Some(entry) = self
             .pthread_specific
             .iter_mut()
@@ -3654,6 +5440,352 @@ impl HleRuntime {
                 value,
             });
         }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn sigprocmask<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        const SIG_BLOCK: u32 = 0;
+        const SIG_UNBLOCK: u32 = 1;
+        const SIG_SETMASK: u32 = 2;
+        const UNBLOCKABLE: u32 = (1 << (9 - 1)) | (1 << (19 - 1));
+
+        let thread = self.current_pthread;
+        let old_mask = self
+            .pthread_signal_masks
+            .iter()
+            .find(|entry| entry.thread == thread)
+            .map_or(0, |entry| entry.mask);
+        if cpu.reg(2) != 0 {
+            store32(memory, cpu.reg(2), old_mask)?;
+        }
+        if cpu.reg(1) == 0 {
+            return Ok(self.return32(cpu, 0));
+        }
+
+        let requested = load32(memory, cpu.reg(1))?;
+        let new_mask = match cpu.reg(0) {
+            SIG_BLOCK => old_mask | requested,
+            SIG_UNBLOCK => old_mask & !requested,
+            SIG_SETMASK => requested,
+            _ => {
+                self.set_errno(memory, EINVAL)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+        } & !UNBLOCKABLE;
+        if let Some(entry) = self
+            .pthread_signal_masks
+            .iter_mut()
+            .find(|entry| entry.thread == thread)
+        {
+            entry.mask = new_mask;
+        } else if new_mask != 0 {
+            self.pthread_signal_masks.push(PthreadSignalMask {
+                thread,
+                mask: new_mask,
+            });
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn sigaction<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        const SIGKILL: u32 = 9;
+        const SIGSTOP: u32 = 19;
+
+        let signal = cpu.reg(0);
+        if !(1..32).contains(&signal) || signal == SIGKILL || signal == SIGSTOP {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+
+        let old = self
+            .signal_actions
+            .iter()
+            .find(|entry| entry.signal == signal)
+            .copied()
+            .unwrap_or(SignalAction {
+                signal,
+                handler: 0,
+                mask: 0,
+                flags: 0,
+                restorer: 0,
+            });
+        let old_ptr = cpu.reg(2);
+        if old_ptr != 0 {
+            store32(memory, old_ptr, old.handler)?;
+            store32(memory, old_ptr.wrapping_add(4), old.mask)?;
+            store32(memory, old_ptr.wrapping_add(8), old.flags)?;
+            store32(memory, old_ptr.wrapping_add(12), old.restorer)?;
+        }
+
+        let action_ptr = cpu.reg(1);
+        if action_ptr != 0 {
+            let action = SignalAction {
+                signal,
+                handler: load32(memory, action_ptr)?,
+                mask: load32(memory, action_ptr.wrapping_add(4))?,
+                flags: load32(memory, action_ptr.wrapping_add(8))?,
+                restorer: load32(memory, action_ptr.wrapping_add(12))?,
+            };
+            if let Some(entry) = self
+                .signal_actions
+                .iter_mut()
+                .find(|entry| entry.signal == signal)
+            {
+                *entry = action;
+            } else {
+                self.signal_actions.push(action);
+            }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn bsd_signal<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        const SIGKILL: u32 = 9;
+        const SIGSTOP: u32 = 19;
+        const SA_RESTART: u32 = 0x1000_0000;
+
+        let signal = cpu.reg(0);
+        if !(1..32).contains(&signal) || signal == SIGKILL || signal == SIGSTOP {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+
+        let previous_handler = self
+            .signal_actions
+            .iter()
+            .find(|entry| entry.signal == signal)
+            .map_or(0, |entry| entry.handler);
+        let action = SignalAction {
+            signal,
+            handler: cpu.reg(1),
+            mask: 0,
+            flags: SA_RESTART,
+            restorer: 0,
+        };
+        if let Some(entry) = self
+            .signal_actions
+            .iter_mut()
+            .find(|entry| entry.signal == signal)
+        {
+            *entry = action;
+        } else {
+            self.signal_actions.push(action);
+        }
+        Ok(self.return32(cpu, previous_handler))
+    }
+
+    fn sigsetjmp<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        const JB_MAGIC: u32 = 0;
+        const JB_SIGMASK: u32 = 1;
+        const JB_FLOAT_BASE: u32 = 2;
+        const JB_FLOAT_STATE: u32 = 18;
+        const JB_CORE_BASE: u32 = 19;
+        const MAGIC_NO_SIGNAL_MASK: u32 = 0x4278_f500;
+        const MAGIC_WITH_SIGNAL_MASK: u32 = 0x4278_f501;
+
+        let env = cpu.reg(0);
+        let save_signal_mask = cpu.reg(1) != 0;
+        store32(
+            memory,
+            env.wrapping_add(JB_MAGIC * 4),
+            if save_signal_mask {
+                MAGIC_WITH_SIGNAL_MASK
+            } else {
+                MAGIC_NO_SIGNAL_MASK
+            },
+        )?;
+        if save_signal_mask {
+            store32(
+                memory,
+                env.wrapping_add(JB_SIGMASK * 4),
+                self.current_signal_mask(),
+            )?;
+        }
+        for reg in 8..=15 {
+            store64(
+                memory,
+                env.wrapping_add(JB_FLOAT_BASE * 4 + ((reg - 8) * 8) as u32),
+                cpu.dreg(reg),
+            )?;
+        }
+        store32(memory, env.wrapping_add(JB_FLOAT_STATE * 4), cpu.fpscr)?;
+        for reg in 4..=14 {
+            store32(
+                memory,
+                env.wrapping_add(JB_CORE_BASE * 4 + ((reg - 4) * 4) as u32),
+                cpu.reg(reg),
+            )?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn siglongjmp<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        const JB_MAGIC: u32 = 0;
+        const JB_SIGMASK: u32 = 1;
+        const JB_FLOAT_BASE: u32 = 2;
+        const JB_FLOAT_STATE: u32 = 18;
+        const JB_CORE_BASE: u32 = 19;
+        const MAGIC_NO_SIGNAL_MASK: u32 = 0x4278_f500;
+        const MAGIC_WITH_SIGNAL_MASK: u32 = 0x4278_f501;
+
+        let env = cpu.reg(0);
+        let value = cpu.reg(1).max(1);
+        let magic = load32(memory, env.wrapping_add(JB_MAGIC * 4))?;
+        if !matches!(magic, MAGIC_NO_SIGNAL_MASK | MAGIC_WITH_SIGNAL_MASK) {
+            return Err(HleError::Abort("siglongjmp invalid jmp_buf".to_string()));
+        }
+        if magic == MAGIC_WITH_SIGNAL_MASK {
+            let mask = load32(memory, env.wrapping_add(JB_SIGMASK * 4))?;
+            self.set_current_signal_mask(mask);
+        }
+        for reg in 8..=15 {
+            let addr = env.wrapping_add(JB_FLOAT_BASE * 4 + ((reg - 8) * 8) as u32);
+            let bits = u64::from(load32(memory, addr)?)
+                | (u64::from(load32(memory, addr.wrapping_add(4))?) << 32);
+            cpu.set_dreg(reg, bits);
+        }
+        cpu.fpscr = load32(memory, env.wrapping_add(JB_FLOAT_STATE * 4))?;
+        for reg in 4..=14 {
+            let value = load32(
+                memory,
+                env.wrapping_add(JB_CORE_BASE * 4 + ((reg - 4) * 4) as u32),
+            )?;
+            cpu.set_reg(reg, value);
+        }
+        if cpu.reg(13) == 0 || cpu.reg(14) == 0 {
+            return Err(HleError::Abort(
+                "siglongjmp invalid saved pc/sp".to_string(),
+            ));
+        }
+        Ok(self.return32(cpu, value))
+    }
+
+    fn current_signal_mask(&self) -> u32 {
+        self.pthread_signal_masks
+            .iter()
+            .find(|entry| entry.thread == self.current_pthread)
+            .map_or(0, |entry| entry.mask)
+    }
+
+    fn set_current_signal_mask(&mut self, mask: u32) {
+        const UNBLOCKABLE: u32 = (1 << (9 - 1)) | (1 << (19 - 1));
+        let mask = mask & !UNBLOCKABLE;
+        if let Some(entry) = self
+            .pthread_signal_masks
+            .iter_mut()
+            .find(|entry| entry.thread == self.current_pthread)
+        {
+            entry.mask = mask;
+        } else if mask != 0 {
+            self.pthread_signal_masks.push(PthreadSignalMask {
+                thread: self.current_pthread,
+                mask,
+            });
+        }
+    }
+
+    fn alooper_prepare(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        if cpu.reg(0) & !1 != 0 {
+            return Err(HleError::Abort(format!(
+                "ALooper_prepare received unsupported flags {:#x}",
+                cpu.reg(0)
+            )));
+        }
+        if !self.alooper_prepared {
+            self.alooper_prepared = true;
+            self.alooper_ref_count = 1;
+        }
+        Ok(self.return32(cpu, ALOOPER_HANDLE))
+    }
+
+    fn alooper_for_thread(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let looper = if self.alooper_prepared {
+            ALOOPER_HANDLE
+        } else {
+            0
+        };
+        Ok(self.return32(cpu, looper))
+    }
+
+    fn alooper_acquire(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        if cpu.reg(0) != ALOOPER_HANDLE || !self.alooper_prepared {
+            return Err(HleError::Abort(
+                "ALooper_acquire received an invalid looper".to_string(),
+            ));
+        }
+        self.alooper_ref_count = self
+            .alooper_ref_count
+            .checked_add(1)
+            .ok_or_else(|| HleError::Abort("ALooper reference count overflow".to_string()))?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn alooper_release(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        if cpu.reg(0) != ALOOPER_HANDLE || !self.alooper_prepared || self.alooper_ref_count == 0 {
+            return Err(HleError::Abort(
+                "ALooper_release received an invalid looper".to_string(),
+            ));
+        }
+        self.alooper_ref_count -= 1;
+        if self.alooper_ref_count == 0 {
+            self.alooper_prepared = false;
+            self.alooper_registrations
+                .retain(|entry| entry.looper != ALOOPER_HANDLE);
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn alooper_add_fd<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let looper = cpu.reg(0);
+        let fd = cpu.reg(1);
+        let ident = cpu.reg(2) as i32;
+        let events = cpu.reg(3);
+        let callback = self.stack_arg(cpu, memory, 4)?;
+        let data = self.stack_arg(cpu, memory, 5)?;
+        if looper != ALOOPER_HANDLE
+            || !self.alooper_prepared
+            || self.fake_file_index(fd).is_none()
+            || ident < 0
+            || callback != 0
+            || events & (ALOOPER_EVENT_INPUT | ALOOPER_EVENT_OUTPUT) == 0
+        {
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let registration = ALooperRegistration {
+            looper,
+            fd,
+            ident,
+            events,
+            data,
+        };
+        if let Some(existing) = self
+            .alooper_registrations
+            .iter_mut()
+            .find(|entry| entry.looper == looper && entry.fd == fd)
+        {
+            *existing = registration;
+        } else {
+            self.alooper_registrations.push(registration);
+        }
+        Ok(self.return32(cpu, 1))
+    }
+
+    fn alooper_remove_fd(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let looper = cpu.reg(0);
+        let fd = cpu.reg(1);
+        let old_len = self.alooper_registrations.len();
+        self.alooper_registrations
+            .retain(|entry| entry.looper != looper || entry.fd != fd);
+        Ok(self.return32(cpu, u32::from(self.alooper_registrations.len() != old_len)))
+    }
+
+    fn alooper_wake(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        if cpu.reg(0) != ALOOPER_HANDLE || !self.alooper_prepared {
+            return Err(HleError::Abort(
+                "ALooper_wake received an invalid looper".to_string(),
+            ));
+        }
+        self.alooper_wake_pending = true;
         Ok(self.return32(cpu, 0))
     }
 
@@ -3684,11 +5816,63 @@ impl HleRuntime {
                 eprintln!("ALOOPER no-event");
             }
         }
-        if source.is_some() {
-            Ok(self.return32(cpu, 1))
-        } else {
-            Ok(self.return32(cpu, u32::MAX))
+        if let Some(source) = source {
+            let ident = load32(memory, source)?;
+            return Ok(self.return32(cpu, ident));
         }
+
+        let ready = self
+            .alooper_registrations
+            .iter()
+            .copied()
+            .find_map(|entry| {
+                let requested = (if entry.events & ALOOPER_EVENT_INPUT != 0 {
+                    POLLIN
+                } else {
+                    0
+                }) | if entry.events & ALOOPER_EVENT_OUTPUT != 0 {
+                    POLLOUT
+                } else {
+                    0
+                };
+                let polled = self.fake_fd_poll_events(entry.fd, requested);
+                (polled != 0).then_some((entry, polled))
+            });
+        if let Some((entry, polled)) = ready {
+            let events = (if polled & POLLIN != 0 {
+                ALOOPER_EVENT_INPUT
+            } else {
+                0
+            }) | if polled & POLLOUT != 0 {
+                ALOOPER_EVENT_OUTPUT
+            } else {
+                0
+            } | if polled & POLLHUP != 0 {
+                ALOOPER_EVENT_HANGUP
+            } else {
+                0
+            } | if polled & POLLNVAL != 0 {
+                ALOOPER_EVENT_INVALID
+            } else {
+                0
+            };
+            if out_fd != 0 {
+                store32(memory, out_fd, entry.fd)?;
+            }
+            if out_events != 0 {
+                store32(memory, out_events, events)?;
+            }
+            if out_data != 0 {
+                store32(memory, out_data, entry.data)?;
+            }
+            return Ok(self.return32(cpu, entry.ident as u32));
+        }
+
+        if self.alooper_wake_pending {
+            self.alooper_wake_pending = false;
+            return Ok(self.return32(cpu, ALOOPER_POLL_WAKE));
+        }
+        Ok(self.return32(cpu, ALOOPER_POLL_TIMEOUT))
     }
 
     fn android_input<M: Memory>(
@@ -3699,6 +5883,11 @@ impl HleRuntime {
     ) -> Result<(), HleError> {
         match name {
             "AInputQueue_attachLooper" => {
+                if cpu.reg(0) == 0 || cpu.reg(1) == 0 {
+                    return Err(HleError::Abort(
+                        "AInputQueue_attachLooper received a null queue or looper".to_string(),
+                    ));
+                }
                 let data = self.stack_arg(cpu, memory, 4)?;
                 if data != 0 {
                     self.input_poll_source = Some(data);
@@ -3706,99 +5895,168 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "AInputQueue_detachLooper" => {
+                if cpu.reg(0) == 0 {
+                    return Err(HleError::Abort(
+                        "AInputQueue_detachLooper received a null queue".to_string(),
+                    ));
+                }
                 self.input_poll_source = None;
                 Ok(self.return32(cpu, 0))
             }
             "AInputQueue_getEvent" => {
                 let out_event = cpu.reg(1);
-                let Some(mut event) = self.pending_input_events.pop_front() else {
-                    return Ok(self.return32(cpu, u32::MAX));
-                };
-                event.handle = self.alloc(0x20, 4)?;
-                if out_event != 0 {
-                    store32(memory, out_event, event.handle)?;
+                if cpu.reg(0) == 0 || out_event == 0 {
+                    return Ok(self.return32(cpu, EINVAL.wrapping_neg()));
                 }
+                let Some(mut event) = self.pending_input_events.pop_front() else {
+                    return Ok(self.return32(cpu, EAGAIN.wrapping_neg()));
+                };
+                event.handle = self.alloc_guest(0x20, 4)?;
+                store32(memory, out_event, event.handle)?;
                 self.active_input_events.push(event);
                 Ok(self.return32(cpu, 0))
             }
-            "AInputQueue_preDispatchEvent" | "AInputQueue_finishEvent" => {
-                if name == "AInputQueue_finishEvent" {
-                    let event = cpu.reg(1);
-                    self.active_input_events
-                        .retain(|active| active.handle != event);
-                }
+            "AInputQueue_preDispatchEvent" => {
+                self.require_active_input_event(name, cpu.reg(1))?;
+                Ok(self.return32(cpu, 0))
+            }
+            "AInputQueue_finishEvent" => {
+                let event = cpu.reg(1);
+                self.require_active_input_event(name, event)?;
+                self.active_input_events
+                    .retain(|active| active.handle != event);
+                self.free_ptr(event);
                 Ok(self.return32(cpu, 0))
             }
             "AInputEvent_getDeviceId" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(0, |event| event.device_id);
-                Ok(self.return32(cpu, value))
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.device_id))
             }
             "AInputEvent_getSource" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(0, |event| event.source);
-                Ok(self.return32(cpu, value))
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.source))
             }
             "AInputEvent_getType" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(0, |event| event.event_type);
-                Ok(self.return32(cpu, value))
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.event_type))
             }
-            "AKeyEvent_getAction"
-            | "AKeyEvent_getKeyCode"
-            | "AKeyEvent_getMetaState"
-            | "AKeyEvent_getRepeatCount" => Ok(self.return32(cpu, 0)),
+            "AKeyEvent_getAction" => {
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.action))
+            }
+            "AKeyEvent_getKeyCode" => {
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.key_code as u32))
+            }
+            "AKeyEvent_getMetaState" => {
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.meta_state))
+            }
+            "AKeyEvent_getRepeatCount" => {
+                let event = self.require_active_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.repeat_count as u32))
+            }
             "AMotionEvent_getAction" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(AMOTION_EVENT_ACTION_UP, |event| event.action);
-                Ok(self.return32(cpu, value))
+                let event = self.require_motion_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, event.action))
             }
-            "AMotionEvent_getAxisValue" => Ok(self.return_f32(cpu, 0.0)),
+            "AMotionEvent_getAxisValue" => {
+                let event = self.require_motion_input_event(name, cpu.reg(0))?;
+                if cpu.reg(2) != 0 {
+                    return Err(HleError::Abort(format!(
+                        "{name} received out-of-range pointer index {}",
+                        cpu.reg(2)
+                    )));
+                }
+                let value = match cpu.reg(1) {
+                    AMOTION_EVENT_AXIS_X => event.x,
+                    AMOTION_EVENT_AXIS_Y => event.y,
+                    AMOTION_EVENT_AXIS_PRESSURE => event.pressure,
+                    _ => 0.0,
+                };
+                Ok(self.return_f32(cpu, value))
+            }
             "AMotionEvent_getPointerCount" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .filter(|event| event.event_type == AINPUT_EVENT_TYPE_MOTION)
-                    .map_or(0, |_| 1);
-                Ok(self.return32(cpu, value))
+                self.require_motion_input_event(name, cpu.reg(0))?;
+                Ok(self.return32(cpu, 1))
             }
             "AMotionEvent_getPointerId" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(0, |event| event.pointer_id as u32);
-                Ok(self.return32(cpu, value))
+                let event = self.require_motion_input_event(name, cpu.reg(0))?;
+                if cpu.reg(1) != 0 {
+                    return Err(HleError::Abort(format!(
+                        "{name} received out-of-range pointer index {}",
+                        cpu.reg(1)
+                    )));
+                }
+                Ok(self.return32(cpu, event.pointer_id as u32))
             }
-            "AMotionEvent_getRawX" | "AMotionEvent_getX" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(0.0, |event| if cpu.reg(1) == 0 { event.x } else { 0.0 });
+            "AMotionEvent_getRawX" => {
+                let event = self.require_motion_input_event(name, cpu.reg(0))?;
+                Ok(self.return_f32(cpu, event.x))
+            }
+            "AMotionEvent_getRawY" => {
+                let event = self.require_motion_input_event(name, cpu.reg(0))?;
+                Ok(self.return_f32(cpu, event.y))
+            }
+            "AMotionEvent_getX" | "AMotionEvent_getY" => {
+                let event = self.require_motion_input_event(name, cpu.reg(0))?;
+                if cpu.reg(1) != 0 {
+                    return Err(HleError::Abort(format!(
+                        "{name} received out-of-range pointer index {}",
+                        cpu.reg(1)
+                    )));
+                }
+                let value = if name.ends_with('X') {
+                    event.x
+                } else {
+                    event.y
+                };
                 Ok(self.return_f32(cpu, value))
             }
-            "AMotionEvent_getRawY" | "AMotionEvent_getY" => {
-                let value = self
-                    .active_input_event(cpu.reg(0))
-                    .map_or(0.0, |event| if cpu.reg(1) == 0 { event.y } else { 0.0 });
-                Ok(self.return_f32(cpu, value))
-            }
-            _ => Ok(self.return32(cpu, 0)),
+            _ => Err(HleError::UnimplementedSymbol(name.to_string())),
         }
     }
 
-    fn active_input_event(&self, handle: u32) -> Option<&HleInputEvent> {
+    fn require_active_input_event(
+        &self,
+        name: &str,
+        handle: u32,
+    ) -> Result<HleInputEvent, HleError> {
         self.active_input_events
             .iter()
             .find(|event| event.handle == handle)
+            .copied()
+            .ok_or_else(|| {
+                HleError::Abort(format!(
+                    "{name} received invalid input-event handle {handle:#x}"
+                ))
+            })
+    }
+
+    fn require_motion_input_event(
+        &self,
+        name: &str,
+        handle: u32,
+    ) -> Result<HleInputEvent, HleError> {
+        let event = self.require_active_input_event(name, handle)?;
+        if event.event_type != AINPUT_EVENT_TYPE_MOTION {
+            return Err(HleError::Abort(format!(
+                "{name} received non-motion input-event handle {handle:#x}"
+            )));
+        }
+        Ok(event)
     }
 
     fn read_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
         let buf = cpu.reg(1);
         let count = cpu.reg(2);
-        if fd < FIRST_FAKE_FD || buf == 0 {
-            self.set_errno(memory, 9)?;
+        if fd < FIRST_FAKE_FD || self.fake_file_index(fd).is_none() {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if buf == 0 && count != 0 {
+            self.set_errno(memory, EFAULT)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
         let read = self.read_fake_fd(memory, fd, buf, count)?;
@@ -3810,8 +6068,12 @@ impl HleRuntime {
         let buf = cpu.reg(1);
         let count = cpu.reg(2);
         let offset = cpu.reg(3) as i32 as i64;
-        if fd < FIRST_FAKE_FD || buf == 0 {
+        if fd < FIRST_FAKE_FD {
             self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if buf == 0 && count != 0 {
+            self.set_errno(memory, EFAULT)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
         if offset < 0 || offset > u32::MAX as i64 {
@@ -3839,30 +6101,99 @@ impl HleRuntime {
         let size = cpu.reg(1);
         let count = cpu.reg(2);
         let stream = cpu.reg(3);
-        if ptr == 0 || stream == 0 || size == 0 {
+        if size == 0 || count == 0 {
             return Ok(self.return32(cpu, 0));
         }
         let Some(total) = size.checked_mul(count) else {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EINVAL)?;
             return Ok(self.return32(cpu, 0));
         };
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+        if ptr == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, 0));
+        }
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
+            self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, 0));
         };
+        if flags & (BIONIC_FILE_FLAG_SRD | BIONIC_FILE_FLAG_SRW) == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, 0));
+        }
         let read = self.read_fake_fd(memory, fd, ptr, total)?;
+        if read == u32::MAX {
+            self.mark_stdio_error(memory, stream)?;
+        }
         self.sync_fake_file_stream_flags(memory, stream, fd)?;
-        Ok(self.return32(cpu, read / size))
+        Ok(self.return32(cpu, if read == u32::MAX { 0 } else { read / size }))
     }
 
     fn write_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let fd = cpu.reg(0);
         let buf = cpu.reg(1);
         let count = cpu.reg(2);
-        if fd < FIRST_FAKE_FD || buf == 0 {
-            self.set_errno(memory, 9)?;
+        if !self.fd_is_writable(fd) {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if buf == 0 && count != 0 {
+            self.set_errno(memory, EFAULT)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
         trace_hle_write("write", memory, buf, count);
         let written = self.write_fake_fd(memory, fd, buf, count)?;
+        Ok(self.return32(cpu, written))
+    }
+
+    fn writev_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
+        let fd = cpu.reg(0);
+        let iov = cpu.reg(1);
+        let iov_count = cpu.reg(2) as i32;
+        if !self.fd_is_writable(fd) {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if iov_count < 0 || iov_count as u32 > IOV_MAX {
+            self.set_errno(memory, EINVAL)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if iov == 0 && iov_count != 0 {
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+
+        let mut vectors = Vec::with_capacity(iov_count as usize);
+        let mut total = 0u32;
+        for index in 0..iov_count as u32 {
+            let entry = iov.wrapping_add(index * 8);
+            let base = load32(memory, entry)?;
+            let len = load32(memory, entry.wrapping_add(4))?;
+            if base == 0 && len != 0 {
+                self.set_errno(memory, EFAULT)?;
+                return Ok(self.return32(cpu, u32::MAX));
+            }
+            total = match total.checked_add(len) {
+                Some(total) if total <= i32::MAX as u32 => total,
+                _ => {
+                    self.set_errno(memory, EINVAL)?;
+                    return Ok(self.return32(cpu, u32::MAX));
+                }
+            };
+            vectors.push((base, len));
+        }
+
+        let mut written = 0u32;
+        for (base, len) in vectors {
+            trace_hle_write("writev", memory, base, len);
+            let part = self.write_fake_fd(memory, fd, base, len)?;
+            written = written.saturating_add(part);
+            if part != len {
+                break;
+            }
+        }
         Ok(self.return32(cpu, written))
     }
 
@@ -3871,41 +6202,74 @@ impl HleRuntime {
         let size = cpu.reg(1);
         let count = cpu.reg(2);
         let stream = cpu.reg(3);
-        if ptr == 0 || stream == 0 || size == 0 {
+        if size == 0 || count == 0 {
             return Ok(self.return32(cpu, 0));
         }
         let Some(total) = size.checked_mul(count) else {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EINVAL)?;
             return Ok(self.return32(cpu, 0));
         };
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
+        if ptr == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, 0));
+        }
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
+            self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, 0));
         };
+        if flags & (BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SRW) == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, 0));
+        }
         trace_hle_write("fwrite", memory, ptr, total);
         let written = self.write_fake_fd(memory, fd, ptr, total)?;
         self.sync_fake_file_stream_flags(memory, stream, fd)?;
-        Ok(self.return32(cpu, written / size))
+        Ok(self.return32(
+            cpu,
+            if written == u32::MAX {
+                0
+            } else {
+                written / size
+            },
+        ))
     }
 
     fn fputs_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let ptr = cpu.reg(0);
         let stream = cpu.reg(1);
-        if ptr == 0 || stream == 0 {
+        if ptr == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EFAULT)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        if stream == 0 {
+            self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
         let len = strlen(memory, ptr)?;
         trace_hle_write("fputs", memory, ptr, len);
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
-            return Ok(self.return32(cpu, 0));
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
         };
-        self.write_fake_fd(memory, fd, ptr, len)?;
+        if flags & (BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SRW) == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let written = self.write_fake_fd(memory, fd, ptr, len)?;
         self.sync_fake_file_stream_flags(memory, stream, fd)?;
-        Ok(self.return32(cpu, 0))
+        Ok(self.return32(cpu, if written == len { 0 } else { u32::MAX }))
     }
 
     fn fputc_call<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
         let ch = cpu.reg(0) as u8;
         let stream = cpu.reg(1);
         if stream == 0 {
+            self.set_errno(memory, EBADF)?;
             return Ok(self.return32(cpu, u32::MAX));
         }
         if std::env::var_os("AEMU_TRACE_HLE_FILE").is_some() {
@@ -3916,14 +6280,27 @@ impl HleRuntime {
             };
             eprintln!("HLE file fputc {printable}");
         }
-        let Ok(fd) = self.fake_file_fd(memory, stream) else {
-            return Ok(self.return32(cpu, u32::from(ch)));
+        let Some((fd, flags)) = self.stdio_stream(memory, stream)? else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
         };
+        if flags & (BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SRW) == 0 {
+            self.mark_stdio_error(memory, stream)?;
+            self.set_errno(memory, EBADF)?;
+            return Ok(self.return32(cpu, u32::MAX));
+        }
         let scratch = self.alloc(1, 1)?;
         store8(memory, scratch, ch)?;
-        self.write_fake_fd(memory, fd, scratch, 1)?;
+        let written = self.write_fake_fd(memory, fd, scratch, 1)?;
         self.sync_fake_file_stream_flags(memory, stream, fd)?;
-        Ok(self.return32(cpu, u32::from(ch)))
+        Ok(self.return32(
+            cpu,
+            if written == 1 {
+                u32::from(ch)
+            } else {
+                u32::MAX
+            },
+        ))
     }
 
     fn alloc_fd(&mut self) -> u32 {
@@ -3960,8 +6337,8 @@ impl HleRuntime {
         fd: u32,
         flags: u16,
     ) -> Result<u32, HleError> {
-        let ptr = self.alloc(FAKE_FILE_SIZE, 8)?;
-        for offset in 0..FAKE_FILE_SIZE {
+        let ptr = self.alloc(BIONIC_FILE_SIZE, 8)?;
+        for offset in 0..BIONIC_FILE_SIZE {
             store8(memory, ptr.wrapping_add(offset), 0)?;
         }
         store16(memory, ptr.wrapping_add(FAKE_FILE_FLAGS_OFFSET), flags)?;
@@ -3994,8 +6371,54 @@ impl HleRuntime {
         )?))
     }
 
+    fn stdio_stream<M: Memory>(
+        &mut self,
+        memory: &mut M,
+        stream: u32,
+    ) -> Result<Option<(u32, u16)>, HleError> {
+        if stream == 0 {
+            return Ok(None);
+        }
+        let flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET))?;
+        if flags == 0 {
+            return Ok(None);
+        }
+        let fd = self.fake_file_fd(memory, stream)?;
+        let open = usize::try_from(fd)
+            .ok()
+            .and_then(|fd| self.standard_fd_open.get(fd))
+            .copied()
+            .unwrap_or_else(|| self.fake_file_index(fd).is_some());
+        Ok(open.then_some((fd, flags)))
+    }
+
+    fn mark_stdio_error<M: Memory>(&mut self, memory: &mut M, stream: u32) -> Result<(), HleError> {
+        if stream != 0 {
+            let flags = load16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET))?;
+            store16(
+                memory,
+                stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET),
+                flags | BIONIC_FILE_FLAG_SERR,
+            )?;
+        }
+        Ok(())
+    }
+
     fn fake_file_index(&self, fd: u32) -> Option<usize> {
         self.files.iter().position(|file| file.fd == fd)
+    }
+
+    fn fd_is_writable(&self, fd: u32) -> bool {
+        matches!(fd, 1 | 2) && self.standard_fd_open[fd as usize]
+            || self.fake_file_index(fd).is_some_and(|index| {
+                matches!(
+                    &self.files[index].kind,
+                    FakeFileKind::Random
+                        | FakeFileKind::Virtual { .. }
+                        | FakeFileKind::Socket { .. }
+                        | FakeFileKind::PipeWrite { .. }
+                )
+            })
     }
 
     fn fake_file_state_flags(file: &FakeFile) -> u16 {
@@ -4006,13 +6429,15 @@ impl HleRuntime {
     fn fake_file_len(&self, file_idx: usize) -> Result<u32, u32> {
         match &self.files[file_idx].kind {
             FakeFileKind::Random => Ok(self.files[file_idx].offset),
-            FakeFileKind::Virtual { path } => self
+            FakeFileKind::Virtual { path, .. } => self
                 .virtual_file_index(path)
                 .map(|idx| self.virtual_files[idx].data.len() as u32)
                 .ok_or(ENOENT),
-            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
-                Err(EINVAL)
-            }
+            FakeFileKind::Directory { .. }
+            | FakeFileKind::Socket { .. }
+            | FakeFileKind::PipeRead { .. }
+            | FakeFileKind::PipeWrite { .. }
+            | FakeFileKind::Epoll { .. } => Err(EINVAL),
         }
     }
 
@@ -4043,22 +6468,80 @@ impl HleRuntime {
     fn fake_epoll_index(&self, fd: u32) -> Option<usize> {
         self.files
             .iter()
-            .position(|file| file.fd == fd && matches!(file.kind, FakeFileKind::Epoll))
+            .position(|file| file.fd == fd && matches!(file.kind, FakeFileKind::Epoll { .. }))
     }
 
-    fn fake_fd_readable(&self, fd: u32) -> bool {
+    fn pipe_index(&self, id: u32) -> Option<usize> {
+        self.pipes.iter().position(|pipe| pipe.id == id)
+    }
+
+    fn fake_fd_poll_events(&self, fd: u32, requested: u16) -> u16 {
         let Some(file_idx) = self.fake_file_index(fd) else {
-            return false;
+            return POLLNVAL;
         };
         match &self.files[file_idx].kind {
-            FakeFileKind::Random => true,
-            FakeFileKind::Virtual { path } => self.virtual_file_index(path).is_some_and(|idx| {
-                self.files[file_idx].offset < self.virtual_files[idx].data.len() as u32
-            }),
-            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
-                false
+            FakeFileKind::Random => requested & (POLLIN | POLLOUT),
+            FakeFileKind::Virtual { path, .. } => {
+                u16::from(self.virtual_file_index(path).is_some_and(|idx| {
+                    self.files[file_idx].offset < self.virtual_files[idx].data.len() as u32
+                })) * (requested & POLLIN)
+                    | (requested & POLLOUT)
             }
+            FakeFileKind::PipeRead { pipe_id, .. } => {
+                let Some(pipe) = self.pipe_index(*pipe_id).map(|idx| &self.pipes[idx]) else {
+                    return POLLNVAL;
+                };
+                let readable = !pipe.bytes.is_empty() || !pipe.write_open;
+                (if readable { requested & POLLIN } else { 0 })
+                    | if pipe.write_open { 0 } else { POLLHUP }
+            }
+            FakeFileKind::PipeWrite { pipe_id, .. } => {
+                let Some(pipe) = self.pipe_index(*pipe_id).map(|idx| &self.pipes[idx]) else {
+                    return POLLNVAL;
+                };
+                (if pipe.read_open && pipe.bytes.len() < PIPE_CAPACITY {
+                    requested & POLLOUT
+                } else {
+                    0
+                }) | if pipe.read_open { 0 } else { POLLHUP }
+            }
+            FakeFileKind::Socket {
+                received_datagrams, ..
+            } => {
+                (if received_datagrams.is_empty() {
+                    0
+                } else {
+                    requested & POLLIN
+                }) | (requested & POLLOUT)
+            }
+            FakeFileKind::Directory { .. } | FakeFileKind::Epoll { .. } => 0,
         }
+    }
+
+    fn fd_poll_events(&self, fd: u32, requested: u16) -> u16 {
+        match fd {
+            0 => 0,
+            1 | 2 => requested & POLLOUT,
+            _ => self.fake_fd_poll_events(fd, requested),
+        }
+    }
+
+    fn epoll_ready_events(&self, fd: u32, requested: u32) -> u32 {
+        let poll_requested = (if requested & EPOLLIN != 0 { POLLIN } else { 0 })
+            | if requested & EPOLLOUT != 0 {
+                POLLOUT
+            } else {
+                0
+            };
+        let polled = self.fake_fd_poll_events(fd, poll_requested);
+        (if polled & POLLIN != 0 { EPOLLIN } else { 0 })
+            | if polled & POLLOUT != 0 { EPOLLOUT } else { 0 }
+            | if polled & POLLHUP != 0 { EPOLLHUP } else { 0 }
+            | if polled & POLLNVAL != 0 {
+                EPOLLERR | EPOLLHUP
+            } else {
+                0
+            }
     }
 
     fn virtual_file_index(&self, path: &str) -> Option<usize> {
@@ -4111,6 +6594,7 @@ impl HleRuntime {
             self.virtual_files.push(VirtualFile {
                 path,
                 data: Vec::new(),
+                advisory_lock: None,
             });
         }
     }
@@ -4120,7 +6604,7 @@ impl HleRuntime {
         if let Some(idx) = self.virtual_file_index(&path) {
             self.virtual_files.remove(idx);
             self.files.retain(|file| {
-                !matches!(&file.kind, FakeFileKind::Virtual { path: file_path } if file_path == &path)
+                !matches!(&file.kind, FakeFileKind::Virtual { path: file_path, .. } if file_path == &path)
             });
             true
         } else {
@@ -4165,7 +6649,7 @@ impl HleRuntime {
                 self.virtual_files[old_idx].path = new_path.clone();
             }
             for file in &mut self.files {
-                if let FakeFileKind::Virtual { path } = &mut file.kind {
+                if let FakeFileKind::Virtual { path, .. } = &mut file.kind {
                     if *path == old_path {
                         *path = new_path.clone();
                     }
@@ -4194,7 +6678,7 @@ impl HleRuntime {
             }
         }
         for file in &mut self.files {
-            if let FakeFileKind::Virtual { path } | FakeFileKind::Directory { path, .. } =
+            if let FakeFileKind::Virtual { path, .. } | FakeFileKind::Directory { path, .. } =
                 &mut file.kind
             {
                 if *path == old_dir {
@@ -4248,7 +6732,7 @@ impl HleRuntime {
         let file = &self.files[file_idx];
         match &file.kind {
             FakeFileKind::Random => fake_character_device_stat(0x1000 + u64::from(file.fd)),
-            FakeFileKind::Virtual { path } => {
+            FakeFileKind::Virtual { path, .. } => {
                 let size = self
                     .virtual_file_index(path)
                     .map(|idx| self.virtual_files[idx].data.len() as u64)
@@ -4264,12 +6748,50 @@ impl HleRuntime {
             } => fake_character_device_stat(
                 0x1000 + u64::from(file.fd) + u64::from(domain ^ ty ^ protocol),
             ),
-            FakeFileKind::Epoll => fake_character_device_stat(0x1000 + u64::from(file.fd)),
+            FakeFileKind::PipeRead { pipe_id, .. } | FakeFileKind::PipeWrite { pipe_id, .. } => {
+                fake_character_device_stat(0x2000 + u64::from(*pipe_id))
+            }
+            FakeFileKind::Epoll { .. } => fake_character_device_stat(0x1000 + u64::from(file.fd)),
         }
     }
 
     fn close_fd(&mut self, fd: u32) {
+        for file in &mut self.files {
+            if let FakeFileKind::Epoll { registrations } = &mut file.kind {
+                registrations.retain(|entry| entry.fd != fd);
+            }
+        }
+        let locked_path =
+            self.fake_file_index(fd)
+                .and_then(|file_idx| match &self.files[file_idx].kind {
+                    FakeFileKind::Virtual { path, .. } => Some(path.clone()),
+                    _ => None,
+                });
+        if let Some(path) = locked_path {
+            if let Some(virtual_idx) = self.virtual_file_index(&path) {
+                self.virtual_files[virtual_idx].advisory_lock = None;
+            }
+        }
+        if let Some(kind) = self
+            .fake_file_index(fd)
+            .map(|file_idx| self.files[file_idx].kind.clone())
+        {
+            match kind {
+                FakeFileKind::PipeRead { pipe_id, .. } => {
+                    if let Some(pipe_idx) = self.pipe_index(pipe_id) {
+                        self.pipes[pipe_idx].read_open = false;
+                    }
+                }
+                FakeFileKind::PipeWrite { pipe_id, .. } => {
+                    if let Some(pipe_idx) = self.pipe_index(pipe_id) {
+                        self.pipes[pipe_idx].write_open = false;
+                    }
+                }
+                _ => {}
+            }
+        }
         self.files.retain(|file| file.fd != fd);
+        self.pipes.retain(|pipe| pipe.read_open || pipe.write_open);
     }
 
     fn read_fake_fd<M: Memory>(
@@ -4280,8 +6802,12 @@ impl HleRuntime {
         count: u32,
     ) -> Result<u32, HleError> {
         let Some(file_idx) = self.fake_file_index(fd) else {
-            return Ok(0);
+            self.set_errno(memory, EBADF)?;
+            return Ok(u32::MAX);
         };
+        if count == 0 {
+            return Ok(0);
+        }
         match self.files[file_idx].kind.clone() {
             FakeFileKind::Random => {
                 self.fill_random(memory, buf, count)?;
@@ -4290,7 +6816,7 @@ impl HleRuntime {
                 self.files[file_idx].error = false;
                 Ok(count)
             }
-            FakeFileKind::Virtual { path } => {
+            FakeFileKind::Virtual { path, .. } => {
                 let Some(virtual_idx) = self.virtual_file_index(&path) else {
                     self.files[file_idx].eof = true;
                     return Ok(0);
@@ -4307,9 +6833,55 @@ impl HleRuntime {
                 self.files[file_idx].error = false;
                 Ok(read as u32)
             }
-            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+            FakeFileKind::PipeRead { pipe_id, flags } => {
+                let Some(pipe_idx) = self.pipe_index(pipe_id) else {
+                    self.files[file_idx].error = true;
+                    self.set_errno(memory, EBADF)?;
+                    return Ok(u32::MAX);
+                };
+                let available = self.pipes[pipe_idx].bytes.len().min(count as usize);
+                if available == 0 {
+                    if !self.pipes[pipe_idx].write_open {
+                        self.files[file_idx].eof = true;
+                        self.files[file_idx].error = false;
+                        return Ok(0);
+                    }
+                    self.files[file_idx].error = flags & O_NONBLOCK != 0;
+                    self.set_errno(memory, EAGAIN)?;
+                    return Ok(u32::MAX);
+                }
+                for offset in 0..available {
+                    let byte = self.pipes[pipe_idx]
+                        .bytes
+                        .pop_front()
+                        .expect("pipe length checked before read");
+                    store8(memory, buf.wrapping_add(offset as u32), byte)?;
+                }
+                self.files[file_idx].offset =
+                    self.files[file_idx].offset.wrapping_add(available as u32);
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
+                Ok(available as u32)
+            }
+            FakeFileKind::PipeWrite { .. } => {
                 self.files[file_idx].error = true;
-                Ok(0)
+                self.set_errno(memory, EBADF)?;
+                Ok(u32::MAX)
+            }
+            FakeFileKind::Directory { .. } => {
+                self.files[file_idx].error = true;
+                self.set_errno(memory, EISDIR)?;
+                Ok(u32::MAX)
+            }
+            FakeFileKind::Socket { .. } => {
+                self.files[file_idx].error = true;
+                self.set_errno(memory, EAGAIN)?;
+                Ok(u32::MAX)
+            }
+            FakeFileKind::Epoll { .. } => {
+                self.files[file_idx].error = true;
+                self.set_errno(memory, EINVAL)?;
+                Ok(u32::MAX)
             }
         }
     }
@@ -4321,22 +6893,33 @@ impl HleRuntime {
         buf: u32,
         count: u32,
     ) -> Result<u32, HleError> {
-        let Some(file_idx) = self.fake_file_index(fd) else {
+        if matches!(fd, 1 | 2) && self.standard_fd_open[fd as usize] {
+            for offset in 0..count {
+                let _ = load8(memory, buf.wrapping_add(offset))?;
+            }
             return Ok(count);
+        }
+        let Some(file_idx) = self.fake_file_index(fd) else {
+            self.set_errno(memory, EBADF)?;
+            return Ok(u32::MAX);
         };
+        if count == 0 {
+            return Ok(0);
+        }
         match self.files[file_idx].kind.clone() {
             FakeFileKind::Random => {
                 self.files[file_idx].eof = false;
                 self.files[file_idx].error = false;
                 Ok(count)
             }
-            FakeFileKind::Virtual { path } => {
+            FakeFileKind::Virtual { path, .. } => {
                 let virtual_idx = if let Some(idx) = self.virtual_file_index(&path) {
                     idx
                 } else {
                     self.virtual_files.push(VirtualFile {
                         path: path.clone(),
                         data: Vec::new(),
+                        advisory_lock: None,
                     });
                     self.virtual_files.len() - 1
                 };
@@ -4354,30 +6937,80 @@ impl HleRuntime {
                 self.files[file_idx].error = false;
                 Ok(count)
             }
-            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+            FakeFileKind::Socket { .. } => {
                 self.files[file_idx].error = true;
-                Ok(count)
+                self.set_errno(memory, ENETUNREACH)?;
+                Ok(u32::MAX)
+            }
+            FakeFileKind::PipeWrite { pipe_id, .. } => {
+                let Some(pipe_idx) = self.pipe_index(pipe_id) else {
+                    self.files[file_idx].error = true;
+                    self.set_errno(memory, EBADF)?;
+                    return Ok(u32::MAX);
+                };
+                if !self.pipes[pipe_idx].read_open {
+                    self.files[file_idx].error = true;
+                    self.set_errno(memory, EPIPE)?;
+                    return Ok(u32::MAX);
+                }
+                let written =
+                    (PIPE_CAPACITY - self.pipes[pipe_idx].bytes.len()).min(count as usize);
+                if written == 0 {
+                    self.files[file_idx].error = true;
+                    self.set_errno(memory, EAGAIN)?;
+                    return Ok(u32::MAX);
+                }
+                for offset in 0..written {
+                    self.pipes[pipe_idx]
+                        .bytes
+                        .push_back(load8(memory, buf.wrapping_add(offset as u32))?);
+                }
+                self.files[file_idx].offset =
+                    self.files[file_idx].offset.wrapping_add(written as u32);
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = false;
+                Ok(written as u32)
+            }
+            FakeFileKind::PipeRead { .. } => {
+                self.files[file_idx].error = true;
+                self.set_errno(memory, EBADF)?;
+                Ok(u32::MAX)
+            }
+            FakeFileKind::Directory { .. } => {
+                self.files[file_idx].error = true;
+                self.set_errno(memory, EISDIR)?;
+                Ok(u32::MAX)
+            }
+            FakeFileKind::Epoll { .. } => {
+                self.files[file_idx].error = true;
+                self.set_errno(memory, EINVAL)?;
+                Ok(u32::MAX)
             }
         }
     }
 
-    fn write_fake_fd_bytes(&mut self, fd: u32, bytes: &[u8]) -> u32 {
+    fn write_fake_fd_bytes(&mut self, fd: u32, bytes: &[u8]) -> Result<u32, u32> {
         let Some(file_idx) = self.fake_file_index(fd) else {
-            return bytes.len() as u32;
+            return if matches!(fd, 1 | 2) && self.standard_fd_open[fd as usize] {
+                Ok(bytes.len() as u32)
+            } else {
+                Err(EBADF)
+            };
         };
         match self.files[file_idx].kind.clone() {
             FakeFileKind::Random => {
                 self.files[file_idx].eof = false;
                 self.files[file_idx].error = false;
-                bytes.len() as u32
+                Ok(bytes.len() as u32)
             }
-            FakeFileKind::Virtual { path } => {
+            FakeFileKind::Virtual { path, .. } => {
                 let virtual_idx = if let Some(idx) = self.virtual_file_index(&path) {
                     idx
                 } else {
                     self.virtual_files.push(VirtualFile {
                         path: path.clone(),
                         data: Vec::new(),
+                        advisory_lock: None,
                     });
                     self.virtual_files.len() - 1
                 };
@@ -4391,11 +7024,46 @@ impl HleRuntime {
                     self.files[file_idx].offset.wrapping_add(bytes.len() as u32);
                 self.files[file_idx].eof = false;
                 self.files[file_idx].error = false;
-                bytes.len() as u32
+                Ok(bytes.len() as u32)
             }
-            FakeFileKind::Directory { .. } | FakeFileKind::Socket { .. } | FakeFileKind::Epoll => {
+            FakeFileKind::Socket { .. } => {
                 self.files[file_idx].error = true;
-                bytes.len() as u32
+                Err(ENETUNREACH)
+            }
+            FakeFileKind::PipeWrite { pipe_id, .. } => {
+                let Some(pipe_idx) = self.pipe_index(pipe_id) else {
+                    self.files[file_idx].error = true;
+                    return Err(EBADF);
+                };
+                if !self.pipes[pipe_idx].read_open {
+                    self.files[file_idx].error = true;
+                    return Err(EPIPE);
+                }
+                let written = (PIPE_CAPACITY - self.pipes[pipe_idx].bytes.len()).min(bytes.len());
+                self.pipes[pipe_idx]
+                    .bytes
+                    .extend(bytes.iter().copied().take(written));
+                self.files[file_idx].offset =
+                    self.files[file_idx].offset.wrapping_add(written as u32);
+                self.files[file_idx].eof = false;
+                self.files[file_idx].error = written != bytes.len();
+                if written == bytes.len() {
+                    Ok(written as u32)
+                } else {
+                    Err(EAGAIN)
+                }
+            }
+            FakeFileKind::PipeRead { .. } => {
+                self.files[file_idx].error = true;
+                Err(EBADF)
+            }
+            FakeFileKind::Directory { .. } => {
+                self.files[file_idx].error = true;
+                Err(EISDIR)
+            }
+            FakeFileKind::Epoll { .. } => {
+                self.files[file_idx].error = true;
+                Err(EINVAL)
             }
         }
     }
@@ -4884,748 +7552,6 @@ impl HleRuntime {
         Ok(self.return32(cpu, new_data.wrapping_add(first as u32)))
     }
 
-    fn minecraft_webtoken_copy_ctor<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let dest = cpu.reg(0);
-        let source = cpu.reg(1);
-
-        if source == 0 {
-            self.store_empty_webtoken(memory, dest)?;
-        } else {
-            let issuer = load_cxx_string_bytes(memory, source)?;
-            self.store_cxx_string_bytes(memory, dest, &issuer, 0)?;
-            self.store_json_value_copy(memory, dest.wrapping_add(0x08), source.wrapping_add(0x08))?;
-            let subject = load_cxx_string_bytes(memory, source.wrapping_add(0x18))?;
-            self.store_cxx_string_bytes(memory, dest.wrapping_add(0x18), &subject, 0)?;
-            self.store_json_value_copy(memory, dest.wrapping_add(0x20), source.wrapping_add(0x20))?;
-            let signature = load_cxx_string_bytes(memory, source.wrapping_add(0x30))?;
-            self.store_cxx_string_bytes(memory, dest.wrapping_add(0x30), &signature, 0)?;
-        }
-
-        Ok(self.return32(cpu, dest))
-    }
-
-    fn minecraft_texture_group_get_texture_pair<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let location = load_resource_location_debug(memory, cpu.reg(1));
-        let key = location
-            .as_ref()
-            .map(resource_location_key)
-            .unwrap_or_else(|_| format!("resource@{:#010x}", cpu.reg(1)));
-        if let Some(pair) = self
-            .fake_texture_pairs
-            .iter()
-            .find(|pair| pair.key == key)
-            .map(|pair| pair.address)
-        {
-            trace_mcpe_resource(format_args!(
-                "TextureGroup::getTexturePair {key:?} -> cached {pair:#010x}"
-            ));
-            return Ok(self.return32(cpu, pair));
-        }
-
-        let decoded = location
-            .as_ref()
-            .ok()
-            .and_then(|location| self.load_texture_for_resource(location));
-        let (width, height, pixels, source) = match decoded {
-            Some(texture) => {
-                let texture = maybe_expand_minecraft_font_texture(&key, texture);
-                (texture.width, texture.height, texture.rgba, texture.source)
-            }
-            None => {
-                let pixels = fallback_texture_rgba(&key);
-                (
-                    FAKE_TEXTURE_SIDE,
-                    FAKE_TEXTURE_SIDE,
-                    pixels,
-                    "fallback".to_string(),
-                )
-            }
-        };
-        let pair = self.alloc(FAKE_TEXTURE_PAIR_SIZE, 4)?;
-        for offset in 0..FAKE_TEXTURE_PAIR_SIZE {
-            store8(memory, pair.wrapping_add(offset), 0)?;
-        }
-        Self::store_fake_texture_pair(memory, pair, width, height)?;
-        self.store_cxx_string_bytes(
-            memory,
-            pair.wrapping_add(0x40),
-            &pixels,
-            pixels.len() as u32,
-        )?;
-        self.fake_texture_pairs.push(NamedGuestObject {
-            key: key.clone(),
-            address: pair,
-        });
-        trace_mcpe_resource(format_args!(
-            "TextureGroup::getTexturePair {key:?} -> {pair:#010x} {width}x{height} bytes={} source={source:?}",
-            pixels.len()
-        ));
-        Ok(self.return32(cpu, pair))
-    }
-
-    fn minecraft_texture_group_get_texture_data<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let out = cpu.reg(0);
-        let texture_data = cpu.reg(2);
-        let width = load32(memory, texture_data)?;
-        let height = load32(memory, texture_data.wrapping_add(0x04))?;
-        let pixels = load32(memory, texture_data.wrapping_add(0x08))?;
-        let payload_len = cxx_string_len_from_data(memory, pixels)?;
-        let expected_len = width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| HleError::Memory("TextureData size overflow".to_string()))?;
-        let copy_len = payload_len.min(expected_len);
-        let mut payload = if pixels == 0 || copy_len == 0 {
-            Vec::new()
-        } else {
-            load_bytes(memory, pixels, copy_len)?
-        };
-        payload.resize(expected_len as usize, 0);
-
-        let texture = self.alloc(FAKE_TEXTURE_OGL_SIZE, 4)?;
-        for offset in 0..FAKE_TEXTURE_OGL_SIZE {
-            store8(memory, texture.wrapping_add(offset), 0)?;
-        }
-        let gl_name = self.alloc_gl_name();
-        store8(memory, texture.wrapping_add(0x20), 1)?;
-        store8(memory, texture.wrapping_add(0x21), 1)?;
-        store32(memory, texture.wrapping_add(0x24), gl_name)?;
-        store32(memory, texture.wrapping_add(0x28), GL_TEXTURE_2D)?;
-
-        store32(memory, out, 0)?;
-        store32(memory, out.wrapping_add(0x04), texture)?;
-        self.store_cxx_string_bytes(memory, out.wrapping_add(0x08), &[], 0)?;
-        self.store_cxx_string_bytes(memory, out.wrapping_add(0x0c), b"InMemory", 8)?;
-
-        self.bind_guest_texture(GL_TEXTURE_2D, gl_name);
-        self.push_gles_event(GlesEvent::BindTexture {
-            target: GL_TEXTURE_2D,
-            texture: gl_name,
-        });
-        for (name, value) in [
-            (GL_TEXTURE_MIN_FILTER, GL_LINEAR),
-            (GL_TEXTURE_MAG_FILTER, GL_LINEAR),
-            (GL_TEXTURE_WRAP_S, GL_REPEAT),
-            (GL_TEXTURE_WRAP_T, GL_REPEAT),
-        ] {
-            self.push_gles_event(GlesEvent::TexParameteri {
-                target: GL_TEXTURE_2D,
-                name,
-                value,
-            });
-        }
-        self.maybe_dump_gles_texture_upload(GlesTextureUploadDump {
-            kind: "teximage2d",
-            texture: gl_name,
-            target: GL_TEXTURE_2D,
-            level: 0,
-            xoffset: 0,
-            yoffset: 0,
-            width: width as i32,
-            height: height as i32,
-            format: GL_RGBA,
-            ty: GL_UNSIGNED_BYTE,
-            pixels,
-            payload: (!payload.is_empty()).then_some(payload.as_slice()),
-        });
-        self.push_gles_event(GlesEvent::TexImage2D {
-            target: GL_TEXTURE_2D,
-            level: 0,
-            internal_format: GL_RGBA as i32,
-            width: width as i32,
-            height: height as i32,
-            border: 0,
-            format: GL_RGBA,
-            ty: GL_UNSIGNED_BYTE,
-            pixels,
-            payload: Some(payload),
-        });
-
-        trace_mcpe_resource(format_args!(
-            "TextureGroup::getTexture(TextureData) data={texture_data:#010x} -> ptr={out:#010x} texture={texture:#010x} gl={gl_name} {width}x{height} bytes={payload_len}"
-        ));
-        Ok(self.return32(cpu, out))
-    }
-
-    fn minecraft_font_init<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let font = cpu.reg(0);
-        let widths = self
-            .load_minecraft_font_widths()
-            .unwrap_or_else(default_minecraft_font_widths);
-        for (idx, width) in widths.iter().copied().enumerate() {
-            let offset = idx as u32 * 4;
-            store32(memory, font.wrapping_add(0x234).wrapping_add(offset), width)?;
-            store32(
-                memory,
-                font.wrapping_add(0x634).wrapping_add(offset),
-                (width as f32).to_bits(),
-            )?;
-        }
-
-        let unicode_flags = vec![0u8; 0x1_0000];
-        self.replace_cxx_string_bytes(memory, font.wrapping_add(0xa64), &unicode_flags, 0x1_0000)?;
-        store_minecraft_font_color_codes(memory, font)?;
-        trace_mcpe_resource(format_args!(
-            "Font::init {font:#010x} -> HLE widths from default8.png"
-        ));
-        Ok(self.return32(cpu, font))
-    }
-
-    fn load_minecraft_font_widths(&mut self) -> Option<[u32; 256]> {
-        let bytes = self
-            .read_apk_asset_entry("assets/images/font/default8.png")
-            .ok()?;
-        let texture =
-            decode_image_rgba("assets/images/font/default8.png", &bytes, ImageFormat::Png).ok()?;
-        Some(minecraft_font_widths_from_rgba(
-            texture.width,
-            texture.height,
-            &texture.rgba,
-        ))
-    }
-
-    fn store_fake_texture_pair<M: Memory>(
-        memory: &mut M,
-        pair: u32,
-        width: u32,
-        height: u32,
-    ) -> Result<(), HleError> {
-        store32(memory, pair, width)?;
-        store32(memory, pair.wrapping_add(0x04), height)?;
-        store32(memory, pair.wrapping_add(0x08), 0x1c)?;
-        store32(memory, pair.wrapping_add(0x0c), 1)?;
-        store32(memory, pair.wrapping_add(0x10), 0)?;
-        store32(memory, pair.wrapping_add(0x14), 1)?;
-        store32(memory, pair.wrapping_add(0x18), 8)?;
-        store32(memory, pair.wrapping_add(0x1c), 0)?;
-        store8(memory, pair.wrapping_add(0x20), 0)?;
-        store8(memory, pair.wrapping_add(0x21), 1)?;
-        store32(memory, pair.wrapping_add(0x24), 0)?;
-        store32(memory, pair.wrapping_add(0x28), GL_TEXTURE_2D)?;
-        store32(memory, pair.wrapping_add(0x2c), GL_RGBA)?;
-        store32(memory, pair.wrapping_add(0x30), GL_RGBA)?;
-        store32(memory, pair.wrapping_add(0x34), GL_UNSIGNED_BYTE)?;
-
-        store32(memory, pair.wrapping_add(0x38), width)?;
-        store32(memory, pair.wrapping_add(0x3c), height)?;
-
-        Ok(())
-    }
-
-    fn minecraft_app_platform_load_image<M: Memory>(
-        &mut self,
-        name: &str,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let texture_data = cpu.reg(1);
-        let path_addr = cpu.reg(2);
-        let format = image_format_for_loader(name);
-        self.minecraft_load_image_path(texture_data, path_addr, format, cpu, memory)
-    }
-
-    fn minecraft_image_utils_load_image_from_file<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let texture_data = cpu.reg(0);
-        let path_addr = cpu.reg(1);
-        self.minecraft_load_image_path(texture_data, path_addr, ImageFormat::Any, cpu, memory)
-    }
-
-    fn minecraft_image_utils_load_image_from_memory<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let texture_data = cpu.reg(0);
-        let bytes_addr = cpu.reg(1);
-        let len = cpu.reg(2);
-        let result = if bytes_addr == 0 || len == 0 {
-            Err("empty image memory".to_string())
-        } else {
-            let bytes = load_bytes(memory, bytes_addr, len)?;
-            decode_image_rgba("<memory>", &bytes, ImageFormat::Any)
-        };
-
-        match result {
-            Ok(texture) => {
-                self.store_minecraft_texture_data(memory, texture_data, &texture)?;
-                trace_mcpe_resource(format_args!(
-                    "ImageUtils::loadImageFromMemory data={texture_data:#010x} {}x{} bytes={} source={:?}",
-                    texture.width,
-                    texture.height,
-                    texture.rgba.len(),
-                    texture.source
-                ));
-                Ok(self.return32(cpu, 1))
-            }
-            Err(err) => {
-                self.clear_minecraft_texture_data(memory, texture_data)?;
-                trace_mcpe_resource(format_args!(
-                    "ImageUtils::loadImageFromMemory data={texture_data:#010x} failed: {err}"
-                ));
-                Ok(self.return32(cpu, 0))
-            }
-        }
-    }
-
-    fn minecraft_load_image_path<M: Memory>(
-        &mut self,
-        texture_data: u32,
-        path_addr: u32,
-        format: ImageFormat,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let path = load_cxx_string_lossy(memory, path_addr)?;
-        match self.load_image_texture_for_path(&path, format) {
-            Ok(texture) => {
-                self.store_minecraft_texture_data(memory, texture_data, &texture)?;
-                trace_mcpe_resource(format_args!(
-                    "AppPlatform::loadImage path={path:?} data={texture_data:#010x} {}x{} bytes={} source={:?}",
-                    texture.width,
-                    texture.height,
-                    texture.rgba.len(),
-                    texture.source
-                ));
-                Ok(self.return32(cpu, 1))
-            }
-            Err(err) => {
-                self.clear_minecraft_texture_data(memory, texture_data)?;
-                trace_mcpe_resource(format_args!(
-                    "AppPlatform::loadImage path={path:?} data={texture_data:#010x} failed: {err}"
-                ));
-                Ok(self.return32(cpu, 0))
-            }
-        }
-    }
-
-    fn store_minecraft_texture_data<M: Memory>(
-        &mut self,
-        memory: &mut M,
-        texture_data: u32,
-        texture: &DecodedTexture,
-    ) -> Result<(), HleError> {
-        store32(memory, texture_data, texture.width)?;
-        store32(memory, texture_data.wrapping_add(0x04), texture.height)?;
-        self.replace_cxx_string_bytes(
-            memory,
-            texture_data.wrapping_add(0x08),
-            &texture.rgba,
-            texture.rgba.len() as u32,
-        )?;
-        Ok(())
-    }
-
-    fn clear_minecraft_texture_data<M: Memory>(
-        &mut self,
-        memory: &mut M,
-        texture_data: u32,
-    ) -> Result<(), HleError> {
-        if texture_data == 0 {
-            return Ok(());
-        }
-        store32(memory, texture_data, 0)?;
-        store32(memory, texture_data.wrapping_add(0x04), 0)?;
-        self.replace_cxx_string_bytes(memory, texture_data.wrapping_add(0x08), &[], 0)?;
-        Ok(())
-    }
-
-    fn minecraft_geometry_group_get_geometry<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let out = cpu.reg(0);
-        let key = load_cxx_string_lossy(memory, cpu.reg(2))
-            .unwrap_or_else(|_| format!("geometry@{:#010x}", cpu.reg(2)));
-        let geometry = if let Some(geometry) = self
-            .fake_geometries
-            .iter()
-            .find(|geometry| geometry.key == key)
-            .map(|geometry| geometry.address)
-        {
-            geometry
-        } else {
-            let geometry = self.alloc(FAKE_GEOMETRY_SIZE, 4)?;
-            for offset in 0..FAKE_GEOMETRY_SIZE {
-                store8(memory, geometry.wrapping_add(offset), 0)?;
-            }
-            self.fake_geometries.push(NamedGuestObject {
-                key: key.clone(),
-                address: geometry,
-            });
-            geometry
-        };
-        trace_mcpe_resource(format_args!(
-            "GeometryGroup::getGeometry {key:?} -> {geometry:#010x}"
-        ));
-
-        store32(memory, out, 0)?;
-        store32(memory, out.wrapping_add(4), geometry)?;
-        Ok(self.return32(cpu, out))
-    }
-
-    fn minecraft_ui_control_resolve_noop(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_empty_vector_return<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let out = cpu.reg(0);
-        store32(memory, out, 0)?;
-        store32(memory, out.wrapping_add(4), 0)?;
-        store32(memory, out.wrapping_add(8), 0)?;
-        Ok(self.return32(cpu, out))
-    }
-
-    fn minecraft_multitouch_feed<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let active = cpu.reg(0) != 0;
-        let pressed = cpu.reg(1) != 0;
-        let x = (cpu.reg(2) as u16 as i16) as f32;
-        let y = (cpu.reg(3) as u16 as i16) as f32;
-        let pointer_id = self.stack_arg(cpu, memory, 4)? as i32;
-        let phase = if active {
-            if pressed {
-                HlePointerPhase::Down
-            } else {
-                HlePointerPhase::Up
-            }
-        } else {
-            HlePointerPhase::Move
-        };
-        let pressure = if phase == HlePointerPhase::Up {
-            0.0
-        } else {
-            1.0
-        };
-        self.update_pointer_event(pointer_id as i64, phase, x, y, pressure, false);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_mouse_device_feed<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        _memory: &mut M,
-    ) -> Result<(), HleError> {
-        let active = cpu.reg(0) != 0;
-        let pressed = cpu.reg(1) != 0;
-        let x = (cpu.reg(2) as u16 as i16) as f32;
-        let y = (cpu.reg(3) as u16 as i16) as f32;
-        let phase = if active {
-            if pressed {
-                HlePointerPhase::Down
-            } else {
-                HlePointerPhase::Up
-            }
-        } else {
-            HlePointerPhase::Move
-        };
-        let pressure = if phase == HlePointerPhase::Up {
-            0.0
-        } else {
-            1.0
-        };
-        self.update_pointer_event(0, phase, x, y, pressure, false);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_input_queue_next_event<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let out = cpu.reg(1);
-        let Some(event) = self.minecraft_input_events.pop_front() else {
-            trace_mcpe_input_empty(format_args!("next_event empty"));
-            return Ok(self.return32(cpu, 0));
-        };
-        trace_mcpe_input(format_args!(
-            "next_event out={out:#010x} event={event:?} remaining={}",
-            self.minecraft_input_events.len()
-        ));
-        if out != 0 {
-            for offset in 0..20 {
-                store8(memory, out.wrapping_add(offset), 0)?;
-            }
-            match event {
-                HleMinecraftInputEvent::Button { id, state, repeat } => {
-                    store8(memory, out, 0)?;
-                    store16(memory, out.wrapping_add(4), id as u16)?;
-                    store8(memory, out.wrapping_add(6), state)?;
-                    store8(memory, out.wrapping_add(7), u8::from(repeat))?;
-                }
-                HleMinecraftInputEvent::PointerLocation { mode, x, y } => {
-                    store8(memory, out, 1)?;
-                    store32(memory, out.wrapping_add(4), mode as u32)?;
-                    store16(memory, out.wrapping_add(8), x as u16)?;
-                    store16(memory, out.wrapping_add(10), y as u16)?;
-                }
-                HleMinecraftInputEvent::Direction { id, x, y } => {
-                    store8(memory, out, 4)?;
-                    store16(memory, out.wrapping_add(4), id as u16)?;
-                    store32(memory, out.wrapping_add(8), x.to_bits())?;
-                    store32(memory, out.wrapping_add(12), y.to_bits())?;
-                }
-                HleMinecraftInputEvent::Vector { id, x, y, z } => {
-                    store8(memory, out, 5)?;
-                    store16(memory, out.wrapping_add(4), id as u16)?;
-                    store32(memory, out.wrapping_add(8), x.to_bits())?;
-                    store32(memory, out.wrapping_add(12), y.to_bits())?;
-                    store32(memory, out.wrapping_add(16), z.to_bits())?;
-                }
-            }
-        }
-        Ok(self.return32(cpu, 1))
-    }
-
-    fn minecraft_input_queue_enqueue_button(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
-        let event = HleMinecraftInputEvent::Button {
-            id: cpu.reg(1) as u16 as i16,
-            state: cpu.reg(2) as u8,
-            repeat: cpu.reg(3) != 0,
-        };
-        trace_mcpe_input(format_args!("enqueue_button {event:?}"));
-        self.minecraft_input_events.push_back(event);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_input_queue_enqueue_button_press_and_release(
-        &mut self,
-        cpu: &mut Cpu,
-    ) -> Result<(), HleError> {
-        let id = cpu.reg(1) as u16 as i16;
-        let down = HleMinecraftInputEvent::Button {
-            id,
-            state: 1,
-            repeat: false,
-        };
-        let up = HleMinecraftInputEvent::Button {
-            id,
-            state: 0,
-            repeat: false,
-        };
-        trace_mcpe_input(format_args!(
-            "enqueue_button_press_and_release {down:?} {up:?}"
-        ));
-        self.minecraft_input_events.push_back(down);
-        self.minecraft_input_events.push_back(up);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_input_queue_enqueue_pointer_location(
-        &mut self,
-        cpu: &mut Cpu,
-    ) -> Result<(), HleError> {
-        let event = HleMinecraftInputEvent::PointerLocation {
-            mode: cpu.reg(1) as i32,
-            x: cpu.reg(2) as u16 as i16,
-            y: cpu.reg(3) as u16 as i16,
-        };
-        trace_mcpe_input(format_args!("enqueue_pointer_location {event:?}"));
-        self.minecraft_input_events.push_back(event);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_input_queue_enqueue_direction(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
-        let event = HleMinecraftInputEvent::Direction {
-            id: cpu.reg(1) as u16 as i16,
-            x: f32::from_bits(cpu.reg(2)),
-            y: f32::from_bits(cpu.reg(3)),
-        };
-        trace_mcpe_input(format_args!("enqueue_direction {event:?}"));
-        self.minecraft_input_events.push_back(event);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_input_queue_enqueue_vector(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
-        let event = HleMinecraftInputEvent::Vector {
-            id: cpu.reg(1) as u16 as i16,
-            x: f32::from_bits(cpu.reg(2)),
-            y: f32::from_bits(cpu.reg(3)),
-            z: f32::from_bits(cpu.reg(4)),
-        };
-        trace_mcpe_input(format_args!("enqueue_vector {event:?}"));
-        self.minecraft_input_events.push_back(event);
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn minecraft_empty_pointer_ids_return<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let out = cpu.reg(0);
-        if out != 0 {
-            store32(memory, out, 0)?;
-        }
-        Ok(self.return32(cpu, 0))
-    }
-
-    fn pointer_active_this_update(&self) -> bool {
-        self.input_pointer.down || self.input_pointer.was_released
-    }
-
-    fn clear_pointer_update_flags(&mut self) {
-        self.input_pointer.pressed_this_update = false;
-        self.input_pointer.released_this_update = false;
-        self.input_pointer.dirty_since_commit = false;
-        self.input_pointer.was_pressed = self.input_pointer.down;
-        if !self.input_pointer.down {
-            self.input_pointer.was_released = false;
-        }
-        self.input_pointer.dx = 0.0;
-        self.input_pointer.dy = 0.0;
-    }
-
-    fn clear_pointer_state(&mut self) {
-        let id = self.input_pointer.id;
-        self.input_pointer = HlePointer {
-            id,
-            ..HlePointer::default()
-        };
-    }
-
-    fn minecraft_pointer_ids_return<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-        active: bool,
-    ) -> Result<(), HleError> {
-        if !active {
-            return self.minecraft_empty_pointer_ids_return(cpu, memory);
-        }
-        let ids = match self.input_pointer_ids {
-            Some(ptr) => ptr,
-            None => {
-                let ptr = self.alloc(4, 4)?;
-                self.input_pointer_ids = Some(ptr);
-                ptr
-            }
-        };
-        store32(memory, ids, self.input_pointer.id as u32)?;
-        let out = cpu.reg(0);
-        if out != 0 {
-            store32(memory, out, ids)?;
-        }
-        Ok(self.return32(cpu, 1))
-    }
-
-    fn minecraft_interpolate_transforms<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let out = cpu.reg(0);
-        let from = cpu.reg(1);
-        let to = cpu.reg(2);
-        let t = f32::from_bits(cpu.reg(3));
-
-        for idx in 0..16 {
-            let offset = idx * 4;
-            let a = f32::from_bits(load32(memory, from.wrapping_add(offset))?);
-            let b = f32::from_bits(load32(memory, to.wrapping_add(offset))?);
-            let value = a + (b - a) * t;
-            store32(memory, out.wrapping_add(offset), value.to_bits())?;
-        }
-
-        Ok(self.return32(cpu, out))
-    }
-
-    fn minecraft_ogl_unbind_all_textures<M: Memory>(
-        &mut self,
-        cpu: &mut Cpu,
-        memory: &mut M,
-    ) -> Result<(), HleError> {
-        let context = cpu.reg(0);
-        for slot in 0..8 {
-            store32(memory, context.wrapping_add(0x7c + slot * 4), 0)?;
-        }
-        store32(memory, context.wrapping_add(0x100), 0x84c7)?;
-        Ok(self.return32(cpu, context))
-    }
-
-    fn store_empty_webtoken<M: Memory>(
-        &mut self,
-        memory: &mut M,
-        dest: u32,
-    ) -> Result<(), HleError> {
-        self.store_cxx_string_bytes(memory, dest, &[], 0)?;
-        store_json_null(memory, dest.wrapping_add(0x08))?;
-        self.store_cxx_string_bytes(memory, dest.wrapping_add(0x18), &[], 0)?;
-        store_json_null(memory, dest.wrapping_add(0x20))?;
-        self.store_cxx_string_bytes(memory, dest.wrapping_add(0x30), &[], 0)?;
-        Ok(())
-    }
-
-    fn store_json_value_copy<M: Memory>(
-        &mut self,
-        memory: &mut M,
-        dest: u32,
-        source: u32,
-    ) -> Result<(), HleError> {
-        if source < 0x1000 {
-            return store_json_null(memory, dest);
-        }
-
-        let value_type = load8(memory, source.wrapping_add(0x08))?;
-        match value_type {
-            0 | 1 | 2 | 3 | 5 => {
-                for offset in 0..16 {
-                    let byte = load8(memory, source.wrapping_add(offset))?;
-                    store8(memory, dest.wrapping_add(offset), byte)?;
-                }
-                Ok(())
-            }
-            4 => {
-                let ptr = load32(memory, source)?;
-                let bytes = if ptr == 0 {
-                    Vec::new()
-                } else {
-                    let len = strlen(memory, ptr)?;
-                    load_bytes(memory, ptr, len)?
-                };
-                let allocation = self.alloc((bytes.len() as u32).saturating_add(1), 1)?;
-                for (idx, byte) in bytes.iter().copied().enumerate() {
-                    store8(memory, allocation.wrapping_add(idx as u32), byte)?;
-                }
-                store8(memory, allocation.wrapping_add(bytes.len() as u32), 0)?;
-                store32(memory, dest, allocation)?;
-                store32(memory, dest.wrapping_add(4), 0)?;
-                store16(memory, dest.wrapping_add(8), u16::from(value_type) | 0x100)?;
-                store16(memory, dest.wrapping_add(10), 0)?;
-                store32(memory, dest.wrapping_add(12), 0)?;
-                Ok(())
-            }
-            _ => store_json_null(memory, dest),
-        }
-    }
-
     fn replace_cxx_string_range<M: Memory>(
         &mut self,
         memory: &mut M,
@@ -5767,8 +7693,21 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         let guard = cpu.reg(0);
-        let initialized = guard != 0 && load8(memory, guard)? != 0;
-        Ok(self.return32(cpu, u32::from(!initialized)))
+        if guard == 0 {
+            return Err(HleError::Abort(
+                "__cxa_guard_acquire received a null guard".to_string(),
+            ));
+        }
+        if load8(memory, guard)? != 0 {
+            return Ok(self.return32(cpu, 0));
+        }
+        if load8(memory, guard.wrapping_add(1))? != 0 {
+            return Err(HleError::Abort(
+                "contended __cxa_guard_acquire requires scheduler blocking".to_string(),
+            ));
+        }
+        store8(memory, guard.wrapping_add(1), 1)?;
+        Ok(self.return32(cpu, 1))
     }
 
     fn cxa_guard_release<M: Memory>(
@@ -5777,36 +7716,120 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         let guard = cpu.reg(0);
-        if guard != 0 {
-            store8(memory, guard, 1)?;
+        if guard == 0 || load8(memory, guard.wrapping_add(1))? == 0 {
+            return Err(HleError::Abort(
+                "__cxa_guard_release received an unacquired guard".to_string(),
+            ));
         }
+        store8(memory, guard, 1)?;
+        store8(memory, guard.wrapping_add(1), 0)?;
         Ok(self.return32(cpu, 0))
     }
 
-    fn libm(&mut self, name: &str, cpu: &mut Cpu) -> Result<(), HleError> {
-        match name {
-            "sinf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).sin())),
-            "cosf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).cos())),
-            "tanf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).tan())),
-            "sqrtf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).sqrt())),
-            "floorf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).floor())),
-            "ceilf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).ceil())),
-            "fabsf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).abs())),
-            "roundf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).round())),
-            "truncf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).trunc())),
-            "powf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).powf(f32_arg(cpu, 1)))),
-            "fmaxf" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).max(f32_arg(cpu, 1)))),
-            "exp2f" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).exp2())),
-            "nearbyintf" | "rint" => Ok(self.return_f32(cpu, f32_arg(cpu, 0).round())),
-            "sin" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).sin())),
-            "cos" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).cos())),
-            "tan" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).tan())),
-            "sqrt" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).sqrt())),
-            "floor" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).floor())),
-            "ceil" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).ceil())),
-            "fabs" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).abs())),
-            "pow" => Ok(self.return_f64(cpu, f64_arg(cpu, 0).powf(f64_arg(cpu, 2)))),
-            _ => Ok(self.return32(cpu, 0)),
+    fn cxa_guard_abort<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let guard = cpu.reg(0);
+        if guard == 0 || load8(memory, guard.wrapping_add(1))? == 0 {
+            return Err(HleError::Abort(
+                "__cxa_guard_abort received an unacquired guard".to_string(),
+            ));
+        }
+        store8(memory, guard.wrapping_add(1), 0)?;
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn aeabi_atexit(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        self.cxa_atexit_entries.push(CxaAtExitEntry {
+            function: cpu.reg(1),
+            argument: cpu.reg(0),
+            dso: cpu.reg(2),
+        });
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn cxa_atexit(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        self.cxa_atexit_entries.push(CxaAtExitEntry {
+            function: cpu.reg(0),
+            argument: cpu.reg(1),
+            dso: cpu.reg(2),
+        });
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn libm<M: Memory>(
+        &mut self,
+        name: &str,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let op = LibmOp::from_name(name)
+            .ok_or_else(|| HleError::UnimplementedSymbol(name.to_string()))?;
+        match op {
+            LibmOp::Acos => Ok(self.return_f64(cpu, libm::acos(f64_arg(cpu, 0)))),
+            LibmOp::Acosf => Ok(self.return_f32(cpu, libm::acosf(f32_arg(cpu, 0)))),
+            LibmOp::Asin => Ok(self.return_f64(cpu, libm::asin(f64_arg(cpu, 0)))),
+            LibmOp::Asinf => Ok(self.return_f32(cpu, libm::asinf(f32_arg(cpu, 0)))),
+            LibmOp::Atan => Ok(self.return_f64(cpu, libm::atan(f64_arg(cpu, 0)))),
+            LibmOp::Atanf => Ok(self.return_f32(cpu, libm::atanf(f32_arg(cpu, 0)))),
+            LibmOp::Atan2 => {
+                Ok(self.return_f64(cpu, libm::atan2(f64_arg(cpu, 0), f64_arg(cpu, 2))))
+            }
+            LibmOp::Atan2f => {
+                Ok(self.return_f32(cpu, libm::atan2f(f32_arg(cpu, 0), f32_arg(cpu, 1))))
+            }
+            LibmOp::Ceil => Ok(self.return_f64(cpu, libm::ceil(f64_arg(cpu, 0)))),
+            LibmOp::Ceilf => Ok(self.return_f32(cpu, libm::ceilf(f32_arg(cpu, 0)))),
+            LibmOp::Cos => Ok(self.return_f64(cpu, libm::cos(f64_arg(cpu, 0)))),
+            LibmOp::Cosf => Ok(self.return_f32(cpu, libm::cosf(f32_arg(cpu, 0)))),
+            LibmOp::Cosh => Ok(self.return_f64(cpu, libm::cosh(f64_arg(cpu, 0)))),
+            LibmOp::Exp => Ok(self.return_f64(cpu, libm::exp(f64_arg(cpu, 0)))),
+            LibmOp::Expf => Ok(self.return_f32(cpu, libm::expf(f32_arg(cpu, 0)))),
+            LibmOp::Exp2f => Ok(self.return_f32(cpu, libm::exp2f(f32_arg(cpu, 0)))),
+            LibmOp::Fabs => Ok(self.return_f64(cpu, libm::fabs(f64_arg(cpu, 0)))),
+            LibmOp::Fabsf => Ok(self.return_f32(cpu, libm::fabsf(f32_arg(cpu, 0)))),
+            LibmOp::Floor => Ok(self.return_f64(cpu, libm::floor(f64_arg(cpu, 0)))),
+            LibmOp::Floorf => Ok(self.return_f32(cpu, libm::floorf(f32_arg(cpu, 0)))),
+            LibmOp::Fmaxf => {
+                Ok(self.return_f32(cpu, libm::fmaxf(f32_arg(cpu, 0), f32_arg(cpu, 1))))
+            }
+            LibmOp::Fmod => Ok(self.return_f64(cpu, libm::fmod(f64_arg(cpu, 0), f64_arg(cpu, 2)))),
+            LibmOp::Fmodf => {
+                Ok(self.return_f32(cpu, libm::fmodf(f32_arg(cpu, 0), f32_arg(cpu, 1))))
+            }
+            LibmOp::Frexp => {
+                let (fraction, exponent) = libm::frexp(f64_arg(cpu, 0));
+                store32(memory, cpu.reg(2), exponent as u32)?;
+                Ok(self.return_f64(cpu, fraction))
+            }
+            LibmOp::Ldexp => {
+                Ok(self.return_f64(cpu, libm::ldexp(f64_arg(cpu, 0), cpu.reg(2) as i32)))
+            }
+            LibmOp::Log => Ok(self.return_f64(cpu, libm::log(f64_arg(cpu, 0)))),
+            LibmOp::Logf => Ok(self.return_f32(cpu, libm::logf(f32_arg(cpu, 0)))),
+            LibmOp::Log10 => Ok(self.return_f64(cpu, libm::log10(f64_arg(cpu, 0)))),
+            LibmOp::Log10f => Ok(self.return_f32(cpu, libm::log10f(f32_arg(cpu, 0)))),
+            LibmOp::Modf => {
+                let (fraction, integral) = libm::modf(f64_arg(cpu, 0));
+                store_f64(memory, cpu.reg(2), integral)?;
+                Ok(self.return_f64(cpu, fraction))
+            }
+            LibmOp::Nearbyintf => Ok(self.return_f32(cpu, libm::rintf(f32_arg(cpu, 0)))),
+            LibmOp::Pow => Ok(self.return_f64(cpu, libm::pow(f64_arg(cpu, 0), f64_arg(cpu, 2)))),
+            LibmOp::Powf => Ok(self.return_f32(cpu, libm::powf(f32_arg(cpu, 0), f32_arg(cpu, 1)))),
+            LibmOp::Rint => Ok(self.return_f64(cpu, libm::rint(f64_arg(cpu, 0)))),
+            LibmOp::Roundf => Ok(self.return_f32(cpu, libm::roundf(f32_arg(cpu, 0)))),
+            LibmOp::Sin => Ok(self.return_f64(cpu, libm::sin(f64_arg(cpu, 0)))),
+            LibmOp::Sinf => Ok(self.return_f32(cpu, libm::sinf(f32_arg(cpu, 0)))),
+            LibmOp::Sinh => Ok(self.return_f64(cpu, libm::sinh(f64_arg(cpu, 0)))),
+            LibmOp::Sqrt => Ok(self.return_f64(cpu, libm::sqrt(f64_arg(cpu, 0)))),
+            LibmOp::Sqrtf => Ok(self.return_f32(cpu, libm::sqrtf(f32_arg(cpu, 0)))),
+            LibmOp::Tan => Ok(self.return_f64(cpu, libm::tan(f64_arg(cpu, 0)))),
+            LibmOp::Tanf => Ok(self.return_f32(cpu, libm::tanf(f32_arg(cpu, 0)))),
+            LibmOp::Tanh => Ok(self.return_f64(cpu, libm::tanh(f64_arg(cpu, 0)))),
+            LibmOp::Truncf => Ok(self.return_f32(cpu, libm::truncf(f32_arg(cpu, 0)))),
         }
     }
 
@@ -5822,21 +7845,81 @@ impl HleRuntime {
                 for offset in 0..ACONFIGURATION_SIZE {
                     store8(memory, ptr.wrapping_add(offset), 0)?;
                 }
+                self.register_android_configuration(ptr, 0);
                 Ok(self.return32(cpu, ptr))
             }
             "AConfiguration_getLanguage" => {
-                write_android_locale_code(memory, cpu.reg(1), b"en")?;
+                let configuration =
+                    self.require_android_configuration("AConfiguration_getLanguage", cpu.reg(0))?;
+                write_android_locale_code(memory, cpu.reg(1), &configuration.language)?;
                 Ok(self.return32(cpu, 0))
             }
             "AConfiguration_getCountry" => {
-                write_android_locale_code(memory, cpu.reg(1), b"US")?;
+                let configuration =
+                    self.require_android_configuration("AConfiguration_getCountry", cpu.reg(0))?;
+                write_android_locale_code(memory, cpu.reg(1), &configuration.country)?;
                 Ok(self.return32(cpu, 0))
             }
-            "AConfiguration_fromAssetManager" | "AConfiguration_delete" => {
+            "AConfiguration_fromAssetManager" => {
+                let handle = cpu.reg(0);
+                let asset_manager = cpu.reg(1);
+                if asset_manager == 0 {
+                    return Err(HleError::Abort(
+                        "AConfiguration_fromAssetManager received a null asset manager".to_string(),
+                    ));
+                }
+                let configuration = self
+                    .require_android_configuration_mut("AConfiguration_fromAssetManager", handle)?;
+                configuration.asset_manager = asset_manager;
                 Ok(self.return32(cpu, 0))
             }
-            _ => self.dispatch_stub(name, HleCallBehavior::ReturnZero, cpu, memory),
+            "AConfiguration_delete" => {
+                let configuration = self
+                    .configurations
+                    .iter_mut()
+                    .find(|configuration| configuration.handle == cpu.reg(0))
+                    .filter(|configuration| configuration.alive)
+                    .ok_or_else(|| {
+                        HleError::Abort(format!(
+                            "AConfiguration_delete received invalid handle {:#010x}",
+                            cpu.reg(0)
+                        ))
+                    })?;
+                configuration.alive = false;
+                Ok(self.return32(cpu, 0))
+            }
+            _ => Err(HleError::UnimplementedSymbol(name.to_string())),
         }
+    }
+
+    fn require_android_configuration(
+        &self,
+        operation: &str,
+        handle: u32,
+    ) -> Result<&AndroidConfiguration, HleError> {
+        self.configurations
+            .iter()
+            .find(|configuration| configuration.handle == handle && configuration.alive)
+            .ok_or_else(|| {
+                HleError::Abort(format!(
+                    "{operation} received invalid configuration handle {handle:#010x}"
+                ))
+            })
+    }
+
+    fn require_android_configuration_mut(
+        &mut self,
+        operation: &str,
+        handle: u32,
+    ) -> Result<&mut AndroidConfiguration, HleError> {
+        self.configurations
+            .iter_mut()
+            .find(|configuration| configuration.handle == handle && configuration.alive)
+            .ok_or_else(|| {
+                HleError::Abort(format!(
+                    "{operation} received invalid configuration handle {handle:#010x}"
+                ))
+            })
     }
 
     fn android_asset<M: Memory>(
@@ -5922,7 +8005,7 @@ impl HleRuntime {
                 }
                 Ok(self.return32(cpu, 0))
             }
-            _ => self.dispatch_stub(name, HleCallBehavior::ReturnZero, cpu, memory),
+            _ => Err(HleError::UnimplementedSymbol(name.to_string())),
         }
     }
 
@@ -5947,107 +8030,19 @@ impl HleRuntime {
         read_zip_entry(apk_path, entry_name).map_err(|err| err.to_string())
     }
 
-    fn load_texture_for_resource(
-        &mut self,
-        location: &ResourceLocationDebug,
-    ) -> Option<DecodedTexture> {
-        let mut candidates = Vec::new();
-        if let Some(alias) = self.resource_texture_alias(&location.path) {
-            for entry_name in texture_alias_entry_candidates(&alias) {
-                push_unique_string(&mut candidates, entry_name);
-            }
-        }
-        for entry_name in texture_asset_entry_candidates(location) {
-            push_unique_string(&mut candidates, entry_name);
-        }
-
-        for entry_name in candidates {
-            let bytes = match self.read_apk_asset_entry(&entry_name) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    trace_mcpe_resource(format_args!(
-                        "texture asset miss location={:?} entry={entry_name:?}: {err}",
-                        resource_location_key(location)
-                    ));
-                    continue;
-                }
-            };
-            match decode_image_rgba(&entry_name, &bytes, ImageFormat::Any) {
-                Ok(mut texture) => {
-                    texture.source = entry_name;
-                    return Some(texture);
-                }
-                Err(err) => {
-                    trace_mcpe_resource(format_args!(
-                        "texture asset decode failed location={:?} entry={entry_name:?}: {err}",
-                        resource_location_key(location)
-                    ));
-                }
-            }
-        }
-        None
-    }
-
-    fn resource_texture_alias(&mut self, key: &str) -> Option<String> {
-        if key == "atlas.terrain" {
-            return Some("assets/images/terrain-atlas_mip3.tga".to_string());
-        }
-        self.resource_texture_aliases()
-            .iter()
-            .find_map(|(alias_key, path)| (alias_key == key).then(|| path.clone()))
-    }
-
-    fn resource_texture_aliases(&mut self) -> &[(String, String)] {
-        if self.resource_texture_aliases.is_none() {
-            self.resource_texture_aliases = Some(self.load_resource_texture_aliases());
-        }
-        self.resource_texture_aliases.as_deref().unwrap_or(&[])
-    }
-
-    fn load_resource_texture_aliases(&mut self) -> Vec<(String, String)> {
-        let entry_name = "assets/resourcepacks/vanilla/resources.json";
-        let bytes = match self.read_apk_asset_entry(entry_name) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                trace_mcpe_resource(format_args!(
-                    "resource texture alias miss {entry_name:?}: {err}"
-                ));
-                return Vec::new();
-            }
-        };
-        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(value) => value,
-            Err(err) => {
-                trace_mcpe_resource(format_args!(
-                    "resource texture alias decode failed {entry_name:?}: {err}"
-                ));
-                return Vec::new();
-            }
-        };
-        let Some(textures) = value
-            .get("resources")
-            .and_then(|resources| resources.get("textures"))
-            .and_then(serde_json::Value::as_object)
-        else {
-            return Vec::new();
-        };
-        let mut aliases = Vec::with_capacity(textures.len());
-        for (key, path) in textures {
-            if let Some(path) = path.as_str() {
-                aliases.push((key.clone(), path.to_string()));
-            }
-        }
-        aliases.sort_by(|left, right| left.0.cmp(&right.0));
-        aliases
-    }
-
-    fn load_image_texture_for_path(
-        &mut self,
-        path: &str,
-        format: ImageFormat,
-    ) -> Result<DecodedTexture, String> {
+    fn load_image_texture_for_path(&mut self, path: &str) -> Result<DecodedTexture, String> {
         let mut failures = Vec::new();
-        for entry_name in image_asset_entry_candidates(path, format) {
+        let normalized = normalize_virtual_path(path);
+        if let Some(index) = self.virtual_file_index(&normalized) {
+            match decode_image_rgba(&normalized, &self.virtual_files[index].data) {
+                Ok(mut texture) => {
+                    texture.source = normalized;
+                    return Ok(texture);
+                }
+                Err(err) => failures.push(format!("virtual file {path}: {err}")),
+            }
+        }
+        for entry_name in image_asset_entry_candidates(path) {
             let bytes = match self.read_apk_asset_entry(&entry_name) {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -6055,7 +8050,7 @@ impl HleRuntime {
                     continue;
                 }
             };
-            match decode_image_rgba(&entry_name, &bytes, format) {
+            match decode_image_rgba(&entry_name, &bytes) {
                 Ok(mut texture) => {
                     texture.source = entry_name;
                     return Ok(texture);
@@ -6080,71 +8075,472 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         match name {
-            "eglGetDisplay" => Ok(self.return32(cpu, EGL_DISPLAY_HANDLE)),
-            "eglCreateContext" => Ok(self.return32(cpu, EGL_CONTEXT_HANDLE)),
-            "eglCreateWindowSurface" | "eglCreatePbufferSurface" => {
-                Ok(self.return32(cpu, EGL_SURFACE_HANDLE))
+            "eglGetDisplay" => {
+                if cpu.reg(0) != 0 {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                self.egl_state.display_obtained = true;
+                Ok(self.return32(cpu, EGL_DISPLAY_HANDLE))
             }
             "eglInitialize" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), false) {
+                    return self.egl_fail(cpu, error);
+                }
                 if cpu.reg(1) != 0 {
                     store32(memory, cpu.reg(1), 1)?;
                 }
                 if cpu.reg(2) != 0 {
                     store32(memory, cpu.reg(2), 4)?;
                 }
+                self.egl_state.initialized = true;
                 Ok(self.return32(cpu, 1))
             }
             "eglChooseConfig" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                let Some(attributes) = read_egl_attrib_list(memory, cpu.reg(1))? else {
+                    return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                };
+                let matches = match egl_config_matches(&attributes) {
+                    Ok(matches) => matches,
+                    Err(error) => return self.egl_fail(cpu, error),
+                };
                 let configs = cpu.reg(2);
-                let config_size = cpu.reg(3);
-                let num_config_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
-                if configs != 0 && config_size != 0 {
+                let config_size = cpu.reg(3) as i32;
+                let num_config_ptr = load32(memory, cpu.reg(13))?;
+                if num_config_ptr == 0 || config_size < 0 {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                if matches && configs != 0 && config_size > 0 {
                     store32(memory, configs, EGL_CONFIG_HANDLE)?;
                 }
-                if num_config_ptr != 0 {
-                    store32(memory, num_config_ptr, 1)?;
-                }
+                store32(memory, num_config_ptr, u32::from(matches))?;
                 Ok(self.return32(cpu, 1))
             }
             "eglGetConfigAttrib" => {
-                let attr = cpu.reg(2);
-                let value_ptr = cpu.reg(3);
-                if value_ptr != 0 {
-                    store32(memory, value_ptr, egl_config_attrib(attr))?;
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
                 }
+                if cpu.reg(1) != EGL_CONFIG_HANDLE {
+                    return self.egl_fail(cpu, EGL_BAD_CONFIG);
+                }
+                let value_ptr = cpu.reg(3);
+                if value_ptr == 0 {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                let Some(value) = egl_config_attrib(cpu.reg(2)) else {
+                    return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                };
+                store32(memory, value_ptr, value)?;
                 Ok(self.return32(cpu, 1))
             }
-            "eglQuerySurface" => {
-                let attr = cpu.reg(2);
-                let value_ptr = cpu.reg(3);
-                if value_ptr != 0 {
-                    store32(memory, value_ptr, egl_surface_attrib(attr))?;
+            "eglCreateContext" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
                 }
+                if cpu.reg(1) != EGL_CONFIG_HANDLE {
+                    return self.egl_fail(cpu, EGL_BAD_CONFIG);
+                }
+                let share_context = cpu.reg(2);
+                if share_context != 0
+                    && (share_context != EGL_CONTEXT_HANDLE
+                        || !self.egl_state.context_alive
+                        || self.egl_state.context_destroy_pending)
+                {
+                    return self.egl_fail(cpu, EGL_BAD_CONTEXT);
+                }
+                if self.egl_state.bound_api != EGL_OPENGL_ES_API {
+                    return self.egl_fail(cpu, EGL_BAD_MATCH);
+                }
+                if self.egl_state.context_alive {
+                    return self.egl_fail(cpu, EGL_BAD_ALLOC);
+                }
+                let Some(attributes) = read_egl_attrib_list(memory, cpu.reg(3))? else {
+                    return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                };
+                let mut version = 1;
+                for &(attribute, value) in &attributes {
+                    if attribute != EGL_CONTEXT_CLIENT_VERSION || !matches!(value, 1 | 2) {
+                        return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                    }
+                    version = value;
+                }
+                self.egl_state.context_alive = true;
+                self.egl_state.context_destroy_pending = false;
+                self.egl_state.context_client_version = version;
+                Ok(self.return32(cpu, EGL_CONTEXT_HANDLE))
+            }
+            "eglCreateWindowSurface" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_CONFIG_HANDLE {
+                    return self.egl_fail(cpu, EGL_BAD_CONFIG);
+                }
+                let native_window = cpu.reg(2);
+                let Some(window) = self.native_window else {
+                    return self.egl_fail(cpu, EGL_BAD_NATIVE_WINDOW);
+                };
+                if native_window == 0 || native_window != window.handle {
+                    return self.egl_fail(cpu, EGL_BAD_NATIVE_WINDOW);
+                }
+                if self.egl_state.surface_alive {
+                    return self.egl_fail(cpu, EGL_BAD_ALLOC);
+                }
+                let Some(attributes) = read_egl_attrib_list(memory, cpu.reg(3))? else {
+                    return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                };
+                for &(attribute, value) in &attributes {
+                    if attribute != EGL_RENDER_BUFFER || value != EGL_BACK_BUFFER {
+                        return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                    }
+                }
+                self.egl_state.surface_alive = true;
+                self.egl_state.surface_destroy_pending = false;
+                self.egl_state.surface_width = window.width;
+                self.egl_state.surface_height = window.height;
+                Ok(self.return32(cpu, EGL_SURFACE_HANDLE))
+            }
+            "eglCreatePbufferSurface" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_CONFIG_HANDLE {
+                    return self.egl_fail(cpu, EGL_BAD_CONFIG);
+                }
+                if self.egl_state.surface_alive {
+                    return self.egl_fail(cpu, EGL_BAD_ALLOC);
+                }
+                let Some(attributes) = read_egl_attrib_list(memory, cpu.reg(2))? else {
+                    return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                };
+                let mut width = 0;
+                let mut height = 0;
+                for &(attribute, value) in &attributes {
+                    if (value as i32) < 0 {
+                        return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                    }
+                    match attribute {
+                        EGL_WIDTH => width = value,
+                        EGL_HEIGHT => height = value,
+                        _ => return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE),
+                    }
+                }
+                if width > EGL_DEFAULT_SURFACE_WIDTH
+                    || height > EGL_DEFAULT_SURFACE_HEIGHT
+                    || width.checked_mul(height).is_none_or(|pixels| {
+                        pixels > EGL_DEFAULT_SURFACE_WIDTH * EGL_DEFAULT_SURFACE_HEIGHT
+                    })
+                {
+                    return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE);
+                }
+                self.egl_state.surface_alive = true;
+                self.egl_state.surface_destroy_pending = false;
+                self.egl_state.surface_width = width;
+                self.egl_state.surface_height = height;
+                Ok(self.return32(cpu, EGL_SURFACE_HANDLE))
+            }
+            "eglQuerySurface" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_SURFACE_HANDLE || !self.egl_state.surface_alive {
+                    return self.egl_fail(cpu, EGL_BAD_SURFACE);
+                }
+                let value_ptr = cpu.reg(3);
+                if value_ptr == 0 {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                let value = match cpu.reg(2) {
+                    EGL_WIDTH => self.egl_state.surface_width,
+                    EGL_HEIGHT => self.egl_state.surface_height,
+                    EGL_CONFIG_ID => EGL_CONFIG_ID_VALUE,
+                    EGL_RENDER_BUFFER => EGL_BACK_BUFFER,
+                    EGL_SWAP_BEHAVIOR => EGL_BUFFER_DESTROYED,
+                    _ => return self.egl_fail(cpu, EGL_BAD_ATTRIBUTE),
+                };
+                store32(memory, value_ptr, value)?;
                 Ok(self.return32(cpu, 1))
             }
             "eglQueryString" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
                 let Some(value) = egl_query_string(cpu.reg(1)) else {
-                    return Ok(self.return32(cpu, 0));
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
                 };
                 let ptr = self.alloc_c_string(memory, value)?;
                 Ok(self.return32(cpu, ptr))
             }
-            "eglGetCurrentDisplay" => Ok(self.return32(cpu, EGL_DISPLAY_HANDLE)),
-            "eglGetCurrentContext" => Ok(self.return32(cpu, EGL_CONTEXT_HANDLE)),
-            "eglGetCurrentSurface" => Ok(self.return32(cpu, EGL_SURFACE_HANDLE)),
-            "eglGetError" => Ok(self.return32(cpu, EGL_SUCCESS)),
+            "eglGetCurrentDisplay" => {
+                let display = if self.egl_state.current_thread == Some(self.current_pthread) {
+                    EGL_DISPLAY_HANDLE
+                } else {
+                    0
+                };
+                Ok(self.return32(cpu, display))
+            }
+            "eglGetCurrentContext" => {
+                let context = if self.egl_state.current_thread == Some(self.current_pthread) {
+                    self.egl_state.current_context
+                } else {
+                    0
+                };
+                Ok(self.return32(cpu, context))
+            }
+            "eglGetCurrentSurface" => {
+                let surface = match cpu.reg(0) {
+                    EGL_DRAW if self.egl_state.current_thread == Some(self.current_pthread) => {
+                        self.egl_state.current_draw
+                    }
+                    EGL_READ if self.egl_state.current_thread == Some(self.current_pthread) => {
+                        self.egl_state.current_read
+                    }
+                    EGL_DRAW | EGL_READ => 0,
+                    _ => return self.egl_fail(cpu, EGL_BAD_PARAMETER),
+                };
+                Ok(self.return32(cpu, surface))
+            }
+            "eglGetError" => {
+                let error = self.egl_take_error();
+                Ok(self.return32(cpu, error))
+            }
             "eglGetProcAddress" => Ok(self.return32(cpu, 0)),
             "eglSwapBuffers" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_SURFACE_HANDLE || !self.egl_state.surface_alive {
+                    return self.egl_fail(cpu, EGL_BAD_SURFACE);
+                }
+                if self.egl_state.current_thread != Some(self.current_pthread)
+                    || self.egl_state.current_context != EGL_CONTEXT_HANDLE
+                    || self.egl_state.current_draw != EGL_SURFACE_HANDLE
+                {
+                    return self.egl_fail(cpu, EGL_BAD_CURRENT_SURFACE);
+                }
                 self.push_gles_event(GlesEvent::SwapBuffers {
                     display: cpu.reg(0),
                     surface: cpu.reg(1),
                 });
                 Ok(self.return32(cpu, 1))
             }
-            "eglBindAPI" | "eglMakeCurrent" | "eglSwapInterval" | "eglDestroySurface"
-            | "eglDestroyContext" | "eglTerminate" | "eglReleaseThread" | "eglSurfaceAttrib"
-            | "eglWaitGL" | "eglWaitNative" => Ok(self.return32(cpu, 1)),
-            _ => Ok(self.return32(cpu, 1)),
+            "eglBindAPI" => {
+                if cpu.reg(0) != EGL_OPENGL_ES_API {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                self.egl_state.bound_api = EGL_OPENGL_ES_API;
+                Ok(self.return32(cpu, 1))
+            }
+            "eglMakeCurrent" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                let draw = cpu.reg(1);
+                let read = cpu.reg(2);
+                let context = cpu.reg(3);
+                if context == 0 {
+                    if draw != 0 || read != 0 {
+                        return self.egl_fail(cpu, EGL_BAD_MATCH);
+                    }
+                    self.egl_release_current_thread();
+                    return Ok(self.return32(cpu, 1));
+                }
+                if context != EGL_CONTEXT_HANDLE
+                    || !self.egl_state.context_alive
+                    || self.egl_state.context_destroy_pending
+                {
+                    return self.egl_fail(cpu, EGL_BAD_CONTEXT);
+                }
+                if draw != EGL_SURFACE_HANDLE
+                    || read != EGL_SURFACE_HANDLE
+                    || !self.egl_state.surface_alive
+                    || self.egl_state.surface_destroy_pending
+                {
+                    return self.egl_fail(cpu, EGL_BAD_SURFACE);
+                }
+                if self
+                    .egl_state
+                    .current_thread
+                    .is_some_and(|thread| thread != self.current_pthread)
+                {
+                    return self.egl_fail(cpu, EGL_BAD_ACCESS);
+                }
+                self.egl_state.current_thread = Some(self.current_pthread);
+                self.egl_state.current_draw = draw;
+                self.egl_state.current_read = read;
+                self.egl_state.current_context = context;
+                Ok(self.return32(cpu, 1))
+            }
+            "eglSwapInterval" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if self.egl_state.current_thread != Some(self.current_pthread) {
+                    return self.egl_fail(cpu, EGL_BAD_CONTEXT);
+                }
+                let interval = cpu.reg(1) as i32;
+                if interval != 1 {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                self.egl_state.swap_interval = interval;
+                Ok(self.return32(cpu, 1))
+            }
+            "eglDestroySurface" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_SURFACE_HANDLE
+                    || !self.egl_state.surface_alive
+                    || self.egl_state.surface_destroy_pending
+                {
+                    return self.egl_fail(cpu, EGL_BAD_SURFACE);
+                }
+                if self.egl_state.current_draw == EGL_SURFACE_HANDLE
+                    || self.egl_state.current_read == EGL_SURFACE_HANDLE
+                {
+                    self.egl_state.surface_destroy_pending = true;
+                } else {
+                    self.egl_state.surface_alive = false;
+                }
+                Ok(self.return32(cpu, 1))
+            }
+            "eglDestroyContext" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_CONTEXT_HANDLE
+                    || !self.egl_state.context_alive
+                    || self.egl_state.context_destroy_pending
+                {
+                    return self.egl_fail(cpu, EGL_BAD_CONTEXT);
+                }
+                if self.egl_state.current_context == EGL_CONTEXT_HANDLE {
+                    self.egl_state.context_destroy_pending = true;
+                } else {
+                    self.egl_state.context_alive = false;
+                }
+                Ok(self.return32(cpu, 1))
+            }
+            "eglTerminate" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), false) {
+                    return self.egl_fail(cpu, error);
+                }
+                self.egl_state.initialized = false;
+                self.egl_state.context_alive = false;
+                self.egl_state.context_destroy_pending = false;
+                self.egl_state.surface_alive = false;
+                self.egl_state.surface_destroy_pending = false;
+                self.egl_clear_current();
+                Ok(self.return32(cpu, 1))
+            }
+            "eglReleaseThread" => {
+                self.egl_release_current_thread();
+                self.egl_state
+                    .thread_errors
+                    .retain(|entry| entry.thread != self.current_pthread);
+                Ok(self.return32(cpu, 1))
+            }
+            "eglSurfaceAttrib" => {
+                if let Some(error) = self.egl_display_error(cpu.reg(0), true) {
+                    return self.egl_fail(cpu, error);
+                }
+                if cpu.reg(1) != EGL_SURFACE_HANDLE || !self.egl_state.surface_alive {
+                    return self.egl_fail(cpu, EGL_BAD_SURFACE);
+                }
+                if cpu.reg(2) == EGL_SWAP_BEHAVIOR && cpu.reg(3) == EGL_BUFFER_DESTROYED {
+                    return Ok(self.return32(cpu, 1));
+                }
+                if cpu.reg(2) == EGL_SWAP_BEHAVIOR {
+                    return self.egl_fail(cpu, EGL_BAD_MATCH);
+                }
+                self.egl_fail(cpu, EGL_BAD_ATTRIBUTE)
+            }
+            "eglWaitGL" => {
+                if self.egl_state.current_thread != Some(self.current_pthread) {
+                    return self.egl_fail(cpu, EGL_BAD_CONTEXT);
+                }
+                Ok(self.return32(cpu, 1))
+            }
+            "eglWaitNative" => {
+                if cpu.reg(0) != EGL_CORE_NATIVE_ENGINE {
+                    return self.egl_fail(cpu, EGL_BAD_PARAMETER);
+                }
+                if self.egl_state.current_thread != Some(self.current_pthread) {
+                    return self.egl_fail(cpu, EGL_BAD_CONTEXT);
+                }
+                Ok(self.return32(cpu, 1))
+            }
+            _ => Err(HleError::UnimplementedSymbol(name.to_string())),
+        }
+    }
+
+    fn egl_display_error(&self, display: u32, require_initialized: bool) -> Option<u32> {
+        if display != EGL_DISPLAY_HANDLE || !self.egl_state.display_obtained {
+            Some(EGL_BAD_DISPLAY)
+        } else if require_initialized && !self.egl_state.initialized {
+            Some(EGL_NOT_INITIALIZED)
+        } else {
+            None
+        }
+    }
+
+    fn egl_fail(&mut self, cpu: &mut Cpu, error: u32) -> Result<(), HleError> {
+        self.egl_set_error(error);
+        self.return32(cpu, 0);
+        Ok(())
+    }
+
+    fn egl_set_error(&mut self, error: u32) {
+        if let Some(entry) = self
+            .egl_state
+            .thread_errors
+            .iter_mut()
+            .find(|entry| entry.thread == self.current_pthread)
+        {
+            if entry.error == EGL_SUCCESS {
+                entry.error = error;
+            }
+        } else {
+            self.egl_state.thread_errors.push(EglThreadError {
+                thread: self.current_pthread,
+                error,
+            });
+        }
+    }
+
+    fn egl_take_error(&mut self) -> u32 {
+        let Some(index) = self
+            .egl_state
+            .thread_errors
+            .iter()
+            .position(|entry| entry.thread == self.current_pthread)
+        else {
+            return EGL_SUCCESS;
+        };
+        self.egl_state.thread_errors.swap_remove(index).error
+    }
+
+    fn egl_clear_current(&mut self) {
+        self.egl_state.current_thread = None;
+        self.egl_state.current_draw = 0;
+        self.egl_state.current_read = 0;
+        self.egl_state.current_context = 0;
+    }
+
+    fn egl_release_current_thread(&mut self) {
+        if self.egl_state.current_thread != Some(self.current_pthread) {
+            return;
+        }
+        self.egl_clear_current();
+        if self.egl_state.context_destroy_pending {
+            self.egl_state.context_destroy_pending = false;
+            self.egl_state.context_alive = false;
+        }
+        if self.egl_state.surface_destroy_pending {
+            self.egl_state.surface_destroy_pending = false;
+            self.egl_state.surface_alive = false;
         }
     }
 
@@ -6154,6 +8550,15 @@ impl HleRuntime {
         cpu: &mut Cpu,
         memory: &mut M,
     ) -> Result<(), HleError> {
+        if name != "glGetError" && !self.gles_context_current() {
+            self.gl_set_error(GL_INVALID_OPERATION);
+            let value = if matches!(name, "glGetAttribLocation" | "glGetUniformLocation") {
+                u32::MAX
+            } else {
+                0
+            };
+            return Ok(self.return32(cpu, value));
+        }
         match name {
             "glCreateProgram" => {
                 let value = self.alloc_gl_name();
@@ -6162,17 +8567,27 @@ impl HleRuntime {
                     shaders: Vec::new(),
                     uniforms: Vec::new(),
                     attributes: Vec::new(),
+                    linked: false,
+                    info_log: String::new(),
+                    delete_pending: false,
                 });
                 self.push_gles_event(GlesEvent::CreateProgram { program: value });
                 Ok(self.return32(cpu, value))
             }
             "glCreateShader" => {
-                let value = self.alloc_gl_name();
                 let shader_type = cpu.reg(0);
+                if !matches!(shader_type, GL_VERTEX_SHADER | GL_FRAGMENT_SHADER) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let value = self.alloc_gl_name();
                 self.gl_shaders.push(GlShader {
                     name: value,
                     shader_type,
                     source: String::new(),
+                    compiled: false,
+                    info_log: String::new(),
+                    delete_pending: false,
                 });
                 self.push_gles_event(GlesEvent::CreateShader {
                     shader: value,
@@ -6181,28 +8596,63 @@ impl HleRuntime {
                 Ok(self.return32(cpu, value))
             }
             "glShaderSource" => self.gl_shader_source(cpu, memory),
+            "glCompileShader" => self.gl_compile_shader(cpu),
+            "glReleaseShaderCompiler" => Ok(self.return32(cpu, 0)),
             "glAttachShader" => {
                 let program = cpu.reg(0);
                 let shader = cpu.reg(1);
-                if let Some(program) = self
+                if !self.gl_programs.iter().any(|item| item.name == program)
+                    || !self.gl_shaders.iter().any(|item| item.name == shader)
+                {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let program_state = self
                     .gl_programs
                     .iter_mut()
                     .find(|item| item.name == program)
-                {
-                    if !program.shaders.contains(&shader) {
-                        program.shaders.push(shader);
-                    }
+                    .expect("validated above");
+                if program_state.shaders.contains(&shader) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
                 }
+                program_state.shaders.push(shader);
+                program_state.linked = false;
                 self.push_gles_event(GlesEvent::AttachShader { program, shader });
+                Ok(self.return32(cpu, 0))
+            }
+            "glDeleteShader" => {
+                let shader = cpu.reg(0);
+                if shader == 0 {
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(state) = self
+                    .gl_shaders
+                    .iter_mut()
+                    .find(|state| state.name == shader)
+                else {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                };
+                state.delete_pending = true;
+                self.push_gles_event(GlesEvent::DeleteShader { shader });
                 Ok(self.return32(cpu, 0))
             }
             "glLinkProgram" => {
                 let program_name = cpu.reg(0);
+                if !self
+                    .gl_programs
+                    .iter()
+                    .any(|program| program.name == program_name)
+                {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.gl_link_program(program_name);
                 if let Some((uniforms, attributes)) = self
                     .gl_programs
                     .iter()
-                    .find(|program| program.name == program_name)
+                    .find(|program| program.name == program_name && program.linked)
                     .map(|program| (program.uniforms.clone(), program.attributes.clone()))
                 {
                     self.push_gles_event(GlesEvent::LinkProgram {
@@ -6213,10 +8663,36 @@ impl HleRuntime {
                 }
                 Ok(self.return32(cpu, 0))
             }
-            "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
-                self.gl_gen_names(cpu, memory)
+            "glDeleteProgram" => {
+                let program = cpu.reg(0);
+                if program == 0 {
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(state) = self
+                    .gl_programs
+                    .iter_mut()
+                    .find(|state| state.name == program)
+                else {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                };
+                state.delete_pending = true;
+                self.push_gles_event(GlesEvent::DeleteProgram { program });
+                Ok(self.return32(cpu, 0))
             }
+            "glGenBuffers" => self.gl_gen_names(cpu, memory, GlNameKind::Buffer),
+            "glGenFramebuffers" => self.gl_gen_names(cpu, memory, GlNameKind::Framebuffer),
+            "glGenRenderbuffers" => self.gl_gen_names(cpu, memory, GlNameKind::Renderbuffer),
+            "glGenTextures" => self.gl_gen_textures(cpu, memory),
+            "glDeleteBuffers" => self.gl_delete_buffers(cpu, memory),
+            "glDeleteFramebuffers" => self.gl_delete_framebuffers(cpu, memory),
+            "glDeleteRenderbuffers" => self.gl_delete_renderbuffers(cpu, memory),
+            "glDeleteTextures" => self.gl_delete_textures(cpu, memory),
             "glActiveTexture" => {
+                if !(GL_TEXTURE0..GL_TEXTURE0 + 8).contains(&cpu.reg(0)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.gl_active_texture = cpu.reg(0);
                 self.push_gles_event(GlesEvent::ActiveTexture {
                     texture: cpu.reg(0),
@@ -6224,10 +8700,9 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBindBuffer" => {
-                match cpu.reg(0) {
-                    GL_ARRAY_BUFFER => self.gl_bound_array_buffer = cpu.reg(1),
-                    GL_ELEMENT_ARRAY_BUFFER => self.gl_bound_element_array_buffer = cpu.reg(1),
-                    _ => {}
+                if !matches!(cpu.reg(0), GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
                 }
                 if cpu.reg(1) != 0
                     && !self
@@ -6235,10 +8710,13 @@ impl HleRuntime {
                         .iter()
                         .any(|buffer| buffer.name == cpu.reg(1))
                 {
-                    self.gl_buffers.push(GuestGlBuffer {
-                        name: cpu.reg(1),
-                        data: Vec::new(),
-                    });
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                match cpu.reg(0) {
+                    GL_ARRAY_BUFFER => self.gl_bound_array_buffer = cpu.reg(1),
+                    GL_ELEMENT_ARRAY_BUFFER => self.gl_bound_element_array_buffer = cpu.reg(1),
+                    _ => {}
                 }
                 self.push_gles_event(GlesEvent::BindBuffer {
                     target: cpu.reg(0),
@@ -6248,8 +8726,31 @@ impl HleRuntime {
             }
             "glBufferData" => {
                 let usage = cpu.reg(3);
-                let payload = gles_u32_len(cpu.reg(1))
-                    .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
+                let size = cpu.reg(1) as i32;
+                if !matches!(cpu.reg(0), GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER)
+                    || !matches!(usage, GL_STREAM_DRAW | GL_STATIC_DRAW | GL_DYNAMIC_DRAW)
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if size < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if self.bound_guest_buffer(cpu.reg(0)) == 0 {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let len = size as usize;
+                if len > GLES_EVENT_PAYLOAD_LIMIT {
+                    self.gl_set_error(GL_OUT_OF_MEMORY);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let payload = if cpu.reg(2) == 0 {
+                    None
+                } else {
+                    Some(load_bytes(memory, cpu.reg(2), len as u32)?)
+                };
                 trace_gles_buffer_upload(
                     "glBufferData",
                     cpu.reg(0),
@@ -6269,8 +8770,40 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBufferSubData" => {
-                let payload = gles_u32_len(cpu.reg(2))
-                    .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
+                let offset = cpu.reg(1) as i32;
+                let size = cpu.reg(2) as i32;
+                if !matches!(cpu.reg(0), GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if offset < 0 || size < 0 || (size > 0 && cpu.reg(3) == 0) {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let buffer = self.bound_guest_buffer(cpu.reg(0));
+                if buffer == 0 {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let valid_range = self
+                    .gl_buffers
+                    .iter()
+                    .find(|candidate| candidate.name == buffer)
+                    .and_then(|buffer| {
+                        (offset as usize)
+                            .checked_add(size as usize)
+                            .map(|end| end <= buffer.data.len())
+                    })
+                    .unwrap_or(false);
+                if !valid_range {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let payload = if size == 0 {
+                    Some(Vec::new())
+                } else {
+                    Some(load_bytes(memory, cpu.reg(3), size as u32)?)
+                };
                 trace_gles_buffer_upload(
                     "glBufferSubData",
                     cpu.reg(0),
@@ -6295,6 +8828,17 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBindTexture" => {
+                if cpu.reg(0) != GL_TEXTURE_2D {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(1) != 0 && !self.gl_textures.contains(&cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(1) != 0 && !self.gl_texture_bound_once.contains(&cpu.reg(1)) {
+                    self.gl_texture_bound_once.push(cpu.reg(1));
+                }
                 self.bind_guest_texture(cpu.reg(0), cpu.reg(1));
                 self.push_gles_event(GlesEvent::BindTexture {
                     target: cpu.reg(0),
@@ -6303,6 +8847,15 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBindFramebuffer" => {
+                if cpu.reg(0) != GL_FRAMEBUFFER {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(1) != 0 && !self.gl_framebuffers.contains(&cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                self.gl_bound_framebuffer = cpu.reg(1);
                 self.push_gles_event(GlesEvent::BindFramebuffer {
                     target: cpu.reg(0),
                     framebuffer: cpu.reg(1),
@@ -6310,6 +8863,15 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBindRenderbuffer" => {
+                if cpu.reg(0) != GL_RENDERBUFFER {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(1) != 0 && !self.gl_renderbuffers.contains(&cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                self.gl_bound_renderbuffer = cpu.reg(1);
                 self.push_gles_event(GlesEvent::BindRenderbuffer {
                     target: cpu.reg(0),
                     renderbuffer: cpu.reg(1),
@@ -6318,6 +8880,32 @@ impl HleRuntime {
             }
             "glFramebufferTexture2D" => {
                 let level = self.stack_arg(cpu, memory, 4)? as i32;
+                if cpu.reg(0) != GL_FRAMEBUFFER
+                    || !is_gl_framebuffer_attachment(cpu.reg(1))
+                    || cpu.reg(2) != GL_TEXTURE_2D
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if level < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if self.gl_bound_framebuffer == 0 {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(3) != 0 && !self.gl_texture_bound_once.contains(&cpu.reg(3)) {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                self.set_gl_framebuffer_attachment(
+                    cpu.reg(1),
+                    (cpu.reg(3) != 0).then_some(GuestGlAttachmentObject::Texture {
+                        texture: cpu.reg(3),
+                        level,
+                    }),
+                );
                 self.push_gles_event(GlesEvent::FramebufferTexture2D {
                     target: cpu.reg(0),
                     attachment: cpu.reg(1),
@@ -6328,6 +8916,27 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glFramebufferRenderbuffer" => {
+                if cpu.reg(0) != GL_FRAMEBUFFER
+                    || !is_gl_framebuffer_attachment(cpu.reg(1))
+                    || cpu.reg(2) != GL_RENDERBUFFER
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if self.gl_bound_framebuffer == 0 {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(3) != 0 && !self.gl_renderbuffers.contains(&cpu.reg(3)) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                self.set_gl_framebuffer_attachment(
+                    cpu.reg(1),
+                    (cpu.reg(3) != 0).then_some(GuestGlAttachmentObject::Renderbuffer {
+                        renderbuffer: cpu.reg(3),
+                    }),
+                );
                 self.push_gles_event(GlesEvent::FramebufferRenderbuffer {
                     target: cpu.reg(0),
                     attachment: cpu.reg(1),
@@ -6337,15 +8946,39 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glRenderbufferStorage" => {
+                if cpu.reg(0) != GL_RENDERBUFFER || !is_gl_renderbuffer_format(cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let width = cpu.reg(2) as i32;
+                let height = cpu.reg(3) as i32;
+                if width < 0 || height < 0 || width > 4096 || height > 4096 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if self.gl_bound_renderbuffer == 0 {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                self.set_gl_renderbuffer_storage(width, height);
                 self.push_gles_event(GlesEvent::RenderbufferStorage {
                     target: cpu.reg(0),
                     internal_format: cpu.reg(1),
-                    width: cpu.reg(2) as i32,
-                    height: cpu.reg(3) as i32,
+                    width,
+                    height,
                 });
                 Ok(self.return32(cpu, 0))
             }
             "glTexParameteri" => {
+                if cpu.reg(0) != GL_TEXTURE_2D {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !is_gl_texture_parameter_value(cpu.reg(1), cpu.reg(2)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                self.set_gl_texture_parameter(cpu.reg(1), cpu.reg(2));
                 self.push_gles_event(GlesEvent::TexParameteri {
                     target: cpu.reg(0),
                     name: cpu.reg(1),
@@ -6359,16 +8992,53 @@ impl HleRuntime {
                 let ty = self.stack_arg(cpu, memory, 7)?;
                 let pixels = self.stack_arg(cpu, memory, 8)?;
                 let height = self.stack_arg(cpu, memory, 4)? as i32;
-                let payload = gles_image_payload_len(cpu.reg(3) as i32, height, format, ty)
-                    .and_then(|len| gles_copy_payload(memory, pixels, len));
+                let level = cpu.reg(1) as i32;
+                let width = cpu.reg(3) as i32;
+                if cpu.reg(0) != GL_TEXTURE_2D
+                    || !is_gl_texture_format(format)
+                    || !is_gl_texture_type_for_format(format, ty)
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if level < 0
+                    || width < 0
+                    || height < 0
+                    || width > 4096
+                    || height > 4096
+                    || border != 0
+                    || (cpu.reg(2) != format && !(cpu.reg(2) == GL_RGBA && format == GL_BGRA_EXT))
+                {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(payload_len) = gles_image_payload_len(width, height, format, ty) else {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                };
+                if payload_len > GLES_EVENT_PAYLOAD_LIMIT {
+                    self.gl_set_error(GL_OUT_OF_MEMORY);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let payload = if pixels == 0 {
+                    None
+                } else {
+                    Some(load_bytes(memory, pixels, payload_len as u32)?)
+                };
+                self.set_gl_texture_image(
+                    self.bound_guest_texture(GL_TEXTURE_2D),
+                    level,
+                    width,
+                    height,
+                );
                 self.maybe_dump_gles_texture_upload(GlesTextureUploadDump {
                     kind: "teximage2d",
                     texture: self.bound_guest_texture(cpu.reg(0)),
                     target: cpu.reg(0),
-                    level: cpu.reg(1) as i32,
+                    level,
                     xoffset: 0,
                     yoffset: 0,
-                    width: cpu.reg(3) as i32,
+                    width,
                     height,
                     format,
                     ty,
@@ -6377,9 +9047,9 @@ impl HleRuntime {
                 });
                 self.push_gles_event(GlesEvent::TexImage2D {
                     target: cpu.reg(0),
-                    level: cpu.reg(1) as i32,
+                    level,
                     internal_format: cpu.reg(2) as i32,
-                    width: cpu.reg(3) as i32,
+                    width,
                     height,
                     border: border as i32,
                     format,
@@ -6395,17 +9065,61 @@ impl HleRuntime {
                 let format = self.stack_arg(cpu, memory, 6)?;
                 let ty = self.stack_arg(cpu, memory, 7)?;
                 let pixels = self.stack_arg(cpu, memory, 8)?;
-                let payload = gles_image_payload_len(width as i32, height as i32, format, ty)
-                    .and_then(|len| gles_copy_payload(memory, pixels, len));
+                let level = cpu.reg(1) as i32;
+                let xoffset = cpu.reg(2) as i32;
+                let yoffset = cpu.reg(3) as i32;
+                let width = width as i32;
+                let height = height as i32;
+                if cpu.reg(0) != GL_TEXTURE_2D
+                    || !is_gl_texture_format(format)
+                    || !is_gl_texture_type_for_format(format, ty)
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let texture = self.bound_guest_texture(GL_TEXTURE_2D);
+                let image = self
+                    .gl_texture_images
+                    .iter()
+                    .find(|image| image.texture == texture && image.level == level);
+                let in_bounds = image.is_some_and(|image| {
+                    xoffset
+                        .checked_add(width)
+                        .zip(yoffset.checked_add(height))
+                        .is_some_and(|(right, bottom)| {
+                            right <= image.width && bottom <= image.height
+                        })
+                });
+                if !in_bounds {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(payload_len) = gles_image_payload_len(width, height, format, ty) else {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                };
+                if payload_len > 0 && pixels == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let payload = if payload_len == 0 {
+                    Some(Vec::new())
+                } else {
+                    Some(load_bytes(memory, pixels, payload_len as u32)?)
+                };
                 self.maybe_dump_gles_texture_upload(GlesTextureUploadDump {
                     kind: "texsubimage2d",
                     texture: self.bound_guest_texture(cpu.reg(0)),
                     target: cpu.reg(0),
-                    level: cpu.reg(1) as i32,
-                    xoffset: cpu.reg(2) as i32,
-                    yoffset: cpu.reg(3) as i32,
-                    width: width as i32,
-                    height: height as i32,
+                    level,
+                    xoffset,
+                    yoffset,
+                    width,
+                    height,
                     format,
                     ty,
                     pixels,
@@ -6413,11 +9127,11 @@ impl HleRuntime {
                 });
                 self.push_gles_event(GlesEvent::TexSubImage2D {
                     target: cpu.reg(0),
-                    level: cpu.reg(1) as i32,
-                    xoffset: cpu.reg(2) as i32,
-                    yoffset: cpu.reg(3) as i32,
-                    width: width as i32,
-                    height: height as i32,
+                    level,
+                    xoffset,
+                    yoffset,
+                    width,
+                    height,
                     format,
                     ty,
                     pixels,
@@ -6426,15 +9140,41 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glUseProgram" => {
+                if cpu.reg(0) != 0 {
+                    let Some(program) = self
+                        .gl_programs
+                        .iter()
+                        .find(|program| program.name == cpu.reg(0))
+                    else {
+                        self.gl_set_error(GL_INVALID_VALUE);
+                        return Ok(self.return32(cpu, 0));
+                    };
+                    if !program.linked {
+                        self.gl_set_error(GL_INVALID_OPERATION);
+                        return Ok(self.return32(cpu, 0));
+                    }
+                }
+                let old_program = self.gl_current_program;
                 self.gl_current_program = cpu.reg(0);
+                if old_program != 0 && old_program != self.gl_current_program {
+                    self.delete_pending_gl_program(old_program);
+                }
                 self.push_gles_event(GlesEvent::UseProgram {
                     program: cpu.reg(0),
                 });
                 Ok(self.return32(cpu, 0))
             }
             "glUniform1i" => {
+                let location = cpu.reg(0) as i32;
+                if location == -1 {
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !self.gl_uniform_location_valid(location) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::Uniform1i {
-                    location: cpu.reg(0) as i32,
+                    location,
                     value: cpu.reg(1) as i32,
                 });
                 Ok(self.return32(cpu, 0))
@@ -6442,13 +9182,37 @@ impl HleRuntime {
             "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv"
             | "glUniform2iv" | "glUniform3iv" | "glUniform4iv" => {
                 let components = uniform_vector_components(name);
-                let payload = gles_uniform_vector_payload_len(components, cpu.reg(1) as i32)
-                    .and_then(|len| gles_copy_payload(memory, cpu.reg(2), len));
+                let location = cpu.reg(0) as i32;
+                let count = cpu.reg(1) as i32;
+                if location == -1 {
+                    return Ok(self.return32(cpu, 0));
+                }
+                if count < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !self.gl_uniform_location_valid(location) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(payload_len) = gles_uniform_vector_payload_len(components, count) else {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                };
+                if payload_len > 0 && cpu.reg(2) == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let payload = if payload_len == 0 {
+                    Some(Vec::new())
+                } else {
+                    Some(load_bytes(memory, cpu.reg(2), payload_len as u32)?)
+                };
                 self.push_gles_event(GlesEvent::UniformVector {
                     components,
                     integer: name.ends_with("iv"),
-                    location: cpu.reg(0) as i32,
-                    count: cpu.reg(1) as i32,
+                    location,
+                    count,
                     values: cpu.reg(2),
                     payload,
                 });
@@ -6456,13 +9220,37 @@ impl HleRuntime {
             }
             "glUniformMatrix2fv" | "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
                 let columns = uniform_matrix_columns(name);
-                let payload = gles_uniform_matrix_payload_len(columns, cpu.reg(1) as i32)
-                    .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
+                let location = cpu.reg(0) as i32;
+                let count = cpu.reg(1) as i32;
+                if location == -1 {
+                    return Ok(self.return32(cpu, 0));
+                }
+                if count < 0 || cpu.reg(2) != 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !self.gl_uniform_location_valid(location) {
+                    self.gl_set_error(GL_INVALID_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(payload_len) = gles_uniform_matrix_payload_len(columns, count) else {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                };
+                if payload_len > 0 && cpu.reg(3) == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let payload = if payload_len == 0 {
+                    Some(Vec::new())
+                } else {
+                    Some(load_bytes(memory, cpu.reg(3), payload_len as u32)?)
+                };
                 self.push_gles_event(GlesEvent::UniformMatrix {
                     columns,
-                    location: cpu.reg(0) as i32,
-                    count: cpu.reg(1) as i32,
-                    transpose: cpu.reg(2) != 0,
+                    location,
+                    count,
+                    transpose: false,
                     values: cpu.reg(3),
                     payload,
                 });
@@ -6471,6 +9259,21 @@ impl HleRuntime {
             "glVertexAttribPointer" => {
                 let stride = self.stack_arg(cpu, memory, 4)?;
                 let pointer = self.stack_arg(cpu, memory, 5)?;
+                if cpu.reg(0) >= 16 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !(1..=4).contains(&(cpu.reg(1) as i32)) || (stride as i32) < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !matches!(
+                    cpu.reg(2),
+                    GL_BYTE | GL_UNSIGNED_BYTE | GL_SHORT | GL_UNSIGNED_SHORT | GL_FLOAT | GL_FIXED
+                ) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.set_guest_vertex_attrib(GuestVertexAttrib {
                     index: cpu.reg(0),
                     size: cpu.reg(1) as i32,
@@ -6491,19 +9294,35 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glEnableVertexAttribArray" => {
+                if cpu.reg(0) >= 16 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.set_guest_vertex_attrib_enabled(cpu.reg(0), true);
                 self.push_gles_event(GlesEvent::EnableVertexAttribArray { index: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
             "glEnable" => {
+                if !is_gl_capability(cpu.reg(0)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::Enable { cap: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
             "glDisable" => {
+                if !is_gl_capability(cpu.reg(0)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::Disable { cap: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
             "glBlendFunc" => {
+                if !is_gl_blend_src_factor(cpu.reg(0)) || !is_gl_blend_dst_factor(cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::BlendFunc {
                     sfactor: cpu.reg(0),
                     dfactor: cpu.reg(1),
@@ -6511,6 +9330,14 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glBlendFuncSeparate" => {
+                if !is_gl_blend_src_factor(cpu.reg(0))
+                    || !is_gl_blend_dst_factor(cpu.reg(1))
+                    || !is_gl_blend_src_factor(cpu.reg(2))
+                    || !is_gl_blend_dst_factor(cpu.reg(3))
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::BlendFuncSeparate {
                     src_rgb: cpu.reg(0),
                     dst_rgb: cpu.reg(1),
@@ -6520,6 +9347,10 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glStencilFuncSeparate" => {
+                if !is_gl_face(cpu.reg(0)) || !is_gl_comparison(cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::StencilFuncSeparate {
                     face: cpu.reg(0),
                     func: cpu.reg(1),
@@ -6529,6 +9360,14 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glStencilOpSeparate" => {
+                if !is_gl_face(cpu.reg(0))
+                    || !is_gl_stencil_op(cpu.reg(1))
+                    || !is_gl_stencil_op(cpu.reg(2))
+                    || !is_gl_stencil_op(cpu.reg(3))
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::StencilOpSeparate {
                     face: cpu.reg(0),
                     sfail: cpu.reg(1),
@@ -6542,6 +9381,10 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glCullFace" => {
+                if !is_gl_face(cpu.reg(0)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::CullFace { mode: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
@@ -6553,6 +9396,10 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glDepthFunc" => {
+                if !is_gl_comparison(cpu.reg(0)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::DepthFunc { func: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
@@ -6579,6 +9426,10 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glScissor" => {
+                if (cpu.reg(2) as i32) < 0 || (cpu.reg(3) as i32) < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::Scissor {
                     x: cpu.reg(0) as i32,
                     y: cpu.reg(1) as i32,
@@ -6607,10 +9458,24 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glClear" => {
+                if cpu.reg(0) & !(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)
+                    != 0
+                {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if self.gl_framebuffer_status() != GL_FRAMEBUFFER_COMPLETE {
+                    self.gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::Clear { mask: cpu.reg(0) });
                 Ok(self.return32(cpu, 0))
             }
             "glViewport" => {
+                if (cpu.reg(2) as i32) < 0 || (cpu.reg(3) as i32) < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
                 self.push_gles_event(GlesEvent::Viewport {
                     x: cpu.reg(0) as i32,
                     y: cpu.reg(1) as i32,
@@ -6620,11 +9485,25 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glDrawArrays" => {
-                let client_attribs = self.gles_client_attrib_payloads_for_arrays(
+                if !is_gl_draw_mode(cpu.reg(0)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if (cpu.reg(1) as i32) < 0 || (cpu.reg(2) as i32) < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !self.gl_draw_state_valid() {
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(client_attribs) = self.gles_client_attrib_payloads_for_arrays(
                     memory,
                     cpu.reg(1) as i32,
                     cpu.reg(2) as i32,
-                );
+                )?
+                else {
+                    return Ok(self.return32(cpu, 0));
+                };
                 self.push_gles_event(GlesEvent::DrawArrays {
                     mode: cpu.reg(0),
                     first: cpu.reg(1) as i32,
@@ -6634,24 +9513,62 @@ impl HleRuntime {
                 Ok(self.return32(cpu, 0))
             }
             "glDrawElements" => {
-                let index_payload = gles_draw_index_payload_len(cpu.reg(1) as i32, cpu.reg(2))
-                    .and_then(|len| gles_copy_payload(memory, cpu.reg(3), len));
-                let element_buffer_index_payload = self.gles_element_buffer_index_payload(
-                    cpu.reg(1) as i32,
-                    cpu.reg(2),
-                    cpu.reg(3),
-                );
-                let client_attribs = self.gles_client_attrib_payloads_for_elements(
+                if !is_gl_draw_mode(cpu.reg(0))
+                    || !matches!(cpu.reg(2), GL_UNSIGNED_BYTE | GL_UNSIGNED_SHORT)
+                {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let count = cpu.reg(1) as i32;
+                if count < 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if !self.gl_draw_state_valid() {
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some(index_len) = gles_draw_index_payload_len(count, cpu.reg(2)) else {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                };
+                let index_payload = if self.gl_bound_element_array_buffer == 0 {
+                    if index_len > 0 && cpu.reg(3) == 0 {
+                        self.gl_set_error(GL_INVALID_VALUE);
+                        return Ok(self.return32(cpu, 0));
+                    }
+                    if index_len == 0 {
+                        Some(Vec::new())
+                    } else {
+                        Some(load_bytes(memory, cpu.reg(3), index_len as u32)?)
+                    }
+                } else {
+                    None
+                };
+                let element_buffer_index_payload = if self.gl_bound_element_array_buffer == 0 {
+                    None
+                } else {
+                    let Some(payload) =
+                        self.gles_element_buffer_index_payload(count, cpu.reg(2), cpu.reg(3))
+                    else {
+                        self.gl_set_error(GL_INVALID_OPERATION);
+                        return Ok(self.return32(cpu, 0));
+                    };
+                    Some(payload)
+                };
+                let Some(client_attribs) = self.gles_client_attrib_payloads_for_elements(
                     memory,
-                    cpu.reg(1) as i32,
+                    count,
                     cpu.reg(2),
                     index_payload
                         .as_deref()
                         .or(element_buffer_index_payload.as_deref()),
-                );
+                )?
+                else {
+                    return Ok(self.return32(cpu, 0));
+                };
                 self.push_gles_event(GlesEvent::DrawElements {
                     mode: cpu.reg(0),
-                    count: cpu.reg(1) as i32,
+                    count,
                     ty: cpu.reg(2),
                     indices: cpu.reg(3),
                     index_payload,
@@ -6663,73 +9580,127 @@ impl HleRuntime {
                 self.push_gles_event(GlesEvent::Flush);
                 Ok(self.return32(cpu, 0))
             }
-            "glCheckFramebufferStatus" => Ok(self.return32(cpu, GL_FRAMEBUFFER_COMPLETE)),
+            "glCheckFramebufferStatus" => {
+                if cpu.reg(0) != GL_FRAMEBUFFER {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                Ok(self.return32(cpu, self.gl_framebuffer_status()))
+            }
             "glGetString" => {
                 let Some(value) = gl_query_string(cpu.reg(0)) else {
+                    self.gl_set_error(GL_INVALID_ENUM);
                     return Ok(self.return32(cpu, 0));
                 };
                 let ptr = self.alloc_c_string(memory, value)?;
                 Ok(self.return32(cpu, ptr))
             }
-            "glGetError" => Ok(self.return32(cpu, 0)),
+            "glGetError" => {
+                let error = self.gl_take_error();
+                Ok(self.return32(cpu, error))
+            }
             "glGetProgramiv" => {
-                let value = self.gl_program_iv(cpu.reg(0), cpu.reg(1));
-                if cpu.reg(2) != 0 {
-                    store32(memory, cpu.reg(2), value)?;
+                if !self
+                    .gl_programs
+                    .iter()
+                    .any(|program| program.name == cpu.reg(0))
+                {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
                 }
+                if !is_gl_program_parameter(cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(2) == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let value = self.gl_program_iv(cpu.reg(0), cpu.reg(1));
+                store32(memory, cpu.reg(2), value)?;
                 Ok(self.return32(cpu, 0))
             }
             "glGetShaderiv" => {
-                let value = gl_shader_iv(cpu.reg(1));
-                if cpu.reg(2) != 0 {
-                    store32(memory, cpu.reg(2), value)?;
+                if !self
+                    .gl_shaders
+                    .iter()
+                    .any(|shader| shader.name == cpu.reg(0))
+                {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
                 }
+                if !is_gl_shader_parameter(cpu.reg(1)) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                if cpu.reg(2) == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let value = self.gl_shader_iv(cpu.reg(0), cpu.reg(1));
+                store32(memory, cpu.reg(2), value)?;
                 Ok(self.return32(cpu, 0))
             }
             "glGetIntegerv" => {
-                let value = gl_integer(cpu.reg(0));
-                if cpu.reg(1) != 0 {
-                    store32(memory, cpu.reg(1), value)?;
+                if cpu.reg(1) == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
                 }
+                let Some(value) = self.gl_integer(cpu.reg(0)) else {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                };
+                store32(memory, cpu.reg(1), value)?;
                 Ok(self.return32(cpu, 0))
             }
             "glGetShaderPrecisionFormat" => {
-                let (range_min, range_max, precision) = gl_shader_precision(cpu.reg(1));
+                if !matches!(cpu.reg(0), GL_VERTEX_SHADER | GL_FRAGMENT_SHADER) {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                }
+                let Some((range_min, range_max, precision)) = gl_shader_precision(cpu.reg(1))
+                else {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                };
                 let range_ptr = cpu.reg(2);
                 let precision_ptr = cpu.reg(3);
-                if range_ptr != 0 {
-                    store32(memory, range_ptr, range_min)?;
-                    store32(memory, range_ptr.wrapping_add(4), range_max)?;
+                if range_ptr == 0 || precision_ptr == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
                 }
-                if precision_ptr != 0 {
-                    store32(memory, precision_ptr, precision)?;
-                }
+                store32(memory, range_ptr, range_min)?;
+                store32(memory, range_ptr.wrapping_add(4), range_max)?;
+                store32(memory, precision_ptr, precision)?;
                 Ok(self.return32(cpu, 0))
             }
             "glGetTexParameteriv" => {
-                let value = gl_tex_parameter_iv(cpu.reg(1));
-                if cpu.reg(2) != 0 {
-                    store32(memory, cpu.reg(2), value)?;
+                if cpu.reg(0) != GL_TEXTURE_2D {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
                 }
+                let Some(value) = self.gl_tex_parameter_iv(cpu.reg(1)) else {
+                    self.gl_set_error(GL_INVALID_ENUM);
+                    return Ok(self.return32(cpu, 0));
+                };
+                if cpu.reg(2) == 0 {
+                    self.gl_set_error(GL_INVALID_VALUE);
+                    return Ok(self.return32(cpu, 0));
+                }
+                store32(memory, cpu.reg(2), value)?;
                 Ok(self.return32(cpu, 0))
             }
             "glGetActiveUniform" => self.gl_get_active(cpu, memory, true),
             "glGetActiveAttrib" => self.gl_get_active(cpu, memory, false),
-            "glGetProgramInfoLog" | "glGetShaderInfoLog" => {
-                let length_ptr = cpu.reg(2);
-                let info_log_ptr = cpu.reg(3);
-                if length_ptr != 0 {
-                    store32(memory, length_ptr, 0)?;
-                }
-                if info_log_ptr != 0 {
-                    store8(memory, info_log_ptr, 0)?;
-                }
-                Ok(self.return32(cpu, 0))
-            }
+            "glGetProgramInfoLog" => self.gl_get_info_log(cpu, memory, true),
+            "glGetShaderInfoLog" => self.gl_get_info_log(cpu, memory, false),
             "glGetAttribLocation" => self.gl_get_location(cpu, memory, false),
             "glGetUniformLocation" => self.gl_get_location(cpu, memory, true),
-            "glIsTexture" => Ok(self.return32(cpu, u32::from(cpu.reg(0) != 0))),
-            _ => Ok(self.return32(cpu, 0)),
+            "glIsTexture" => Ok(self.return32(
+                cpu,
+                u32::from(self.gl_texture_bound_once.contains(&cpu.reg(0))),
+            )),
+            _ => Err(HleError::UnimplementedSymbol(name.to_string())),
         }
     }
 
@@ -6737,6 +9708,208 @@ impl HleRuntime {
         let value = self.next_gl_name;
         self.next_gl_name = self.next_gl_name.wrapping_add(1).max(1);
         value
+    }
+
+    fn gl_set_error(&mut self, error: u32) {
+        if self.gl_error == GL_NO_ERROR {
+            self.gl_error = error;
+        }
+    }
+
+    fn gles_context_current(&self) -> bool {
+        self.egl_state.initialized
+            && self.egl_state.context_alive
+            && self.egl_state.context_client_version == 2
+            && self.egl_state.current_thread == Some(self.current_pthread)
+            && self.egl_state.current_context == EGL_CONTEXT_HANDLE
+    }
+
+    fn gl_take_error(&mut self) -> u32 {
+        let error = self.gl_error;
+        self.gl_error = GL_NO_ERROR;
+        error
+    }
+
+    fn gl_integer(&self, name: u32) -> Option<u32> {
+        Some(match name {
+            GL_MAX_TEXTURE_SIZE => 4096,
+            GL_MAX_TEXTURE_IMAGE_UNITS => 8,
+            GL_MAX_VERTEX_ATTRIBS => 16,
+            GL_FRAMEBUFFER_BINDING => self.gl_bound_framebuffer,
+            GL_RENDERBUFFER_BINDING => self.gl_bound_renderbuffer,
+            GL_ARRAY_BUFFER_BINDING => self.gl_bound_array_buffer,
+            GL_ELEMENT_ARRAY_BUFFER_BINDING => self.gl_bound_element_array_buffer,
+            GL_CURRENT_PROGRAM => self.gl_current_program,
+            GL_ACTIVE_TEXTURE => self.gl_active_texture,
+            GL_TEXTURE_BINDING_2D => self.bound_guest_texture(GL_TEXTURE_2D),
+            _ => return None,
+        })
+    }
+
+    fn gl_framebuffer_status(&self) -> u32 {
+        if self.gl_bound_framebuffer == 0 {
+            return GL_FRAMEBUFFER_COMPLETE;
+        }
+        let attachments = self
+            .gl_framebuffer_attachments
+            .iter()
+            .filter(|entry| entry.framebuffer == self.gl_bound_framebuffer);
+        let mut dimensions = None;
+        let mut found = false;
+        for attachment in attachments {
+            found = true;
+            let object_dimensions = match attachment.object {
+                GuestGlAttachmentObject::Texture { texture, level } => self
+                    .gl_texture_images
+                    .iter()
+                    .find(|image| image.texture == texture && image.level == level)
+                    .map(|image| (image.width, image.height)),
+                GuestGlAttachmentObject::Renderbuffer { renderbuffer } => self
+                    .gl_renderbuffer_storage
+                    .iter()
+                    .find(|storage| storage.renderbuffer == renderbuffer)
+                    .map(|storage| (storage.width, storage.height)),
+            };
+            let Some(object_dimensions) = object_dimensions else {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            };
+            if object_dimensions.0 <= 0 || object_dimensions.1 <= 0 {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if dimensions.is_some_and(|dimensions| dimensions != object_dimensions) {
+                return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+            }
+            dimensions = Some(object_dimensions);
+        }
+        if found {
+            GL_FRAMEBUFFER_COMPLETE
+        } else {
+            GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
+        }
+    }
+
+    fn set_gl_framebuffer_attachment(
+        &mut self,
+        attachment: u32,
+        object: Option<GuestGlAttachmentObject>,
+    ) {
+        let framebuffer = self.gl_bound_framebuffer;
+        self.gl_framebuffer_attachments
+            .retain(|entry| entry.framebuffer != framebuffer || entry.attachment != attachment);
+        if let Some(object) = object {
+            self.gl_framebuffer_attachments
+                .push(GuestGlFramebufferAttachment {
+                    framebuffer,
+                    attachment,
+                    object,
+                });
+        }
+    }
+
+    fn set_gl_renderbuffer_storage(&mut self, width: i32, height: i32) {
+        let renderbuffer = self.gl_bound_renderbuffer;
+        if let Some(storage) = self
+            .gl_renderbuffer_storage
+            .iter_mut()
+            .find(|storage| storage.renderbuffer == renderbuffer)
+        {
+            storage.width = width;
+            storage.height = height;
+        } else {
+            self.gl_renderbuffer_storage
+                .push(GuestGlRenderbufferStorage {
+                    renderbuffer,
+                    width,
+                    height,
+                });
+        }
+    }
+
+    fn set_gl_texture_image(&mut self, texture: u32, level: i32, width: i32, height: i32) {
+        if let Some(image) = self
+            .gl_texture_images
+            .iter_mut()
+            .find(|image| image.texture == texture && image.level == level)
+        {
+            image.width = width;
+            image.height = height;
+        } else {
+            self.gl_texture_images.push(GuestGlTextureImage {
+                texture,
+                level,
+                width,
+                height,
+            });
+        }
+    }
+
+    fn set_gl_texture_parameter(&mut self, name: u32, value: u32) {
+        let texture = self.bound_guest_texture(GL_TEXTURE_2D);
+        if let Some(parameter) = self
+            .gl_texture_parameters
+            .iter_mut()
+            .find(|parameter| parameter.texture == texture && parameter.name == name)
+        {
+            parameter.value = value;
+        } else {
+            self.gl_texture_parameters.push(GuestGlTextureParameter {
+                texture,
+                name,
+                value,
+            });
+        }
+    }
+
+    fn gl_tex_parameter_iv(&self, name: u32) -> Option<u32> {
+        if !is_gl_texture_parameter(name) {
+            return None;
+        }
+        let texture = self.bound_guest_texture(GL_TEXTURE_2D);
+        self.gl_texture_parameters
+            .iter()
+            .find(|parameter| parameter.texture == texture && parameter.name == name)
+            .map(|parameter| parameter.value)
+            .or_else(|| gl_default_texture_parameter(name))
+    }
+
+    fn gl_uniform_location_valid(&self, location: i32) -> bool {
+        self.gl_programs
+            .iter()
+            .find(|program| program.name == self.gl_current_program && program.linked)
+            .is_some_and(|program| {
+                program
+                    .uniforms
+                    .iter()
+                    .any(|uniform| uniform.location as i32 == location)
+            })
+    }
+
+    fn delete_pending_gl_program(&mut self, program_name: u32) {
+        if self
+            .gl_programs
+            .iter()
+            .any(|program| program.name == program_name && program.delete_pending)
+        {
+            self.gl_programs
+                .retain(|program| program.name != program_name);
+        }
+    }
+
+    fn gl_draw_state_valid(&mut self) -> bool {
+        if self.gl_current_program == 0
+            || !self
+                .gl_programs
+                .iter()
+                .any(|program| program.name == self.gl_current_program && program.linked)
+        {
+            self.gl_set_error(GL_INVALID_OPERATION);
+            return false;
+        }
+        if self.gl_framebuffer_status() != GL_FRAMEBUFFER_COMPLETE {
+            self.gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
+            return false;
+        }
+        true
     }
 
     fn push_gles_event(&mut self, event: GlesEvent) {
@@ -6896,6 +10069,25 @@ impl HleRuntime {
                 row["offset"] = serde_json::json!(offset);
                 row["size"] = serde_json::json!(size);
                 row["data"] = serde_json::json!(data);
+            }
+            GlesEvent::VertexAttribPointer {
+                index,
+                size,
+                ty,
+                normalized,
+                stride,
+                pointer,
+            } => {
+                row["attrib_index"] = serde_json::json!(index);
+                row["size"] = serde_json::json!(size);
+                row["type"] = serde_json::json!(ty);
+                row["normalized"] = serde_json::json!(normalized);
+                row["stride"] = serde_json::json!(stride);
+                row["pointer"] = serde_json::json!(pointer);
+                row["array_buffer"] = serde_json::json!(self.gl_bound_array_buffer);
+            }
+            GlesEvent::EnableVertexAttribArray { index } => {
+                row["attrib_index"] = serde_json::json!(index);
             }
             _ => {}
         }
@@ -7168,28 +10360,30 @@ impl HleRuntime {
     }
 
     fn gles_client_attrib_payloads_for_arrays<M: Memory>(
-        &self,
+        &mut self,
         memory: &mut M,
         first: i32,
         count: i32,
-    ) -> Vec<GlesClientAttribPayload> {
+    ) -> Result<Option<Vec<GlesClientAttribPayload>>, HleError> {
         let Some(vertex_count) = gles_draw_arrays_vertex_count(first, count) else {
-            return Vec::new();
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(None);
         };
         self.gles_client_attrib_payloads(memory, vertex_count)
     }
 
     fn gles_client_attrib_payloads_for_elements<M: Memory>(
-        &self,
+        &mut self,
         memory: &mut M,
         count: i32,
         ty: u32,
         index_payload: Option<&[u8]>,
-    ) -> Vec<GlesClientAttribPayload> {
+    ) -> Result<Option<Vec<GlesClientAttribPayload>>, HleError> {
         let Some(vertex_count) =
             index_payload.and_then(|payload| gles_index_payload_vertex_count(count, ty, payload))
         else {
-            return Vec::new();
+            self.gl_set_error(GL_INVALID_OPERATION);
+            return Ok(None);
         };
         self.gles_client_attrib_payloads(memory, vertex_count)
     }
@@ -7206,19 +10400,54 @@ impl HleRuntime {
     }
 
     fn gles_client_attrib_payloads<M: Memory>(
-        &self,
+        &mut self,
         memory: &mut M,
         vertex_count: u32,
-    ) -> Vec<GlesClientAttribPayload> {
-        self.gl_vertex_attribs
+    ) -> Result<Option<Vec<GlesClientAttribPayload>>, HleError> {
+        let client_attribs = self
+            .gl_vertex_attribs
             .iter()
-            .filter(|attrib| attrib.enabled && attrib.array_buffer == 0)
-            .map(|attrib| GlesClientAttribPayload {
-                index: attrib.index,
-                payload: gles_client_attrib_payload_len(attrib, vertex_count)
-                    .and_then(|len| gles_copy_payload(memory, attrib.pointer, len)),
+            .filter(|attrib| {
+                attrib.enabled
+                    && attrib.array_buffer == 0
+                    && self.gl_current_program_uses_attrib(attrib.index)
             })
-            .collect()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut payloads = Vec::with_capacity(client_attribs.len());
+        for attrib in client_attribs {
+            let Some(len) = gles_client_attrib_payload_len(&attrib, vertex_count) else {
+                self.gl_set_error(GL_OUT_OF_MEMORY);
+                return Ok(None);
+            };
+            let payload = if len == 0 {
+                Vec::new()
+            } else {
+                load_bytes(memory, attrib.pointer, len as u32).map_err(|error| {
+                    HleError::Memory(format!(
+                        "GLES client attribute {} needs {} bytes at {:#010x}: {error}",
+                        attrib.index, len, attrib.pointer
+                    ))
+                })?
+            };
+            payloads.push(GlesClientAttribPayload {
+                index: attrib.index,
+                payload: Some(payload),
+            });
+        }
+        Ok(Some(payloads))
+    }
+
+    fn gl_current_program_uses_attrib(&self, index: u32) -> bool {
+        self.gl_programs
+            .iter()
+            .find(|program| program.name == self.gl_current_program && program.linked)
+            .is_some_and(|program| {
+                program
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.location == index)
+            })
     }
 
     fn stack_arg<M: Memory>(&self, cpu: &Cpu, memory: &mut M, index: u32) -> Result<u32, HleError> {
@@ -7229,14 +10458,180 @@ impl HleRuntime {
         )
     }
 
-    fn gl_gen_names<M: Memory>(&mut self, cpu: &mut Cpu, memory: &mut M) -> Result<(), HleError> {
-        let count = cpu.reg(0);
+    fn gl_gen_names<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        kind: GlNameKind,
+    ) -> Result<(), HleError> {
+        let count = cpu.reg(0) as i32;
         let out = cpu.reg(1);
+        if count < 0 || (count > 0 && out == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
         if out != 0 {
-            for idx in 0..count {
+            for idx in 0..count as u32 {
                 let value = self.alloc_gl_name();
+                match kind {
+                    GlNameKind::Buffer => self.gl_buffers.push(GuestGlBuffer {
+                        name: value,
+                        data: Vec::new(),
+                    }),
+                    GlNameKind::Framebuffer => self.gl_framebuffers.push(value),
+                    GlNameKind::Renderbuffer => self.gl_renderbuffers.push(value),
+                }
                 store32(memory, out.wrapping_add(idx.wrapping_mul(4)), value)?;
             }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_delete_buffers<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        if (cpu.reg(0) as i32) < 0 || ((cpu.reg(0) as i32) > 0 && cpu.reg(1) == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let buffers = load_gl_names(memory, cpu.reg(0), cpu.reg(1))?;
+        for buffer in &buffers {
+            self.gl_buffers
+                .retain(|candidate| candidate.name != *buffer);
+            if self.gl_bound_array_buffer == *buffer {
+                self.gl_bound_array_buffer = 0;
+            }
+            if self.gl_bound_element_array_buffer == *buffer {
+                self.gl_bound_element_array_buffer = 0;
+            }
+            for attrib in &mut self.gl_vertex_attribs {
+                if attrib.array_buffer == *buffer {
+                    attrib.array_buffer = 0;
+                }
+            }
+        }
+        if !buffers.is_empty() {
+            self.push_gles_event(GlesEvent::DeleteBuffers { buffers });
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_delete_framebuffers<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        if (cpu.reg(0) as i32) < 0 || ((cpu.reg(0) as i32) > 0 && cpu.reg(1) == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let framebuffers = load_gl_names(memory, cpu.reg(0), cpu.reg(1))?;
+        for framebuffer in &framebuffers {
+            self.gl_framebuffers
+                .retain(|candidate| candidate != framebuffer);
+            if self.gl_bound_framebuffer == *framebuffer {
+                self.gl_bound_framebuffer = 0;
+            }
+            self.gl_framebuffer_attachments
+                .retain(|entry| entry.framebuffer != *framebuffer);
+        }
+        if !framebuffers.is_empty() {
+            self.push_gles_event(GlesEvent::DeleteFramebuffers { framebuffers });
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_delete_renderbuffers<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        if (cpu.reg(0) as i32) < 0 || ((cpu.reg(0) as i32) > 0 && cpu.reg(1) == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let renderbuffers = load_gl_names(memory, cpu.reg(0), cpu.reg(1))?;
+        for renderbuffer in &renderbuffers {
+            self.gl_renderbuffers
+                .retain(|candidate| candidate != renderbuffer);
+            if self.gl_bound_renderbuffer == *renderbuffer {
+                self.gl_bound_renderbuffer = 0;
+            }
+            self.gl_renderbuffer_storage
+                .retain(|storage| storage.renderbuffer != *renderbuffer);
+            self.gl_framebuffer_attachments.retain(|entry| {
+                !matches!(
+                    entry.object,
+                    GuestGlAttachmentObject::Renderbuffer {
+                        renderbuffer: attached
+                    } if attached == *renderbuffer
+                )
+            });
+        }
+        if !renderbuffers.is_empty() {
+            self.push_gles_event(GlesEvent::DeleteRenderbuffers { renderbuffers });
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_gen_textures<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        let count = cpu.reg(0) as i32;
+        let out = cpu.reg(1);
+        if count < 0 || (count > 0 && out == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        if out != 0 {
+            for idx in 0..count as u32 {
+                let texture = self.alloc_gl_name();
+                self.gl_textures.push(texture);
+                store32(memory, out.wrapping_add(idx.wrapping_mul(4)), texture)?;
+            }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_delete_textures<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+    ) -> Result<(), HleError> {
+        if (cpu.reg(0) as i32) < 0 || ((cpu.reg(0) as i32) > 0 && cpu.reg(1) == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let textures = load_gl_names(memory, cpu.reg(0), cpu.reg(1))?;
+        for texture in &textures {
+            self.gl_textures.retain(|candidate| candidate != texture);
+            self.gl_texture_bound_once
+                .retain(|candidate| candidate != texture);
+            self.gl_texture_parameters
+                .retain(|parameter| parameter.texture != *texture);
+            self.gl_texture_images
+                .retain(|image| image.texture != *texture);
+            self.gl_framebuffer_attachments.retain(|entry| {
+                !matches!(
+                    entry.object,
+                    GuestGlAttachmentObject::Texture {
+                        texture: attached,
+                        ..
+                    } if attached == *texture
+                )
+            });
+            for binding in &mut self.gl_bound_textures {
+                if binding.texture == *texture {
+                    binding.texture = 0;
+                }
+            }
+        }
+        if !textures.is_empty() {
+            self.push_gles_event(GlesEvent::DeleteTextures { textures });
         }
         Ok(self.return32(cpu, 0))
     }
@@ -7247,14 +10642,31 @@ impl HleRuntime {
         memory: &mut M,
     ) -> Result<(), HleError> {
         let shader_name = cpu.reg(0);
-        let count = cpu.reg(1);
+        if !self
+            .gl_shaders
+            .iter()
+            .any(|shader| shader.name == shader_name)
+        {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let count = cpu.reg(1) as i32;
+        if count < 0 {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
         let strings = cpu.reg(2);
         let lengths = cpu.reg(3);
+        if count != 0 && strings == 0 {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
         let mut source = String::new();
-        for idx in 0..count {
+        for idx in 0..count as u32 {
             let string_ptr = load32(memory, strings.wrapping_add(idx.wrapping_mul(4)))?;
             if string_ptr == 0 {
-                continue;
+                self.gl_set_error(GL_INVALID_VALUE);
+                return Ok(self.return32(cpu, 0));
             }
             let bytes = if lengths != 0 {
                 let raw_len = load32(memory, lengths.wrapping_add(idx.wrapping_mul(4)))?;
@@ -7266,7 +10678,18 @@ impl HleRuntime {
             } else {
                 load_c_string(memory, string_ptr, 64 * 1024)?.into_bytes()
             };
-            source.push_str(&String::from_utf8_lossy(&bytes));
+            let Ok(part) = std::str::from_utf8(&bytes) else {
+                let shader = self
+                    .gl_shaders
+                    .iter_mut()
+                    .find(|shader| shader.name == shader_name)
+                    .expect("validated above");
+                shader.source.clear();
+                shader.compiled = false;
+                shader.info_log = "shader source is not UTF-8/ASCII text".to_string();
+                return Ok(self.return32(cpu, 0));
+            };
+            source.push_str(part);
         }
         if let Some(shader) = self
             .gl_shaders
@@ -7274,12 +10697,57 @@ impl HleRuntime {
             .find(|shader| shader.name == shader_name)
         {
             shader.source = source.clone();
+            shader.compiled = false;
+            shader.info_log.clear();
         }
         self.push_gles_event(GlesEvent::ShaderSource {
             shader: shader_name,
             source,
         });
         Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_compile_shader(&mut self, cpu: &mut Cpu) -> Result<(), HleError> {
+        let shader_name = cpu.reg(0);
+        let Some(shader) = self
+            .gl_shaders
+            .iter_mut()
+            .find(|shader| shader.name == shader_name)
+        else {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        };
+        match validate_glsl_es2_source(shader.shader_type, &shader.source) {
+            Ok(()) => {
+                shader.compiled = true;
+                shader.info_log.clear();
+            }
+            Err(error) => {
+                shader.compiled = false;
+                shader.info_log = error;
+            }
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
+    fn gl_shader_iv(&self, shader_name: u32, parameter: u32) -> u32 {
+        let Some(shader) = self
+            .gl_shaders
+            .iter()
+            .find(|shader| shader.name == shader_name)
+        else {
+            return 0;
+        };
+        match parameter {
+            GL_DELETE_STATUS => u32::from(shader.delete_pending),
+            GL_COMPILE_STATUS => u32::from(shader.compiled),
+            GL_INFO_LOG_LENGTH => gl_info_log_length(&shader.info_log),
+            GL_SHADER_SOURCE_LENGTH => {
+                shader.source.len().saturating_add(1).min(u32::MAX as usize) as u32
+            }
+            GL_SHADER_TYPE => shader.shader_type,
+            _ => 0,
+        }
     }
 
     fn gl_link_program(&mut self, program_name: u32) {
@@ -7292,14 +10760,50 @@ impl HleRuntime {
             return;
         };
         let mut sources = Vec::new();
+        let mut vertex_shaders = 0;
+        let mut fragment_shaders = 0;
+        let mut link_error = None;
         for shader_name in shader_names {
             if let Some(shader) = self
                 .gl_shaders
                 .iter()
                 .find(|shader| shader.name == shader_name)
             {
+                if !shader.compiled {
+                    link_error = Some(format!("attached shader {shader_name} is not compiled"));
+                    break;
+                }
+                match shader.shader_type {
+                    GL_VERTEX_SHADER => vertex_shaders += 1,
+                    GL_FRAGMENT_SHADER => fragment_shaders += 1,
+                    _ => {
+                        link_error = Some(format!(
+                            "attached shader {shader_name} has an invalid shader type"
+                        ));
+                        break;
+                    }
+                }
                 sources.push((shader.shader_type, shader.source.as_str()));
             }
+        }
+        if link_error.is_none() && vertex_shaders == 0 {
+            link_error = Some("program has no compiled vertex shader".to_string());
+        }
+        if link_error.is_none() && fragment_shaders == 0 {
+            link_error = Some("program has no compiled fragment shader".to_string());
+        }
+        if let Some(error) = link_error {
+            if let Some(program) = self
+                .gl_programs
+                .iter_mut()
+                .find(|program| program.name == program_name)
+            {
+                program.uniforms.clear();
+                program.attributes.clear();
+                program.linked = false;
+                program.info_log = error;
+            }
+            return;
         }
         let uniforms = reflect_glsl_uniforms(&sources);
         let attributes = reflect_glsl_attributes(&sources);
@@ -7310,6 +10814,8 @@ impl HleRuntime {
         {
             program.uniforms = uniforms;
             program.attributes = attributes;
+            program.linked = true;
+            program.info_log.clear();
         }
     }
 
@@ -7319,8 +10825,11 @@ impl HleRuntime {
             .iter()
             .find(|program| program.name == program_name);
         match name {
-            GL_LINK_STATUS => 1,
-            GL_INFO_LOG_LENGTH => 0,
+            GL_DELETE_STATUS => u32::from(program.is_some_and(|program| program.delete_pending)),
+            GL_LINK_STATUS => u32::from(program.is_some_and(|program| program.linked)),
+            GL_INFO_LOG_LENGTH => {
+                program.map_or(0, |program| gl_info_log_length(&program.info_log))
+            }
             GL_ACTIVE_UNIFORMS => program.map_or(0, |program| program.uniforms.len() as u32),
             GL_ACTIVE_UNIFORM_MAX_LENGTH => program
                 .and_then(|program| active_max_name_len(&program.uniforms))
@@ -7333,6 +10842,46 @@ impl HleRuntime {
         }
     }
 
+    fn gl_get_info_log<M: Memory>(
+        &mut self,
+        cpu: &mut Cpu,
+        memory: &mut M,
+        program: bool,
+    ) -> Result<(), HleError> {
+        let object = cpu.reg(0);
+        let buf_size = cpu.reg(1) as i32;
+        if buf_size < 0 {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let info_log = if program {
+            let Some(state) = self.gl_programs.iter().find(|state| state.name == object) else {
+                self.gl_set_error(GL_INVALID_VALUE);
+                return Ok(self.return32(cpu, 0));
+            };
+            state.info_log.clone()
+        } else {
+            let Some(state) = self.gl_shaders.iter().find(|state| state.name == object) else {
+                self.gl_set_error(GL_INVALID_VALUE);
+                return Ok(self.return32(cpu, 0));
+            };
+            state.info_log.clone()
+        };
+        let written = if buf_size > 0 {
+            if cpu.reg(3) == 0 {
+                self.gl_set_error(GL_INVALID_VALUE);
+                return Ok(self.return32(cpu, 0));
+            }
+            write_gl_name(memory, cpu.reg(3), buf_size as u32, &info_log)?
+        } else {
+            0
+        };
+        if cpu.reg(2) != 0 {
+            store32(memory, cpu.reg(2), written)?;
+        }
+        Ok(self.return32(cpu, 0))
+    }
+
     fn gl_get_active<M: Memory>(
         &mut self,
         cpu: &mut Cpu,
@@ -7341,46 +10890,45 @@ impl HleRuntime {
     ) -> Result<(), HleError> {
         let program_name = cpu.reg(0);
         let index = cpu.reg(1) as usize;
-        let buf_size = cpu.reg(2);
+        let buf_size = cpu.reg(2) as i32;
         let length_ptr = cpu.reg(3);
-        let size_ptr = load32(memory, cpu.reg(13)).unwrap_or(0);
-        let type_ptr = load32(memory, cpu.reg(13).wrapping_add(4)).unwrap_or(0);
-        let name_ptr = load32(memory, cpu.reg(13).wrapping_add(8)).unwrap_or(0);
-        let active = self
+        let size_ptr = load32(memory, cpu.reg(13))?;
+        let type_ptr = load32(memory, cpu.reg(13).wrapping_add(4))?;
+        let name_ptr = load32(memory, cpu.reg(13).wrapping_add(8))?;
+        if buf_size < 0 || (buf_size > 0 && name_ptr == 0) {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        }
+        let Some(program) = self
             .gl_programs
             .iter()
             .find(|program| program.name == program_name)
-            .and_then(|program| {
-                if uniform {
-                    program.uniforms.get(index)
-                } else {
-                    program.attributes.get(index)
-                }
-            });
-        if let Some(active) = active {
-            let written = write_gl_name(memory, name_ptr, buf_size, &active.name)?;
-            if length_ptr != 0 {
-                store32(memory, length_ptr, written)?;
-            }
-            if size_ptr != 0 {
-                store32(memory, size_ptr, active.size)?;
-            }
-            if type_ptr != 0 {
-                store32(memory, type_ptr, active.ty)?;
-            }
+        else {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        };
+        if !program.linked {
+            self.gl_set_error(GL_INVALID_OPERATION);
+            return Ok(self.return32(cpu, 0));
+        }
+        let active = if uniform {
+            program.uniforms.get(index)
         } else {
-            if length_ptr != 0 {
-                store32(memory, length_ptr, 0)?;
-            }
-            if size_ptr != 0 {
-                store32(memory, size_ptr, 0)?;
-            }
-            if type_ptr != 0 {
-                store32(memory, type_ptr, 0)?;
-            }
-            if name_ptr != 0 && buf_size != 0 {
-                store8(memory, name_ptr, 0)?;
-            }
+            program.attributes.get(index)
+        };
+        let Some(active) = active else {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, 0));
+        };
+        let written = write_gl_name(memory, name_ptr, buf_size as u32, &active.name)?;
+        if length_ptr != 0 {
+            store32(memory, length_ptr, written)?;
+        }
+        if size_ptr != 0 {
+            store32(memory, size_ptr, active.size)?;
+        }
+        if type_ptr != 0 {
+            store32(memory, type_ptr, active.ty)?;
         }
         Ok(self.return32(cpu, 0))
     }
@@ -7392,21 +10940,31 @@ impl HleRuntime {
         uniform: bool,
     ) -> Result<(), HleError> {
         let program_name = cpu.reg(0);
-        let name = load_c_string(memory, cpu.reg(1), 1024).unwrap_or_default();
-        let location = self
+        if cpu.reg(1) == 0 {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let name = load_c_string(memory, cpu.reg(1), 1024)?;
+        let Some(program) = self
             .gl_programs
             .iter()
             .find(|program| program.name == program_name)
-            .and_then(|program| {
-                let active = if uniform {
-                    &program.uniforms
-                } else {
-                    &program.attributes
-                };
-                active
-                    .iter()
-                    .find(|item| active_name_matches(&item.name, &name))
-            })
+        else {
+            self.gl_set_error(GL_INVALID_VALUE);
+            return Ok(self.return32(cpu, u32::MAX));
+        };
+        if !program.linked {
+            self.gl_set_error(GL_INVALID_OPERATION);
+            return Ok(self.return32(cpu, u32::MAX));
+        }
+        let active = if uniform {
+            &program.uniforms
+        } else {
+            &program.attributes
+        };
+        let location = active
+            .iter()
+            .find(|item| active_name_matches(&item.name, &name))
             .map_or(u32::MAX, |item| item.location);
         Ok(self.return32(cpu, location))
     }
@@ -7520,10 +11078,19 @@ impl HleRuntime {
             .checked_add(padding)
             .and_then(|size| align_up(size, HLE_HEAP_SMALL_ALIGN))
             .ok_or(HleError::HeapExhausted { requested: size })?;
-        let allocation = self
-            .heap_allocator
-            .allocate(allocation_size)
-            .ok_or(HleError::HeapExhausted { requested: size })?;
+        let allocation = match self.heap_allocator.allocate(allocation_size) {
+            Some(allocation) => allocation,
+            None => {
+                let report = self.heap_allocator.storage_report();
+                eprintln!(
+                    "HLE heap exhausted: requested={size} allocation_size={allocation_size} total_free={} largest_free={} live_allocations={}",
+                    report.total_free_space,
+                    report.largest_free_region,
+                    self.heap_allocations.len()
+                );
+                return Err(HleError::HeapExhausted { requested: size });
+            }
+        };
         let raw_offset = allocation.offset;
         let raw_addr = self
             .heap_base
@@ -7680,10 +11247,6 @@ pub fn initialize_hle_symbol<M: Memory>(
             ..
         } => write_memset_helper(memory, address),
         HleSymbolShape::FunctionCode {
-            code: HleFunctionCode::ReturnNull,
-            ..
-        } => write_return_null_helper(memory, address),
-        HleSymbolShape::FunctionCode {
             code: HleFunctionCode::Strcmp,
             ..
         } => write_strcmp_helper(memory, address),
@@ -7705,6 +11268,7 @@ pub fn initialize_hle_symbol<M: Memory>(
             }
             match init {
                 HleDataInit::Zero => {}
+                HleDataInit::BionicStdio => init_bionic_stdio(memory, address)?,
                 HleDataInit::StackGuard => store32(memory, address, 0x00c0_ffee)?,
                 HleDataInit::Ctype => init_ctype(memory, address, false)?,
                 HleDataInit::ToLower => init_case_table(memory, address, false)?,
@@ -7756,17 +11320,6 @@ fn write_memset_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), Hl
         0xe4c3_1001, // strb r1, [r3], #1
         0xe252_2001, // subs r2, r2, #1
         0x1aff_fffc, // bne loop
-        0xe12f_ff1e, // bx lr
-    ];
-    for (idx, word) in WORDS.iter().enumerate() {
-        store32(memory, address.wrapping_add((idx * 4) as u32), *word)?;
-    }
-    Ok(())
-}
-
-fn write_return_null_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
-    const WORDS: &[u32] = &[
-        0xe3a0_0000, // mov r0, #0
         0xe12f_ff1e, // bx lr
     ];
     for (idx, word) in WORDS.iter().enumerate() {
@@ -7844,7 +11397,7 @@ fn write_wctob_helper<M: Memory>(memory: &mut M, address: u32) -> Result<(), Hle
 }
 
 pub(crate) fn should_link_hle_symbol(name: &str) -> bool {
-    !is_minecraft_game_logic_facade(name) || minecraft_game_logic_hle_enabled(name)
+    describe_hle_import(name).is_some()
 }
 
 fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
@@ -7886,9 +11439,6 @@ fn classify_hle_symbol(name: &str) -> Option<HleSymbolKind> {
     if is_libstdcxx_symbol(name) {
         return Some(HleSymbolKind::CxxStd);
     }
-    if is_target_symbol(name) {
-        return Some(HleSymbolKind::Target);
-    }
     if is_libc_symbol(name) {
         return Some(HleSymbolKind::Libc);
     }
@@ -7923,8 +11473,8 @@ fn hle_shape(name: &str) -> HleSymbolShape {
             init: HleDataInit::StackGuard,
         },
         "__sF" => HleSymbolShape::Data {
-            size: 0x300,
-            init: HleDataInit::Zero,
+            size: BIONIC_FILE_SIZE * 3,
+            init: HleDataInit::BionicStdio,
         },
         "_ctype_" => HleSymbolShape::Data {
             size: 0x200,
@@ -7956,16 +11506,22 @@ fn hle_shape(name: &str) -> HleSymbolShape {
 
 fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
     if matches!(hle_shape(name), HleSymbolShape::Data { .. }) {
-        return HleCallBehavior::ReturnZero;
+        return HleCallBehavior::Implemented;
     }
-    if matches!(name, "abort" | "exit" | "__stack_chk_fail" | "__assert2") {
+    if matches!(
+        name,
+        "abort" | "exit" | "__stack_chk_fail" | "__assert2" | "__aeabi_idiv0" | "__aeabi_ldiv0"
+    ) {
         return HleCallBehavior::Abort;
     }
+    if is_runtime_implemented_hle(name) {
+        return HleCallBehavior::RuntimeImplemented;
+    }
     if kind == HleSymbolKind::Libm
-        || kind == HleSymbolKind::Gles
-        || kind == HleSymbolKind::Egl
+        || (kind == HleSymbolKind::Gles && is_gles_implemented_symbol(name))
+        || (kind == HleSymbolKind::Egl && is_egl_implemented_symbol(name))
         || kind == HleSymbolKind::CxxStd
-        || kind == HleSymbolKind::Target
+        || is_android_input_symbol(name)
         || matches!(
             name,
             "memcpy"
@@ -8028,14 +11584,14 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "realloc"
                 | "free"
                 | "__errno"
+                | "__gnu_Unwind_Find_exidx"
+                | "__aeabi_atexit"
                 | "__aeabi_idiv"
                 | "__aeabi_uidiv"
                 | "__aeabi_idivmod"
                 | "__aeabi_uidivmod"
                 | "__aeabi_ldivmod"
                 | "__aeabi_uldivmod"
-                | "__aeabi_idiv0"
-                | "__aeabi_ldiv0"
                 | "__aeabi_i2d"
                 | "__aeabi_l2f"
                 | "__aeabi_l2d"
@@ -8061,16 +11617,50 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "__moddi3"
                 | "__umoddi3"
                 | "getauxval"
+                | "getpid"
+                | "getuid"
+                | "geteuid"
+                | "getenv"
+                | "gethostname"
+                | "gethostbyname"
+                | "getaddrinfo"
+                | "freeaddrinfo"
+                | "gai_strerror"
+                | "setlocale"
                 | "gettimeofday"
                 | "clock_gettime"
                 | "time"
                 | "sysconf"
+                | "sigprocmask"
+                | "sigaction"
+                | "bsd_signal"
+                | "sigsetjmp"
+                | "siglongjmp"
                 | "pthread_self"
                 | "pthread_equal"
                 | "pthread_getspecific"
                 | "pthread_key_create"
                 | "pthread_key_delete"
                 | "pthread_setspecific"
+                | "pthread_setname_np"
+                | "__pthread_cleanup_push"
+                | "__pthread_cleanup_pop"
+                | "pthread_attr_init"
+                | "pthread_attr_destroy"
+                | "pthread_attr_getdetachstate"
+                | "pthread_attr_setdetachstate"
+                | "pthread_attr_setschedparam"
+                | "pthread_attr_setstacksize"
+                | "pthread_mutexattr_init"
+                | "pthread_mutexattr_destroy"
+                | "pthread_mutexattr_settype"
+                | "pthread_mutex_init"
+                | "pthread_mutex_destroy"
+                | "pthread_cond_init"
+                | "pthread_cond_destroy"
+                | "ANativeWindow_setBuffersGeometry"
+                | "__android_log_print"
+                | "__android_log_write"
                 | "ALooper_pollAll"
                 | "ALooper_pollOnce"
                 | "ALooper_prepare"
@@ -8121,14 +11711,19 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "socket"
                 | "bind"
                 | "connect"
+                | "getsockname"
+                | "getpeername"
                 | "setsockopt"
+                | "getsockopt"
                 | "fcntl"
+                | "ioctl"
                 | "sendto"
                 | "recvfrom"
                 | "select"
                 | "inet_addr"
                 | "inet_ntoa"
                 | "strerror"
+                | "perror"
                 | "epoll_create"
                 | "epoll_ctl"
                 | "epoll_wait"
@@ -8136,8 +11731,12 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
                 | "pread"
                 | "fread"
                 | "write"
+                | "writev"
                 | "fwrite"
+                | "fputs"
+                | "fputc"
                 | "pthread_create"
+                | "__cxa_atexit"
                 | "__cxa_guard_acquire"
                 | "__cxa_guard_release"
                 | "__cxa_guard_abort"
@@ -8146,232 +11745,208 @@ fn hle_behavior(name: &str, kind: HleSymbolKind) -> HleCallBehavior {
     {
         return HleCallBehavior::Implemented;
     }
-    if is_negative_stub(name) {
-        return HleCallBehavior::ReturnMinusOneErrno;
-    }
-    if is_null_stub(name) {
-        return HleCallBehavior::ReturnNull;
-    }
-    if kind == HleSymbolKind::Egl {
-        return HleCallBehavior::ReturnOne;
-    }
-    HleCallBehavior::ReturnZero
+    HleCallBehavior::Unimplemented
 }
 
-fn is_negative_stub(name: &str) -> bool {
+fn is_runtime_implemented_hle(name: &str) -> bool {
     matches!(
         name,
-        "accept"
-            | "bind"
-            | "chmod"
-            | "close"
-            | "closedir"
-            | "connect"
-            | "epoll_create"
-            | "epoll_ctl"
-            | "epoll_wait"
-            | "fcntl"
-            | "fdatasync"
-            | "fsync"
-            | "fstat"
-            | "getaddrinfo"
-            | "getnameinfo"
-            | "getpeername"
-            | "getsockname"
-            | "getsockopt"
-            | "ioctl"
-            | "listen"
-            | "lseek"
-            | "mkdir"
-            | "open"
-            | "opendir"
-            | "pipe"
-            | "poll"
-            | "pread"
-            | "read"
-            | "recv"
-            | "recvfrom"
-            | "recvmsg"
-            | "remove"
-            | "rename"
-            | "rmdir"
-            | "select"
-            | "send"
-            | "sendmsg"
-            | "sendto"
-            | "setsockopt"
-            | "shutdown"
-            | "socket"
-            | "stat"
-            | "unlink"
-            | "utime"
-            | "write"
-            | "writev"
+        "pthread_cond_signal"
+            | "pthread_cond_broadcast"
+            | "pthread_cond_wait"
+            | "pthread_cond_timedwait"
+            | "pthread_mutex_lock"
+            | "pthread_mutex_unlock"
+            | "pthread_mutex_trylock"
+            | "pthread_once"
     )
 }
 
-fn is_null_stub(name: &str) -> bool {
+fn is_android_input_symbol(name: &str) -> bool {
     matches!(
         name,
-        "fopen"
-            | "fdopen"
-            | "fgets"
-            | "getenv"
-            | "gethostbyname"
-            | "readdir"
-            | "strerror"
-            | "dlopen"
-            | "dlsym"
-            | "dlerror"
+        "AInputQueue_attachLooper"
+            | "AInputQueue_detachLooper"
+            | "AInputQueue_getEvent"
+            | "AInputQueue_preDispatchEvent"
+            | "AInputQueue_finishEvent"
+            | "AInputEvent_getDeviceId"
+            | "AInputEvent_getSource"
+            | "AInputEvent_getType"
+            | "AKeyEvent_getAction"
+            | "AKeyEvent_getKeyCode"
+            | "AKeyEvent_getMetaState"
+            | "AKeyEvent_getRepeatCount"
+            | "AMotionEvent_getAction"
+            | "AMotionEvent_getAxisValue"
+            | "AMotionEvent_getPointerCount"
+            | "AMotionEvent_getPointerId"
+            | "AMotionEvent_getRawX"
+            | "AMotionEvent_getRawY"
+            | "AMotionEvent_getX"
+            | "AMotionEvent_getY"
     )
 }
 
-fn is_target_symbol(name: &str) -> bool {
+fn is_gles_implemented_symbol(name: &str) -> bool {
     matches!(
         name,
-        "_ZN8WebTokenC1ERKS_"
-            | "_ZN8WebTokenC2ERKS_"
-            | "_ZN4Font4initEv"
-            | "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E"
-            | "_ZN9UIControl18_resolvePostCreateEv"
-            | "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
-            | "_ZN3mce12TextureGroup10getTextureERK11TextureData"
-            | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
-            | "_ZN11AppPlatform9loadImageER11TextureDataRKSs"
-            | "_ZN11AppPlatform7loadPNGER11TextureDataRKSs"
-            | "_ZN11AppPlatform7loadTGAER11TextureDataRKSs"
-            | "_ZN11AppPlatform8loadJPEGER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android7loadPNGER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android7loadTGAER11TextureDataRKSs"
-            | "_ZN19AppPlatform_android8loadJPEGER11TextureDataRKSs"
-            | "_ZN10ImageUtils17loadImageFromFileER11TextureDataRKSs"
-            | "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai"
-            | "_ZN13GeometryGroup11getGeometryERKSs"
-            | "_ZN13GeometryGroup14tryGetGeometryERKSs"
-            | "_ZN14GamePadManager16getGamePadsInUseEv"
-            | "_ZN14GamePadManager20getConnectedGamePadsEv"
-            | "_ZN13GamePadMapper4tickER15InputEventQueue"
-            | "_ZN13GamePadMapper8tickTurnER15InputEventQueue"
-            | "_ZNK7GamePad11isConnectedEv"
-            | "_ZNK7GamePad7isInUseEv"
-            | "_ZN6Screen15controllerEventEv"
-            | "_ZN6Screen27_processControllerDirectionEi"
-            | "_ZN11MenuGamePad12getDirectionEi"
-            | "_ZN11MenuGamePad4getXEi"
-            | "_ZN11MenuGamePad4getYEi"
-            | "_ZN11MenuGamePad9isTouchedEi"
-            | "_ZN11MenuPointer10setPressedEb"
-            | "_ZN11MenuPointer4getXEv"
-            | "_ZN11MenuPointer4getYEv"
-            | "_ZN11MenuPointer4setXEs"
-            | "_ZN11MenuPointer4setYEs"
-            | "_ZN11MenuPointer9isPressedEv"
-            | "_ZN10Multitouch4feedEccssi"
-            | "_ZN11MouseDevice4feedEccss"
-            | "_ZN11MouseDevice4feedEccssss"
-            | "_ZN15InputEventQueue9nextEventER10InputEvent"
-            | "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb"
-            | "_ZN15InputEventQueue28enqueueButtonPressAndReleaseEs"
-            | "_ZN15InputEventQueue22enqueuePointerLocationE9InputModess"
-            | "_ZN15InputEventQueue16enqueueDirectionE11DirectionIdff"
-            | "_ZN15InputEventQueue13enqueueVectorEsfff"
-            | "_ZN14KeyboardMapper21clearInputDeviceQueueEv"
-            | "_ZN14KeyboardMapper4tickER15InputEventQueue"
-            | "_ZN11MouseMapper21clearInputDeviceQueueEv"
-            | "_ZN11MouseMapper4tickER15InputEventQueue"
-            | "_ZN11TouchMapper21clearInputDeviceQueueEv"
-            | "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv"
-            | "_ZN19TestAutoInputMapper4tickER15InputEventQueue"
-            | "_ZN18DeviceButtonMapper4tickER15InputEventQueue"
-            | "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv"
-            | "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue"
-            | "_ZN11MouseDevice12isButtonDownEi"
-            | "_ZN11MouseDevice14getButtonStateEi"
-            | "_ZN11MouseDevice14getEventButtonEv"
-            | "_ZN11MouseDevice16wasFirstMovementEv"
-            | "_ZN11MouseDevice19getEventButtonStateEv"
-            | "_ZN11MouseDevice4getXEv"
-            | "_ZN11MouseDevice4getYEv"
-            | "_ZN11MouseDevice4nextEv"
-            | "_ZN11MouseDevice5getDXEv"
-            | "_ZN11MouseDevice5getDYEv"
-            | "_ZN11MouseDevice5resetEv"
-            | "_ZN11MouseDevice6reset2Ev"
-            | "_ZN11MouseDevice6rewindEv"
-            | "_ZN11MouseDevice8getEventEv"
-            | "_ZN10Multitouch10isReleasedEi"
-            | "_ZN10Multitouch11isEdgeTouchEi"
-            | "_ZN10Multitouch13isPointerDownEi"
-            | "_ZN10Multitouch15resetThisUpdateEv"
-            | "_ZN10Multitouch19getActivePointerIdsEPPKi"
-            | "_ZN10Multitouch19isPressedThisUpdateEi"
-            | "_ZN10Multitouch20isReleasedThisUpdateEi"
-            | "_ZN10Multitouch25getFirstActivePointerIdExEv"
-            | "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi"
-            | "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv"
-            | "_ZN10Multitouch4nextEv"
-            | "_ZN10Multitouch5resetEv"
-            | "_ZN10Multitouch6commitEv"
-            | "_ZN10Multitouch9isPressedEi"
-            | "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f"
-            | "_ZN3mce16RenderContextOGL17unbindAllTexturesEv"
-            | "_ZN12ProfilerLite4tickEbb"
-            | "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd"
-            | "_ZN18MinecraftTelemetry4tickEv"
-            | "_ZN18MinecraftTelemetry15forceSendEventsEv"
-            | "_ZN19RakNetServerLocator11findServersEi"
-            | "_ZN6Social11Multiplayer18needToHandleInviteEv"
-            | "_ZN6Social11Multiplayer4tickEb"
-            | "_ZN6Social11Multiplayer22tickMultiplayerManagerEv"
-            | "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE"
-            | "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE"
-            | "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE"
-            | "_ZN6Social11UserManager4tickEv"
-            | "_ZNK6Social11UserManager10isSignedInEv"
-            | "_ZN9RealmsAPI6updateEv"
+        "glCreateProgram"
+            | "glCreateShader"
+            | "glShaderSource"
+            | "glCompileShader"
+            | "glReleaseShaderCompiler"
+            | "glAttachShader"
+            | "glDeleteShader"
+            | "glLinkProgram"
+            | "glDeleteProgram"
+            | "glGenBuffers"
+            | "glGenFramebuffers"
+            | "glGenRenderbuffers"
+            | "glGenTextures"
+            | "glDeleteBuffers"
+            | "glDeleteFramebuffers"
+            | "glDeleteRenderbuffers"
+            | "glDeleteTextures"
+            | "glActiveTexture"
+            | "glBindBuffer"
+            | "glBufferData"
+            | "glBufferSubData"
+            | "glBindTexture"
+            | "glBindFramebuffer"
+            | "glBindRenderbuffer"
+            | "glFramebufferTexture2D"
+            | "glFramebufferRenderbuffer"
+            | "glRenderbufferStorage"
+            | "glTexParameteri"
+            | "glTexImage2D"
+            | "glTexSubImage2D"
+            | "glUseProgram"
+            | "glUniform1i"
+            | "glUniform1fv"
+            | "glUniform2fv"
+            | "glUniform3fv"
+            | "glUniform4fv"
+            | "glUniform1iv"
+            | "glUniform2iv"
+            | "glUniform3iv"
+            | "glUniform4iv"
+            | "glUniformMatrix2fv"
+            | "glUniformMatrix3fv"
+            | "glUniformMatrix4fv"
+            | "glVertexAttribPointer"
+            | "glEnableVertexAttribArray"
+            | "glEnable"
+            | "glDisable"
+            | "glBlendFunc"
+            | "glBlendFuncSeparate"
+            | "glStencilFuncSeparate"
+            | "glStencilOpSeparate"
+            | "glStencilMask"
+            | "glCullFace"
+            | "glPolygonOffset"
+            | "glDepthFunc"
+            | "glDepthMask"
+            | "glDepthRangef"
+            | "glColorMask"
+            | "glScissor"
+            | "glClearColor"
+            | "glClearDepthf"
+            | "glClearStencil"
+            | "glClear"
+            | "glViewport"
+            | "glDrawArrays"
+            | "glDrawElements"
+            | "glFlush"
+            | "glCheckFramebufferStatus"
+            | "glGetString"
+            | "glGetError"
+            | "glGetProgramiv"
+            | "glGetShaderiv"
+            | "glGetIntegerv"
+            | "glGetShaderPrecisionFormat"
+            | "glGetTexParameteriv"
+            | "glGetActiveUniform"
+            | "glGetActiveAttrib"
+            | "glGetProgramInfoLog"
+            | "glGetShaderInfoLog"
+            | "glGetAttribLocation"
+            | "glGetUniformLocation"
+            | "glIsTexture"
     )
 }
 
-fn is_minecraft_game_logic_facade(name: &str) -> bool {
-    is_target_symbol(name)
-}
-
-fn minecraft_game_logic_hle_enabled(name: &str) -> bool {
-    if std::env::var_os("AEMU_MCPE_HLE_GAME_LOGIC").is_some() {
-        return true;
-    }
-    minecraft_texture_group_hle_enabled(name)
-}
-
-fn is_minecraft_texture_group_facade(name: &str) -> bool {
+fn is_egl_implemented_symbol(name: &str) -> bool {
     matches!(
         name,
-        "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation"
-            | "_ZN3mce12TextureGroup10getTextureERK11TextureData"
-            | "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation"
+        "eglGetDisplay"
+            | "eglCreateContext"
+            | "eglCreateWindowSurface"
+            | "eglCreatePbufferSurface"
+            | "eglInitialize"
+            | "eglChooseConfig"
+            | "eglGetConfigAttrib"
+            | "eglQuerySurface"
+            | "eglQueryString"
+            | "eglGetCurrentDisplay"
+            | "eglGetCurrentContext"
+            | "eglGetCurrentSurface"
+            | "eglGetError"
+            | "eglGetProcAddress"
+            | "eglSwapBuffers"
+            | "eglBindAPI"
+            | "eglMakeCurrent"
+            | "eglSwapInterval"
+            | "eglDestroySurface"
+            | "eglDestroyContext"
+            | "eglTerminate"
+            | "eglReleaseThread"
+            | "eglSurfaceAttrib"
+            | "eglWaitGL"
+            | "eglWaitNative"
     )
 }
 
-fn minecraft_texture_group_hle_enabled(name: &str) -> bool {
-    if !is_minecraft_texture_group_facade(name) {
-        return false;
-    }
-    if std::env::var_os("AEMU_MCPE_HLE_TEXTURE_GROUP").is_some() {
-        return true;
-    }
+fn android_environment_value(name: &str) -> Option<&'static str> {
     match name {
-        "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation" => {
-            std::env::var_os("AEMU_MCPE_HLE_TEXTURE_PAIR").is_some()
-        }
-        "_ZN3mce12TextureGroup10getTextureERK11TextureData" => {
-            std::env::var_os("AEMU_MCPE_HLE_TEXTURE_DATA").is_some()
-        }
-        "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation" => {
-            std::env::var_os("AEMU_MCPE_HLE_TEXTURE_IS_LOADED").is_some()
-        }
-        _ => false,
+        "ANDROID_ROOT" => Some("/system"),
+        "ANDROID_DATA" => Some("/data"),
+        "ANDROID_STORAGE" => Some("/storage"),
+        "EXTERNAL_STORAGE" => Some("/sdcard"),
+        "TMPDIR" => Some("/data/local/tmp"),
+        _ => None,
     }
+}
+
+fn guest_socket_option_len(level: u32, name: u32) -> Option<usize> {
+    match (level, name) {
+        (SOL_SOCKET, SO_REUSEADDR | SO_BROADCAST | SO_SNDBUF | SO_RCVBUF | SO_KEEPALIVE)
+        | (IPPROTO_IP, IP_HDRINCL) => Some(4),
+        (SOL_SOCKET, SO_LINGER) => Some(8),
+        _ => None,
+    }
+}
+
+fn guest_socket_option_value(
+    socket_type: u32,
+    options: &[GuestSocketOption],
+    level: u32,
+    name: u32,
+) -> Option<Vec<u8>> {
+    if level == SOL_SOCKET && name == SO_TYPE {
+        return Some(socket_type.to_le_bytes().to_vec());
+    }
+    if level == SOL_SOCKET && name == SO_ERROR {
+        return Some(0_u32.to_le_bytes().to_vec());
+    }
+    if let Some(option) = options
+        .iter()
+        .find(|option| option.level == level && option.name == name)
+    {
+        return Some(option.value.clone());
+    }
+    let len = guest_socket_option_len(level, name)?;
+    Some(vec![0; len])
 }
 
 fn is_libc_symbol(name: &str) -> bool {
@@ -8631,54 +12206,108 @@ fn is_libc_symbol(name: &str) -> bool {
     ) || name.starts_with("__aeabi_")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibmOp {
+    Acos,
+    Acosf,
+    Asin,
+    Asinf,
+    Atan,
+    Atan2,
+    Atan2f,
+    Atanf,
+    Ceil,
+    Ceilf,
+    Cos,
+    Cosf,
+    Cosh,
+    Exp,
+    Exp2f,
+    Expf,
+    Fabs,
+    Fabsf,
+    Floor,
+    Floorf,
+    Fmaxf,
+    Fmod,
+    Fmodf,
+    Frexp,
+    Ldexp,
+    Log,
+    Log10,
+    Log10f,
+    Logf,
+    Modf,
+    Nearbyintf,
+    Pow,
+    Powf,
+    Rint,
+    Roundf,
+    Sin,
+    Sinf,
+    Sinh,
+    Sqrt,
+    Sqrtf,
+    Tan,
+    Tanf,
+    Tanh,
+    Truncf,
+}
+
+impl LibmOp {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "acos" => Self::Acos,
+            "acosf" => Self::Acosf,
+            "asin" => Self::Asin,
+            "asinf" => Self::Asinf,
+            "atan" => Self::Atan,
+            "atan2" => Self::Atan2,
+            "atan2f" => Self::Atan2f,
+            "atanf" => Self::Atanf,
+            "ceil" => Self::Ceil,
+            "ceilf" => Self::Ceilf,
+            "cos" => Self::Cos,
+            "cosf" => Self::Cosf,
+            "cosh" => Self::Cosh,
+            "exp" => Self::Exp,
+            "exp2f" => Self::Exp2f,
+            "expf" => Self::Expf,
+            "fabs" => Self::Fabs,
+            "fabsf" => Self::Fabsf,
+            "floor" => Self::Floor,
+            "floorf" => Self::Floorf,
+            "fmaxf" => Self::Fmaxf,
+            "fmod" => Self::Fmod,
+            "fmodf" => Self::Fmodf,
+            "frexp" => Self::Frexp,
+            "ldexp" => Self::Ldexp,
+            "log" => Self::Log,
+            "log10" => Self::Log10,
+            "log10f" => Self::Log10f,
+            "logf" => Self::Logf,
+            "modf" => Self::Modf,
+            "nearbyintf" => Self::Nearbyintf,
+            "pow" => Self::Pow,
+            "powf" => Self::Powf,
+            "rint" => Self::Rint,
+            "roundf" => Self::Roundf,
+            "sin" => Self::Sin,
+            "sinf" => Self::Sinf,
+            "sinh" => Self::Sinh,
+            "sqrt" => Self::Sqrt,
+            "sqrtf" => Self::Sqrtf,
+            "tan" => Self::Tan,
+            "tanf" => Self::Tanf,
+            "tanh" => Self::Tanh,
+            "truncf" => Self::Truncf,
+            _ => return None,
+        })
+    }
+}
+
 fn is_libm_symbol(name: &str) -> bool {
-    matches!(
-        name,
-        "acos"
-            | "acosf"
-            | "asin"
-            | "asinf"
-            | "atan"
-            | "atan2"
-            | "atan2f"
-            | "atanf"
-            | "ceil"
-            | "ceilf"
-            | "cos"
-            | "cosf"
-            | "cosh"
-            | "exp"
-            | "exp2f"
-            | "expf"
-            | "fabs"
-            | "fabsf"
-            | "floor"
-            | "floorf"
-            | "fmaxf"
-            | "fmod"
-            | "fmodf"
-            | "frexp"
-            | "ldexp"
-            | "log"
-            | "log10"
-            | "log10f"
-            | "logf"
-            | "modf"
-            | "nearbyintf"
-            | "pow"
-            | "powf"
-            | "rint"
-            | "roundf"
-            | "sin"
-            | "sinf"
-            | "sinh"
-            | "sqrt"
-            | "sqrtf"
-            | "tan"
-            | "tanf"
-            | "tanh"
-            | "truncf"
-    )
+    LibmOp::from_name(name).is_some()
 }
 
 fn is_zlib_symbol(name: &str) -> bool {
@@ -8774,6 +12403,19 @@ fn init_ctype<M: Memory>(memory: &mut M, address: u32, upper: bool) -> Result<()
     for value in 0..=255u32 {
         let flags = ctype_flags(value as u8, upper);
         store8(memory, table.wrapping_add(value + 1), flags as u8)?;
+    }
+    Ok(())
+}
+
+fn init_bionic_stdio<M: Memory>(memory: &mut M, address: u32) -> Result<(), HleError> {
+    for (fd, flags) in [
+        (0u16, BIONIC_FILE_FLAG_SRD),
+        (1u16, BIONIC_FILE_FLAG_SWR),
+        (2u16, BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SNBF),
+    ] {
+        let stream = address.wrapping_add(u32::from(fd) * BIONIC_FILE_SIZE);
+        store16(memory, stream.wrapping_add(FAKE_FILE_FLAGS_OFFSET), flags)?;
+        store16(memory, stream.wrapping_add(FAKE_FILE_FD_OFFSET), fd)?;
     }
     Ok(())
 }
@@ -8985,129 +12627,7 @@ fn load_cxx_string_bytes<M: Memory>(memory: &mut M, string: u32) -> Result<Vec<u
     load_bytes(memory, data, len)
 }
 
-fn load_cxx_string_lossy<M: Memory>(memory: &mut M, string: u32) -> Result<String, HleError> {
-    let bytes = load_cxx_string_bytes(memory, string)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn load_resource_location_debug<M: Memory>(
-    memory: &mut M,
-    resource: u32,
-) -> Result<ResourceLocationDebug, HleError> {
-    if resource == 0 {
-        return Ok(ResourceLocationDebug {
-            path: String::new(),
-            package: String::new(),
-        });
-    }
-    Ok(ResourceLocationDebug {
-        path: load_cxx_string_lossy(memory, resource)?,
-        package: load_cxx_string_lossy(memory, resource.wrapping_add(4))?,
-    })
-}
-
-fn resource_location_key(location: &ResourceLocationDebug) -> String {
-    if location.package.is_empty() {
-        location.path.clone()
-    } else {
-        format!("{}:{}", location.package, location.path)
-    }
-}
-
-fn texture_asset_entry_candidates(location: &ResourceLocationDebug) -> Vec<String> {
-    let mut stems = Vec::new();
-    let path = normalize_resource_path(&location.path);
-    if path.is_empty() {
-        return Vec::new();
-    }
-    push_unique_string(&mut stems, path.clone());
-    if let Some(stripped) = path.strip_prefix("textures/") {
-        push_unique_string(&mut stems, stripped.to_string());
-    }
-    if let Some(stripped) = path.strip_prefix("images/") {
-        push_unique_string(&mut stems, stripped.to_string());
-    }
-    for dotted in dotted_resource_path_stems(&path) {
-        push_unique_string(&mut stems, dotted);
-    }
-
-    let mut candidates = Vec::new();
-    for stem in stems {
-        let has_extension = has_known_image_extension(&stem);
-        if has_extension {
-            push_unique_string(&mut candidates, format!("assets/images/{stem}"));
-            push_unique_string(
-                &mut candidates,
-                format!("assets/resourcepacks/vanilla/images/{stem}"),
-            );
-            push_unique_string(&mut candidates, format!("assets/{stem}"));
-        } else {
-            for name in image_stem_names(&stem, ImageFormat::Any) {
-                push_unique_string(&mut candidates, format!("assets/images/{name}"));
-                push_unique_string(
-                    &mut candidates,
-                    format!("assets/resourcepacks/vanilla/images/{name}"),
-                );
-                push_unique_string(&mut candidates, format!("assets/{name}"));
-            }
-        }
-    }
-    candidates
-}
-
-fn texture_alias_entry_candidates(alias: &str) -> Vec<String> {
-    let raw = alias.replace('\\', "/").trim_start_matches('/').to_string();
-    let mut candidates = Vec::new();
-    if raw.starts_with("assets/") {
-        for name in image_stem_names(&raw, ImageFormat::Any) {
-            push_unique_string(&mut candidates, name);
-        }
-    }
-
-    let stem = normalize_resource_path(&raw);
-    for name in image_stem_names(&stem, ImageFormat::Any) {
-        push_unique_string(
-            &mut candidates,
-            format!("assets/resourcepacks/vanilla/images/{name}"),
-        );
-        push_unique_string(&mut candidates, format!("assets/images/{name}"));
-        push_unique_string(&mut candidates, format!("assets/{name}"));
-    }
-    candidates
-}
-
-fn dotted_resource_path_stems(path: &str) -> Vec<String> {
-    let mut stems = Vec::new();
-    if let Some(block) = path.strip_prefix("block.") {
-        push_unique_string(&mut stems, format!("blocks/{}", block.replace('.', "_")));
-    }
-    if let Some(item) = path.strip_prefix("item.") {
-        push_unique_string(&mut stems, format!("items/{}", item.replace('.', "_")));
-        push_unique_string(&mut stems, format!("item/{}", item.replace('.', "_")));
-    }
-    if path == "atlas.compass" {
-        push_unique_string(&mut stems, "compass-atlas".to_string());
-    } else if path == "atlas.watch" {
-        push_unique_string(&mut stems, "watch-atlas".to_string());
-    } else if path == "atlas.terrain" {
-        push_unique_string(&mut stems, "terrain-atlas_mip3".to_string());
-    }
-    stems
-}
-
-fn image_format_for_loader(name: &str) -> ImageFormat {
-    if name.contains("loadPNG") {
-        ImageFormat::Png
-    } else if name.contains("loadTGA") {
-        ImageFormat::Tga
-    } else if name.contains("loadJPEG") {
-        ImageFormat::Jpeg
-    } else {
-        ImageFormat::Any
-    }
-}
-
-fn image_asset_entry_candidates(path: &str, format: ImageFormat) -> Vec<String> {
+fn image_asset_entry_candidates(path: &str) -> Vec<String> {
     let clean = normalize_resource_path(path);
     if clean.is_empty() {
         return Vec::new();
@@ -9124,7 +12644,7 @@ fn image_asset_entry_candidates(path: &str, format: ImageFormat) -> Vec<String> 
 
     let mut candidates = Vec::new();
     for stem in stems {
-        let names = image_stem_names(&stem, format);
+        let names = image_stem_names(&stem);
         for name in names {
             if name.starts_with("assets/") {
                 push_unique_string(&mut candidates, name);
@@ -9142,25 +12662,15 @@ fn image_asset_entry_candidates(path: &str, format: ImageFormat) -> Vec<String> 
     candidates
 }
 
-fn image_stem_names(stem: &str, format: ImageFormat) -> Vec<String> {
+fn image_stem_names(stem: &str) -> Vec<String> {
     let has_extension = has_known_image_extension(stem);
     let mut names = Vec::new();
     push_unique_string(&mut names, stem.to_string());
     if !has_extension {
-        match format {
-            ImageFormat::Png => push_unique_string(&mut names, format!("{stem}.png")),
-            ImageFormat::Tga => push_unique_string(&mut names, format!("{stem}.tga")),
-            ImageFormat::Jpeg => {
-                push_unique_string(&mut names, format!("{stem}.jpg"));
-                push_unique_string(&mut names, format!("{stem}.jpeg"));
-            }
-            ImageFormat::Any => {
-                push_unique_string(&mut names, format!("{stem}.png"));
-                push_unique_string(&mut names, format!("{stem}.tga"));
-                push_unique_string(&mut names, format!("{stem}.jpg"));
-                push_unique_string(&mut names, format!("{stem}.jpeg"));
-            }
-        }
+        push_unique_string(&mut names, format!("{stem}.png"));
+        push_unique_string(&mut names, format!("{stem}.tga"));
+        push_unique_string(&mut names, format!("{stem}.jpg"));
+        push_unique_string(&mut names, format!("{stem}.jpeg"));
     }
     names
 }
@@ -9184,192 +12694,19 @@ fn normalize_resource_path(path: &str) -> String {
         .to_string()
 }
 
-fn fallback_texture_rgba(key: &str) -> Vec<u8> {
-    let mut hash = 0x811c_9dc5u32;
-    for byte in key.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    let base = [
-        0x40 | ((hash >> 16) as u8 & 0x7f),
-        0x40 | ((hash >> 8) as u8 & 0x7f),
-        0x40 | (hash as u8 & 0x7f),
-        0xff,
-    ];
-    let hi = [
-        base[0].saturating_add(0x40),
-        base[1].saturating_add(0x40),
-        base[2].saturating_add(0x40),
-        0xff,
-    ];
-    let mut pixels = Vec::with_capacity(FAKE_TEXTURE_BYTES as usize);
-    for y in 0..FAKE_TEXTURE_SIDE {
-        for x in 0..FAKE_TEXTURE_SIDE {
-            let color = if ((x / 4) + (y / 4)) & 1 == 0 {
-                base
-            } else {
-                hi
-            };
-            pixels.extend_from_slice(&color);
-        }
-    }
-    pixels
-}
-
-fn maybe_expand_minecraft_font_texture(key: &str, texture: DecodedTexture) -> DecodedTexture {
-    if std::env::var_os("AEMU_MCPE_DISABLE_FONT_TEXTURE_EXPAND").is_some()
-        || !is_minecraft_bitmap_font_key(key)
-        || texture.width != 128
-        || texture.height != 128
-    {
-        return texture;
-    }
-
-    let Some(rgba) = upscale_rgba_nearest_2x(texture.width, texture.height, &texture.rgba) else {
-        return texture;
-    };
-    DecodedTexture {
-        width: texture.width * 2,
-        height: texture.height * 2,
-        rgba,
-        source: format!("{}#2x-font-atlas", texture.source),
-    }
-}
-
-fn is_minecraft_bitmap_font_key(key: &str) -> bool {
-    key.ends_with("font/default8.png") || key.ends_with("font/ascii_sga.png")
-}
-
-fn upscale_rgba_nearest_2x(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-    let width_usize = usize::try_from(width).ok()?;
-    let height_usize = usize::try_from(height).ok()?;
-    let src_row_bytes = width_usize.checked_mul(4)?;
-    if rgba.len() < src_row_bytes.checked_mul(height_usize)? {
-        return None;
-    }
-
-    let out_width = width_usize.checked_mul(2)?;
-    let out_height = height_usize.checked_mul(2)?;
-    let out_row_bytes = out_width.checked_mul(4)?;
-    let mut out = vec![0u8; out_row_bytes.checked_mul(out_height)?];
-
-    for y in 0..height_usize {
-        for x in 0..width_usize {
-            let src = y * src_row_bytes + x * 4;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let dst = (y * 2 + dy) * out_row_bytes + (x * 2 + dx) * 4;
-                    out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
-                }
-            }
-        }
-    }
-    Some(out)
-}
-
-fn minecraft_font_widths_from_rgba(width: u32, height: u32, rgba: &[u8]) -> [u32; 256] {
-    let mut widths = [0u32; 256];
-    let width = width as usize;
-    let height = height as usize;
-    for code in 0..256usize {
-        if code == 0x20 {
-            widths[code] = 4;
-            continue;
-        }
-
-        let cell_x = (code & 0x0f) * 8;
-        let cell_y = (code >> 4) * 8;
-        let mut rightmost = None;
-        for x in (0..8usize).rev() {
-            let px = cell_x + x;
-            if px >= width {
-                continue;
-            }
-            for y in 0..8usize {
-                let py = cell_y + y;
-                if py >= height {
-                    continue;
-                }
-                let offset = py
-                    .checked_mul(width)
-                    .and_then(|offset| offset.checked_add(px))
-                    .and_then(|offset| offset.checked_mul(4));
-                let Some(offset) = offset else {
-                    continue;
-                };
-                if offset + 3 < rgba.len() && rgba[offset + 3] != 0 && rgba[offset] != 0 {
-                    rightmost = Some(x);
-                    break;
-                }
-            }
-            if rightmost.is_some() {
-                break;
-            }
-        }
-        widths[code] = rightmost.map_or(1, |x| x as u32 + 2);
-    }
-    widths
-}
-
-fn default_minecraft_font_widths() -> [u32; 256] {
-    let mut widths = [6u32; 256];
-    widths[0x20] = 4;
-    widths
-}
-
-fn store_minecraft_font_color_codes<M: Memory>(memory: &mut M, font: u32) -> Result<(), HleError> {
-    for idx in 0..32u32 {
-        let dim = if idx & 0x08 != 0 { 85 } else { 0 };
-        let mut red = if idx & 0x04 != 0 { 170 } else { 0 } + dim;
-        let mut green = if idx & 0x02 != 0 { 170 } else { 0 } + dim;
-        let mut blue = if idx & 0x01 != 0 { 170 } else { 0 } + dim;
-        if idx == 6 {
-            red += 85;
-        }
-        if idx >= 16 {
-            red /= 4;
-            green /= 4;
-            blue /= 4;
-        }
-
-        let base = font.wrapping_add(0x34).wrapping_add(idx * 16);
-        store32(memory, base, (blue as f32 / 255.0).to_bits())?;
-        store32(
-            memory,
-            base.wrapping_add(0x04),
-            (red as f32 / 255.0).to_bits(),
-        )?;
-        store32(
-            memory,
-            base.wrapping_add(0x08),
-            (green as f32 / 255.0).to_bits(),
-        )?;
-        store32(memory, base.wrapping_add(0x0c), 0)?;
-    }
-    Ok(())
-}
-
-fn decode_image_rgba(
-    source: &str,
-    bytes: &[u8],
-    format: ImageFormat,
-) -> Result<DecodedTexture, String> {
+fn decode_image_rgba(source: &str, bytes: &[u8]) -> Result<DecodedTexture, String> {
     let lower = source.to_ascii_lowercase();
-    let mut decoded = match format {
-        ImageFormat::Png => decode_png_rgba(bytes),
-        ImageFormat::Tga => decode_tga_rgba(bytes),
-        ImageFormat::Jpeg => Err("JPEG decoding is not implemented".to_string()),
-        ImageFormat::Any => {
-            if bytes.starts_with(b"\x89PNG\r\n\x1a\n") || lower.ends_with(".png") {
-                decode_png_rgba(bytes)
-            } else if lower.ends_with(".tga") {
-                decode_tga_rgba(bytes)
-            } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-                Err("JPEG decoding is not implemented".to_string())
-            } else {
-                decode_png_rgba(bytes).or_else(|_| decode_tga_rgba(bytes))
-            }
-        }
+    let mut decoded = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") || lower.ends_with(".png") {
+        decode_png_rgba(bytes)
+    } else if lower.ends_with(".tga") {
+        decode_tga_rgba(bytes)
+    } else if bytes.starts_with(&[0xff, 0xd8])
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+    {
+        Err("JPEG decoding is not implemented".to_string())
+    } else {
+        decode_png_rgba(bytes).or_else(|_| decode_tga_rgba(bytes))
     }?;
     zero_transparent_rgb(&mut decoded.2);
     Ok(DecodedTexture {
@@ -11096,51 +14433,9 @@ fn trace_android_asset(args: fmt::Arguments<'_>) {
     }
 }
 
-fn trace_mcpe_resource(args: fmt::Arguments<'_>) {
-    if std::env::var_os("AEMU_TRACE_MCPE_RESOURCE").is_some() {
-        let text = args.to_string();
-        if let Some(needle) = std::env::var("AEMU_TRACE_MCPE_RESOURCE_CONTAINS")
-            .ok()
-            .filter(|needle| !needle.is_empty())
-        {
-            if !text.contains(&needle) {
-                return;
-            }
-        }
-        let count = MCPE_RESOURCE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
-        let limit = std::env::var("AEMU_TRACE_MCPE_RESOURCE_LIMIT")
-            .ok()
-            .and_then(|raw| raw.parse::<usize>().ok());
-        if limit.is_some_and(|limit| count >= limit) {
-            return;
-        }
-        eprintln!("HLE mcpe-resource {text}");
-    }
-}
-
 fn trace_hle_file(args: fmt::Arguments<'_>) {
     if std::env::var_os("AEMU_TRACE_HLE_FILE").is_some() {
         eprintln!("HLE file {args}");
-    }
-}
-
-fn trace_mcpe_input(args: fmt::Arguments<'_>) {
-    if std::env::var_os("AEMU_TRACE_MCPE_INPUT_EVENTS").is_none() {
-        return;
-    }
-    let count = MCPE_INPUT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
-    let limit = std::env::var("AEMU_TRACE_MCPE_INPUT_EVENTS_LIMIT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(400);
-    if count < limit {
-        eprintln!("HLE_MCPE_INPUT {args}");
-    }
-}
-
-fn trace_mcpe_input_empty(args: fmt::Arguments<'_>) {
-    if std::env::var_os("AEMU_TRACE_MCPE_INPUT_EMPTY").is_some() {
-        trace_mcpe_input(args);
     }
 }
 
@@ -11204,12 +14499,67 @@ fn errno_message(errno: u32) -> String {
         ENOENT => "No such file or directory".to_string(),
         EBADF => "Bad file descriptor".to_string(),
         EAGAIN => "Try again".to_string(),
+        ENOMEM => "Out of memory".to_string(),
         EEXIST => "File exists".to_string(),
         EISDIR => "Is a directory".to_string(),
         EINVAL => "Invalid argument".to_string(),
         ENOSYS => "Function not implemented".to_string(),
+        ENOPROTOOPT => "Protocol not available".to_string(),
+        ENETUNREACH => "Network is unreachable".to_string(),
         _ => format!("Unknown error {errno}"),
     }
+}
+
+fn format_perror_message(prefix: Option<&[u8]>, errno: u32) -> Vec<u8> {
+    let message = errno_message(errno);
+    let prefix_len = prefix.map_or(0, |prefix| prefix.len() + 2);
+    let mut output = Vec::with_capacity(prefix_len + message.len() + 1);
+    if let Some(prefix) = prefix {
+        output.extend_from_slice(prefix);
+        output.extend_from_slice(b": ");
+    }
+    output.extend_from_slice(message.as_bytes());
+    output.push(b'\n');
+    output
+}
+
+fn parse_service_port(service: &str, socktype: u32, flags: u32) -> Result<u16, u32> {
+    if !service.is_empty() && service.bytes().all(|byte| byte.is_ascii_digit()) {
+        return service.parse::<u16>().map_err(|_| EAI_SERVICE);
+    }
+    if flags & AI_NUMERICSERV != 0 {
+        return Err(EAI_NONAME);
+    }
+    let port = match service.to_ascii_lowercase().as_str() {
+        "domain" if matches!(socktype, 0 | SOCK_STREAM | SOCK_DGRAM) => 53,
+        "http" if matches!(socktype, 0 | SOCK_STREAM) => 80,
+        "https" if matches!(socktype, 0 | SOCK_STREAM) => 443,
+        "ntp" if matches!(socktype, 0 | SOCK_DGRAM) => 123,
+        _ => return Err(EAI_SERVICE),
+    };
+    Ok(port)
+}
+
+fn gai_error_message(code: usize) -> &'static str {
+    const MESSAGES: [&str; EAI_MAX + 1] = [
+        "Success",
+        "Address family for hostname not supported",
+        "Temporary failure in name resolution",
+        "Invalid value for ai_flags",
+        "Non-recoverable failure in name resolution",
+        "ai_family not supported",
+        "Memory allocation failure",
+        "No address associated with hostname",
+        "hostname nor servname provided, or not known",
+        "servname not supported for ai_socktype",
+        "ai_socktype not supported",
+        "System error returned in errno",
+        "Invalid value for hints",
+        "Resolved protocol is unknown",
+        "Argument buffer overflow",
+        "Unknown error",
+    ];
+    MESSAGES.get(code).copied().unwrap_or(MESSAGES[EAI_MAX])
 }
 
 fn fake_regular_file_stat(ino: u64, size: u64) -> AndroidArmStat {
@@ -11374,14 +14724,94 @@ fn parse_ipv4_addr(text: &str) -> Option<u32> {
     Some(u32::from_le_bytes(octets))
 }
 
+fn guest_ephemeral_port(fd: u32) -> u16 {
+    40_000 + (fd % 20_000) as u16
+}
+
+fn guest_sockaddr_min_len(domain: u32) -> u32 {
+    if domain == AF_INET6 { 28 } else { 16 }
+}
+
+fn guest_sockaddr_family(address: &[u8]) -> Option<u32> {
+    let family = address.get(..2)?;
+    Some(u32::from(u16::from_le_bytes([family[0], family[1]])))
+}
+
+fn guest_sockaddr_matches_local_endpoint(domain: u32, bound: &[u8], destination: &[u8]) -> bool {
+    if guest_sockaddr_family(bound) != Some(domain)
+        || guest_sockaddr_family(destination) != Some(domain)
+        || bound.get(2..4) != destination.get(2..4)
+    {
+        return false;
+    }
+    match domain {
+        AF_INET => {
+            let Some(bound_ip) = bound.get(4..8) else {
+                return false;
+            };
+            let Some(destination_ip) = destination.get(4..8) else {
+                return false;
+            };
+            let bound_any = bound_ip == [0, 0, 0, 0];
+            let destination_local =
+                destination_ip == [0, 0, 0, 0] || destination_ip.first() == Some(&127);
+            bound_ip == destination_ip || (bound_any && destination_local)
+        }
+        AF_INET6 => {
+            let Some(bound_ip) = bound.get(8..24) else {
+                return false;
+            };
+            let Some(destination_ip) = destination.get(8..24) else {
+                return false;
+            };
+            let bound_any = bound_ip.iter().all(|byte| *byte == 0);
+            let destination_any = destination_ip.iter().all(|byte| *byte == 0);
+            let destination_loopback =
+                destination_ip[..15].iter().all(|byte| *byte == 0) && destination_ip[15] == 1;
+            bound_ip == destination_ip || (bound_any && (destination_any || destination_loopback))
+        }
+        _ => false,
+    }
+}
+
+fn guest_datagram_source_address(domain: u32, bound: &[u8], destination: &[u8]) -> Vec<u8> {
+    let mut source = bound.to_vec();
+    match domain {
+        AF_INET if source.get(4..8) == Some(&[0, 0, 0, 0]) => {
+            let source_ip = if destination.get(4..8).is_some_and(|ip| ip[0] == 127) {
+                destination[4..8].to_vec()
+            } else {
+                vec![127, 0, 0, 1]
+            };
+            source[4..8].copy_from_slice(&source_ip);
+        }
+        AF_INET6
+            if source
+                .get(8..24)
+                .is_some_and(|ip| ip.iter().all(|byte| *byte == 0)) =>
+        {
+            source[8..24].fill(0);
+            source[23] = 1;
+        }
+        _ => {}
+    }
+    source
+}
+
+fn default_guest_sockaddr(domain: u32, port: Option<u16>) -> Vec<u8> {
+    let len = if domain == AF_INET6 { 28 } else { 16 };
+    let mut address = vec![0; len];
+    address[..2].copy_from_slice(&(domain as u16).to_le_bytes());
+    if let Some(port) = port {
+        address[2..4].copy_from_slice(&port.to_be_bytes());
+    }
+    address
+}
+
 fn load8<M: Memory>(memory: &mut M, addr: u32) -> Result<u8, HleError> {
     memory
         .load8(addr)
         .map_err(|err| HleError::Memory(err.to_string()))
-}
-
-fn minecraft_pointer_coord(value: f32) -> i16 {
-    value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
 fn load16<M: Memory>(memory: &mut M, addr: u32) -> Result<u16, HleError> {
@@ -11394,6 +14824,25 @@ fn load32<M: Memory>(memory: &mut M, addr: u32) -> Result<u32, HleError> {
     memory
         .load32(addr)
         .map_err(|err| HleError::Memory(err.to_string()))
+}
+
+fn load_gl_names<M: Memory>(
+    memory: &mut M,
+    raw_count: u32,
+    names: u32,
+) -> Result<Vec<u32>, HleError> {
+    let count = raw_count as i32;
+    if count <= 0 {
+        return Ok(Vec::new());
+    }
+    let mut values = Vec::with_capacity(count as usize);
+    for idx in 0..count as u32 {
+        let value = load32(memory, names.wrapping_add(idx.wrapping_mul(4)))?;
+        if value != 0 {
+            values.push(value);
+        }
+    }
+    Ok(values)
 }
 
 fn store8<M: Memory>(memory: &mut M, addr: u32, value: u8) -> Result<(), HleError> {
@@ -11414,15 +14863,15 @@ fn store32<M: Memory>(memory: &mut M, addr: u32, value: u32) -> Result<(), HleEr
         .map_err(|err| HleError::Memory(err.to_string()))
 }
 
-fn clear_fd_set<M: Memory>(memory: &mut M, fd_set: u32, nfds: u32) -> Result<(), HleError> {
-    if fd_set == 0 || nfds == 0 {
-        return Ok(());
+fn fd_set_contains(set: &[u8], fd: u32) -> bool {
+    set.get((fd / 8) as usize)
+        .is_some_and(|byte| byte & (1 << (fd % 8)) != 0)
+}
+
+fn fd_set_insert(set: &mut [u8], fd: u32) {
+    if let Some(byte) = set.get_mut((fd / 8) as usize) {
+        *byte |= 1 << (fd % 8);
     }
-    let words = nfds.saturating_add(31) / 32;
-    for word in 0..words {
-        store32(memory, fd_set.wrapping_add(word.wrapping_mul(4)), 0)?;
-    }
-    Ok(())
 }
 
 fn store64<M: Memory>(memory: &mut M, addr: u32, value: u64) -> Result<(), HleError> {
@@ -11432,13 +14881,6 @@ fn store64<M: Memory>(memory: &mut M, addr: u32, value: u64) -> Result<(), HleEr
 
 fn store_f64<M: Memory>(memory: &mut M, addr: u32, value: f64) -> Result<(), HleError> {
     store64(memory, addr, value.to_bits())
-}
-
-fn store_json_null<M: Memory>(memory: &mut M, addr: u32) -> Result<(), HleError> {
-    for offset in 0..16 {
-        store8(memory, addr.wrapping_add(offset), 0)?;
-    }
-    Ok(())
 }
 
 fn write_android_locale_code<M: Memory>(
@@ -11499,27 +14941,46 @@ fn egl_query_string(name: u32) -> Option<&'static str> {
     match name {
         EGL_VENDOR => Some("AEMU"),
         EGL_VERSION => Some("1.4 AEMU EGL"),
-        EGL_EXTENSIONS => Some("EGL_KHR_create_context EGL_KHR_surfaceless_context"),
+        EGL_EXTENSIONS => Some(""),
         EGL_CLIENT_APIS => Some("OpenGL ES"),
         _ => None,
     }
 }
 
-fn egl_config_attrib(attr: u32) -> u32 {
-    match attr {
+fn read_egl_attrib_list<M: Memory>(
+    memory: &mut M,
+    ptr: u32,
+) -> Result<Option<Vec<(u32, u32)>>, HleError> {
+    if ptr == 0 {
+        return Ok(Some(Vec::new()));
+    }
+    let mut attributes = Vec::new();
+    for index in 0..64u32 {
+        let attribute = load32(memory, ptr.wrapping_add(index * 8))?;
+        if attribute == EGL_NONE {
+            return Ok(Some(attributes));
+        }
+        let value = load32(memory, ptr.wrapping_add(index * 8 + 4))?;
+        attributes.push((attribute, value));
+    }
+    Ok(None)
+}
+
+fn egl_config_attrib(attr: u32) -> Option<u32> {
+    Some(match attr {
         EGL_BUFFER_SIZE => 32,
         EGL_RED_SIZE | EGL_GREEN_SIZE | EGL_BLUE_SIZE | EGL_ALPHA_SIZE => 8,
         EGL_DEPTH_SIZE => 24,
         EGL_STENCIL_SIZE => 8,
         EGL_CONFIG_CAVEAT => EGL_NONE,
-        EGL_CONFIG_ID => EGL_CONFIG_HANDLE,
+        EGL_CONFIG_ID => EGL_CONFIG_ID_VALUE,
         EGL_LEVEL => 0,
         EGL_MAX_PBUFFER_HEIGHT => EGL_DEFAULT_SURFACE_HEIGHT,
         EGL_MAX_PBUFFER_PIXELS => EGL_DEFAULT_SURFACE_WIDTH * EGL_DEFAULT_SURFACE_HEIGHT,
         EGL_MAX_PBUFFER_WIDTH => EGL_DEFAULT_SURFACE_WIDTH,
         EGL_NATIVE_RENDERABLE => 0,
         EGL_NATIVE_VISUAL_ID => ANDROID_WINDOW_FORMAT_RGBA_8888,
-        EGL_NATIVE_VISUAL_TYPE => EGL_NONE,
+        EGL_NATIVE_VISUAL_TYPE => 0,
         EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
         EGL_SURFACE_TYPE => EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
         EGL_TRANSPARENT_TYPE => EGL_NONE,
@@ -11528,18 +14989,52 @@ fn egl_config_attrib(attr: u32) -> u32 {
         EGL_LUMINANCE_SIZE | EGL_ALPHA_MASK_SIZE => 0,
         EGL_COLOR_BUFFER_TYPE => EGL_RGB_BUFFER,
         EGL_RENDERABLE_TYPE | EGL_CONFORMANT => EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT,
-        _ => 0,
-    }
+        _ => return None,
+    })
 }
 
-fn egl_surface_attrib(attr: u32) -> u32 {
-    match attr {
-        EGL_WIDTH => EGL_DEFAULT_SURFACE_WIDTH,
-        EGL_HEIGHT => EGL_DEFAULT_SURFACE_HEIGHT,
-        EGL_CONFIG_ID => EGL_CONFIG_HANDLE,
-        EGL_RENDERABLE_TYPE => EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT,
-        _ => 0,
+fn egl_config_matches(attributes: &[(u32, u32)]) -> Result<bool, u32> {
+    for &(attribute, requested) in attributes {
+        if requested == EGL_DONT_CARE {
+            if egl_config_attrib(attribute).is_none() {
+                return Err(EGL_BAD_ATTRIBUTE);
+            }
+            continue;
+        }
+        let Some(actual) = egl_config_attrib(attribute) else {
+            return Err(EGL_BAD_ATTRIBUTE);
+        };
+        let matches = match attribute {
+            EGL_BUFFER_SIZE | EGL_RED_SIZE | EGL_GREEN_SIZE | EGL_BLUE_SIZE | EGL_ALPHA_SIZE
+            | EGL_DEPTH_SIZE | EGL_STENCIL_SIZE | EGL_SAMPLES | EGL_SAMPLE_BUFFERS
+            | EGL_LUMINANCE_SIZE | EGL_ALPHA_MASK_SIZE => actual >= requested,
+            EGL_SURFACE_TYPE | EGL_RENDERABLE_TYPE | EGL_CONFORMANT => {
+                actual & requested == requested
+            }
+            EGL_CONFIG_CAVEAT
+            | EGL_CONFIG_ID
+            | EGL_LEVEL
+            | EGL_NATIVE_RENDERABLE
+            | EGL_NATIVE_VISUAL_TYPE
+            | EGL_TRANSPARENT_TYPE
+            | EGL_BIND_TO_TEXTURE_RGB
+            | EGL_BIND_TO_TEXTURE_RGBA
+            | EGL_COLOR_BUFFER_TYPE => actual == requested,
+            EGL_MAX_PBUFFER_HEIGHT
+            | EGL_MAX_PBUFFER_PIXELS
+            | EGL_MAX_PBUFFER_WIDTH
+            | EGL_NATIVE_VISUAL_ID
+            | EGL_MIN_SWAP_INTERVAL
+            | EGL_MAX_SWAP_INTERVAL => {
+                return Err(EGL_BAD_ATTRIBUTE);
+            }
+            _ => return Err(EGL_BAD_ATTRIBUTE),
+        };
+        if !matches {
+            return Ok(false);
+        }
     }
+    Ok(true)
 }
 
 fn active_max_name_len(active: &[GlesActive]) -> Option<u32> {
@@ -11990,6 +15485,10 @@ impl<'a> GlslPreprocExprParser<'a> {
 }
 
 fn strip_glsl_comments(source: &str) -> String {
+    strip_glsl_comments_checked(source).0
+}
+
+fn strip_glsl_comments_checked(source: &str) -> (String, bool) {
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
     let mut idx = 0usize;
@@ -12026,7 +15525,7 @@ fn strip_glsl_comments(source: &str) -> String {
         out.push(bytes[idx] as char);
         idx += 1;
     }
-    out
+    (out, in_block)
 }
 
 fn glsl_tokens(source: &str) -> Vec<String> {
@@ -12078,14 +15577,6 @@ fn gl_query_string(name: u32) -> Option<&'static str> {
     }
 }
 
-fn gl_shader_iv(name: u32) -> u32 {
-    match name {
-        GL_COMPILE_STATUS => 1,
-        GL_INFO_LOG_LENGTH => 0,
-        _ => 0,
-    }
-}
-
 fn uniform_vector_components(name: &str) -> u8 {
     if name.contains('4') {
         4
@@ -12106,18 +15597,6 @@ fn uniform_matrix_columns(name: &str) -> u8 {
     } else {
         2
     }
-}
-
-fn gles_copy_payload<M: Memory>(memory: &mut M, ptr: u32, bytes: usize) -> Option<Vec<u8>> {
-    if ptr == 0 || bytes > GLES_EVENT_PAYLOAD_LIMIT {
-        return None;
-    }
-    let mut payload = Vec::with_capacity(bytes);
-    for idx in 0..bytes {
-        let byte = load8(memory, ptr.wrapping_add(idx as u32)).ok()?;
-        payload.push(byte);
-    }
-    Some(payload)
 }
 
 fn trace_gles_buffer_upload(
@@ -12262,10 +15741,6 @@ fn read_f32_le(bytes: &[u8], offset: usize) -> Option<f32> {
     read_u32_le(bytes, offset).map(f32::from_bits)
 }
 
-fn gles_u32_len(bytes: u32) -> Option<usize> {
-    usize::try_from(bytes).ok()
-}
-
 fn gles_i32_count_len(count: i32, width: usize) -> Option<usize> {
     let count = usize::try_from(count).ok()?;
     count.checked_mul(width)
@@ -12300,6 +15775,9 @@ fn gles_index_payload_vertex_count(count: i32, ty: u32, payload: &[u8]) -> Optio
     let bytes = gles_draw_index_payload_len(count, ty)?;
     if payload.len() < bytes {
         return None;
+    }
+    if count == 0 {
+        return Some(0);
     }
     let mut max_index = 0u32;
     match ty {
@@ -12379,28 +15857,240 @@ fn gles_image_payload_len(width: i32, height: i32, format: u32, ty: u32) -> Opti
     pixels.checked_mul(components)?.checked_mul(elem_size)
 }
 
-fn gl_integer(name: u32) -> u32 {
-    match name {
-        GL_MAX_TEXTURE_SIZE => 4096,
-        GL_MAX_TEXTURE_IMAGE_UNITS => 8,
-        GL_MAX_VERTEX_ATTRIBS => 16,
-        _ => 0,
+fn is_gl_program_parameter(name: u32) -> bool {
+    matches!(
+        name,
+        GL_DELETE_STATUS
+            | GL_LINK_STATUS
+            | GL_INFO_LOG_LENGTH
+            | GL_ACTIVE_UNIFORMS
+            | GL_ACTIVE_UNIFORM_MAX_LENGTH
+            | GL_ACTIVE_ATTRIBUTES
+            | GL_ACTIVE_ATTRIBUTE_MAX_LENGTH
+    )
+}
+
+fn is_gl_shader_parameter(name: u32) -> bool {
+    matches!(
+        name,
+        GL_DELETE_STATUS
+            | GL_COMPILE_STATUS
+            | GL_INFO_LOG_LENGTH
+            | GL_SHADER_SOURCE_LENGTH
+            | GL_SHADER_TYPE
+    )
+}
+
+fn is_gl_framebuffer_attachment(attachment: u32) -> bool {
+    matches!(
+        attachment,
+        GL_COLOR_ATTACHMENT0 | GL_DEPTH_ATTACHMENT | GL_STENCIL_ATTACHMENT
+    )
+}
+
+fn is_gl_renderbuffer_format(format: u32) -> bool {
+    matches!(
+        format,
+        GL_RGBA4
+            | GL_RGB5_A1
+            | GL_RGB565
+            | GL_DEPTH_COMPONENT16
+            | GL_STENCIL_INDEX8
+            | GL_RGB8_OES
+            | GL_RGBA8_OES
+            | GL_DEPTH24_STENCIL8_OES
+    )
+}
+
+fn is_gl_draw_mode(mode: u32) -> bool {
+    mode <= 6
+}
+
+fn is_gl_capability(capability: u32) -> bool {
+    matches!(
+        capability,
+        GL_BLEND
+            | GL_CULL_FACE
+            | GL_DEPTH_TEST
+            | GL_DITHER
+            | GL_POLYGON_OFFSET_FILL
+            | GL_SAMPLE_ALPHA_TO_COVERAGE
+            | GL_SAMPLE_COVERAGE
+            | GL_SCISSOR_TEST
+            | GL_STENCIL_TEST
+    )
+}
+
+fn is_gl_blend_src_factor(factor: u32) -> bool {
+    matches!(
+        factor,
+        GL_ZERO
+            | GL_ONE
+            | GL_SRC_COLOR
+            | GL_ONE_MINUS_SRC_COLOR
+            | GL_DST_COLOR
+            | GL_ONE_MINUS_DST_COLOR
+            | GL_SRC_ALPHA
+            | GL_ONE_MINUS_SRC_ALPHA
+            | GL_DST_ALPHA
+            | GL_ONE_MINUS_DST_ALPHA
+            | GL_SRC_ALPHA_SATURATE
+    )
+}
+
+fn is_gl_blend_dst_factor(factor: u32) -> bool {
+    is_gl_blend_src_factor(factor) && factor != GL_SRC_ALPHA_SATURATE
+}
+
+fn is_gl_face(face: u32) -> bool {
+    matches!(face, GL_FRONT | GL_BACK | GL_FRONT_AND_BACK)
+}
+
+fn is_gl_comparison(function: u32) -> bool {
+    matches!(
+        function,
+        GL_NEVER
+            | GL_LESS
+            | GL_EQUAL
+            | GL_LEQUAL
+            | GL_GREATER
+            | GL_NOTEQUAL
+            | GL_GEQUAL
+            | GL_ALWAYS
+    )
+}
+
+fn is_gl_stencil_op(operation: u32) -> bool {
+    matches!(
+        operation,
+        GL_KEEP
+            | GL_ZERO
+            | GL_REPLACE
+            | GL_INCR
+            | GL_DECR
+            | GL_INVERT
+            | GL_INCR_WRAP
+            | GL_DECR_WRAP
+    )
+}
+
+fn gl_info_log_length(info_log: &str) -> u32 {
+    if info_log.is_empty() {
+        0
+    } else {
+        info_log.len().saturating_add(1).min(u32::MAX as usize) as u32
     }
 }
 
-fn gl_shader_precision(precision_type: u32) -> (u32, u32, u32) {
-    match precision_type {
+fn validate_glsl_es2_source(shader_type: u32, source: &str) -> Result<(), String> {
+    if !matches!(shader_type, GL_VERTEX_SHADER | GL_FRAGMENT_SHADER) {
+        return Err("invalid shader type".to_string());
+    }
+    if source.trim().is_empty() {
+        return Err("shader source is empty".to_string());
+    }
+    let (visible, unterminated_block_comment) = strip_glsl_comments_checked(source);
+    if unterminated_block_comment {
+        return Err("shader source has an unterminated block comment".to_string());
+    }
+    let tokens = glsl_tokens(&visible);
+    let has_main = tokens.windows(4).any(|tokens| {
+        tokens[0] == "void" && tokens[1] == "main" && tokens[2] == "(" && tokens[3] == ")"
+    }) || tokens.windows(5).any(|tokens| {
+        tokens[0] == "void"
+            && tokens[1] == "main"
+            && tokens[2] == "("
+            && tokens[3] == "void"
+            && tokens[4] == ")"
+    });
+    if !has_main {
+        return Err("shader source has no void main() entry point".to_string());
+    }
+    let mut braces = 0i32;
+    let mut parentheses = 0i32;
+    for byte in visible.bytes() {
+        match byte {
+            b'{' => braces += 1,
+            b'}' => {
+                braces -= 1;
+                if braces < 0 {
+                    return Err("shader source has an unmatched closing brace".to_string());
+                }
+            }
+            b'(' => parentheses += 1,
+            b')' => {
+                parentheses -= 1;
+                if parentheses < 0 {
+                    return Err("shader source has an unmatched closing parenthesis".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if braces != 0 || parentheses != 0 {
+        return Err("shader source has unbalanced delimiters".to_string());
+    }
+    Ok(())
+}
+
+fn gl_shader_precision(precision_type: u32) -> Option<(u32, u32, u32)> {
+    Some(match precision_type {
         GL_LOW_FLOAT | GL_MEDIUM_FLOAT | GL_HIGH_FLOAT => (127, 127, 23),
         GL_LOW_INT | GL_MEDIUM_INT | GL_HIGH_INT => (31, 30, 0),
-        _ => (0, 0, 0),
+        _ => return None,
+    })
+}
+
+fn is_gl_texture_parameter(name: u32) -> bool {
+    matches!(
+        name,
+        GL_TEXTURE_MIN_FILTER | GL_TEXTURE_MAG_FILTER | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T
+    )
+}
+
+fn is_gl_texture_parameter_value(name: u32, value: u32) -> bool {
+    match name {
+        GL_TEXTURE_MAG_FILTER => matches!(value, GL_NEAREST | GL_LINEAR),
+        GL_TEXTURE_MIN_FILTER => matches!(
+            value,
+            GL_NEAREST
+                | GL_LINEAR
+                | GL_NEAREST_MIPMAP_NEAREST
+                | GL_LINEAR_MIPMAP_NEAREST
+                | GL_NEAREST_MIPMAP_LINEAR
+                | GL_LINEAR_MIPMAP_LINEAR
+        ),
+        GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T => {
+            matches!(value, GL_REPEAT | GL_CLAMP_TO_EDGE | GL_MIRRORED_REPEAT)
+        }
+        _ => false,
     }
 }
 
-fn gl_tex_parameter_iv(name: u32) -> u32 {
-    match name {
-        GL_TEXTURE_MIN_FILTER | GL_TEXTURE_MAG_FILTER => GL_LINEAR,
+fn gl_default_texture_parameter(name: u32) -> Option<u32> {
+    Some(match name {
+        GL_TEXTURE_MIN_FILTER => GL_NEAREST_MIPMAP_LINEAR,
+        GL_TEXTURE_MAG_FILTER => GL_LINEAR,
         GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T => GL_REPEAT,
-        _ => 0,
+        _ => return None,
+    })
+}
+
+fn is_gl_texture_format(format: u32) -> bool {
+    matches!(
+        format,
+        GL_ALPHA | GL_RGB | GL_RGBA | GL_LUMINANCE | GL_LUMINANCE_ALPHA | GL_BGRA_EXT
+    )
+}
+
+fn is_gl_texture_type_for_format(format: u32, ty: u32) -> bool {
+    match ty {
+        GL_UNSIGNED_BYTE => is_gl_texture_format(format),
+        GL_UNSIGNED_SHORT_5_6_5 => format == GL_RGB,
+        GL_UNSIGNED_SHORT_4_4_4_4 | GL_UNSIGNED_SHORT_5_5_5_1 => {
+            matches!(format, GL_RGBA | GL_BGRA_EXT)
+        }
+        _ => false,
     }
 }
 
@@ -12413,6 +16103,18 @@ mod tests {
     use crate::guest_memory::MappedMemory;
 
     use super::*;
+
+    fn make_test_gles_current(hle: &mut HleRuntime) {
+        hle.egl_state.display_obtained = true;
+        hle.egl_state.initialized = true;
+        hle.egl_state.context_alive = true;
+        hle.egl_state.context_client_version = 2;
+        hle.egl_state.surface_alive = true;
+        hle.egl_state.current_thread = Some(hle.current_pthread);
+        hle.egl_state.current_draw = EGL_SURFACE_HANDLE;
+        hle.egl_state.current_read = EGL_SURFACE_HANDLE;
+        hle.egl_state.current_context = EGL_CONTEXT_HANDLE;
+    }
 
     fn load_test_cxx_string(memory: &mut MappedMemory, string: u32) -> Vec<u8> {
         let data = memory.load32(string).unwrap();
@@ -12464,6 +16166,324 @@ mod tests {
         assert!(names.contains(&"PROJ".to_string()));
         assert!(names.contains(&"CHUNK_ORIGIN_AND_SCALE".to_string()));
         assert!(!names.contains(&"WORLDVIEWPROJ".to_string()));
+    }
+
+    #[test]
+    fn logf_preserves_mcpe_terrain_height_shift() {
+        let mut hle = HleRuntime::new(0, 0x1000, 0x1000);
+        let mut cpu = Cpu::new();
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+
+        cpu.set_reg(0, 128.0_f32.to_bits());
+        hle.libm("logf", &mut cpu, &mut memory).unwrap();
+        let log_height = f32::from_bits(cpu.reg(0));
+
+        cpu.set_reg(0, 2.0_f32.to_bits());
+        hle.libm("logf", &mut cpu, &mut memory).unwrap();
+        let log_two = f32::from_bits(cpu.reg(0));
+
+        assert_eq!((log_height / log_two) as i32, 7);
+    }
+
+    #[test]
+    fn libm_pointer_outputs_and_soft_float_abi_are_correct() {
+        let mut hle = HleRuntime::new(0, 0x1800, 0x400);
+        let mut cpu = Cpu::new();
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        cpu.set_reg(14, 0x2000);
+
+        set_f64_regs(&mut cpu, 0, 8.0);
+        cpu.set_reg(2, 0x1100);
+        hle.dispatch("frexp", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), 0.5);
+        assert_eq!(memory.load32(0x1100).unwrap() as i32, 4);
+
+        set_f64_regs(&mut cpu, 0, 0.5);
+        cpu.set_reg(2, 4);
+        hle.dispatch("ldexp", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), 8.0);
+
+        set_f64_regs(&mut cpu, 0, -3.25);
+        cpu.set_reg(2, 0x1110);
+        hle.dispatch("modf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), -0.25);
+        assert_eq!(
+            f64::from_bits(
+                u64::from(memory.load32(0x1110).unwrap())
+                    | (u64::from(memory.load32(0x1114).unwrap()) << 32)
+            ),
+            -3.0
+        );
+
+        set_f64_regs(&mut cpu, 0, 2.5);
+        hle.dispatch("rint", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f64::from_bits(reg64(&cpu, 0)), 2.0);
+
+        cpu.set_reg(0, 5.5_f32.to_bits());
+        cpu.set_reg(1, 2.0_f32.to_bits());
+        hle.dispatch("fmodf", &mut cpu, &mut memory).unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), 1.5);
+    }
+
+    #[test]
+    fn every_recognized_libm_symbol_has_an_execution_path() {
+        const NAMES: &[&str] = &[
+            "acos",
+            "acosf",
+            "asin",
+            "asinf",
+            "atan",
+            "atan2",
+            "atan2f",
+            "atanf",
+            "ceil",
+            "ceilf",
+            "cos",
+            "cosf",
+            "cosh",
+            "exp",
+            "exp2f",
+            "expf",
+            "fabs",
+            "fabsf",
+            "floor",
+            "floorf",
+            "fmaxf",
+            "fmod",
+            "fmodf",
+            "frexp",
+            "ldexp",
+            "log",
+            "log10",
+            "log10f",
+            "logf",
+            "modf",
+            "nearbyintf",
+            "pow",
+            "powf",
+            "rint",
+            "roundf",
+            "sin",
+            "sinf",
+            "sinh",
+            "sqrt",
+            "sqrtf",
+            "tan",
+            "tanf",
+            "tanh",
+            "truncf",
+        ];
+
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut hle = HleRuntime::new(0, 0x1800, 0x400);
+
+        for &name in NAMES {
+            let op = LibmOp::from_name(name).unwrap();
+            let mut cpu = Cpu::new();
+            cpu.set_reg(14, 0x2000);
+            match op {
+                LibmOp::Atan2 | LibmOp::Fmod | LibmOp::Pow => {
+                    set_f64_regs(&mut cpu, 0, 0.5);
+                    set_f64_regs(&mut cpu, 2, 0.25);
+                }
+                LibmOp::Frexp | LibmOp::Modf => {
+                    set_f64_regs(&mut cpu, 0, 0.5);
+                    cpu.set_reg(2, 0x1100);
+                }
+                LibmOp::Ldexp => {
+                    set_f64_regs(&mut cpu, 0, 0.5);
+                    cpu.set_reg(2, 2);
+                }
+                LibmOp::Acosf
+                | LibmOp::Asinf
+                | LibmOp::Atanf
+                | LibmOp::Ceilf
+                | LibmOp::Cosf
+                | LibmOp::Exp2f
+                | LibmOp::Expf
+                | LibmOp::Fabsf
+                | LibmOp::Floorf
+                | LibmOp::Log10f
+                | LibmOp::Logf
+                | LibmOp::Nearbyintf
+                | LibmOp::Roundf
+                | LibmOp::Sinf
+                | LibmOp::Sqrtf
+                | LibmOp::Tanf
+                | LibmOp::Truncf => cpu.set_reg(0, 0.5_f32.to_bits()),
+                LibmOp::Atan2f | LibmOp::Fmaxf | LibmOp::Fmodf | LibmOp::Powf => {
+                    cpu.set_reg(0, 0.5_f32.to_bits());
+                    cpu.set_reg(1, 0.25_f32.to_bits());
+                }
+                _ => set_f64_regs(&mut cpu, 0, 0.5),
+            }
+
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Implemented,
+                "{name}"
+            );
+            hle.dispatch(name, &mut cpu, &mut memory)
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+        }
+    }
+
+    #[test]
+    fn classified_but_unimplemented_hle_calls_fail_closed() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        let mut cpu = Cpu::new();
+        let mut hle = HleRuntime::new(0, 0x1800, 0x400);
+
+        for name in [
+            "glMadeUp",
+            "eglMadeUp",
+            "AAsset_madeUp",
+            "AConfiguration_madeUp",
+            "AMotionEvent_madeUp",
+            "accept",
+            "getnameinfo",
+            "recvmsg",
+            "dlopen",
+            "dlsym",
+            "qsort",
+        ] {
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Unimplemented,
+                "{name}"
+            );
+            let err = hle.dispatch(name, &mut cpu, &mut memory).unwrap_err();
+            assert_eq!(err, HleError::UnimplementedSymbol(name.to_string()));
+        }
+
+        for name in [
+            "glCreateShader",
+            "glDeleteProgram",
+            "eglInitialize",
+            "eglSwapBuffers",
+            "pthread_setname_np",
+            "getenv",
+            "gethostname",
+            "gethostbyname",
+            "setlocale",
+        ] {
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Implemented,
+                "{name}"
+            );
+        }
+
+        assert_eq!(
+            hle.dispatch_stub(
+                "descriptor-mismatch",
+                HleCallBehavior::Implemented,
+                &mut cpu,
+                &mut memory,
+            )
+            .unwrap_err(),
+            HleError::MissingImplementation("descriptor-mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn dispatches_controlled_android_environment() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1100, b"ANDROID_ROOT\0").unwrap();
+        memory
+            .load_bytes(0x1120, b"UNDEFINED_AEMU_VALUE\0")
+            .unwrap();
+        memory.load_bytes(0x1160, b"localhost\0").unwrap();
+        memory.load_bytes(0x1170, b"example.invalid\0").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("getenv", &mut cpu, &mut memory).unwrap();
+        let first = cpu.reg(0);
+        assert_ne!(first, 0);
+        assert_eq!(load_c_string(&mut memory, first, 32).unwrap(), "/system");
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("getenv", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), first);
+
+        cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, 0x1120);
+        hle.dispatch("getenv", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 64);
+        hle.dispatch("gethostname", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(load_c_string(&mut memory, 0x1140, 64).unwrap(), "localhost");
+
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 4);
+        hle.dispatch("gethostname", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EINVAL);
+
+        cpu.set_reg(14, 0x2014);
+        cpu.set_reg(0, 0x1160);
+        hle.dispatch("gethostbyname", &mut cpu, &mut memory)
+            .unwrap();
+        let hostent = cpu.reg(0);
+        assert_ne!(hostent, 0);
+        assert_eq!(memory.load32(hostent.wrapping_add(8)).unwrap(), AF_INET);
+        assert_eq!(memory.load32(hostent.wrapping_add(12)).unwrap(), 4);
+        let address_list = memory.load32(hostent.wrapping_add(16)).unwrap();
+        let address = memory.load32(address_list).unwrap();
+        assert_eq!(memory.load_bytes_for_test(address, 4), [127, 0, 0, 1]);
+
+        cpu.set_reg(14, 0x2018);
+        cpu.set_reg(0, 0x1170);
+        hle.dispatch("gethostbyname", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn dispatches_writev_with_android_iovec_layout() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1200, b"hello").unwrap();
+        memory.load_bytes(0x1210, b" world").unwrap();
+        memory.store32(0x1100, 0x1200).unwrap();
+        memory.store32(0x1104, 5).unwrap();
+        memory.store32(0x1108, 0x1210).unwrap();
+        memory.store32(0x110c, 6).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        assert_eq!(
+            describe_hle_import("writev").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        cpu.set_reg(0, 2);
+        cpu.set_reg(1, 0x1100);
+        cpu.set_reg(2, 2);
+        hle.dispatch("writev", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 11);
+
+        cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, 2);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 1);
+        hle.dispatch("writev", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EFAULT);
     }
 
     #[test]
@@ -12559,7 +16579,7 @@ mod tests {
     }
 
     #[test]
-    fn describes_current_minecraft_system_imports() {
+    fn describes_current_system_imports() {
         for name in [
             "socket",
             "getaddrinfo",
@@ -12575,101 +16595,13 @@ mod tests {
             "_ZNSsC1ERKSs",
             "_ZNSs14_M_replace_auxEjjjc",
             "_ZSt11_Hash_bytesPKvjj",
-            "_ZN8WebTokenC2ERKS_",
-            "_ZN4Font4initEv",
-            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
-            "_ZN3mce12TextureGroup10getTextureERK11TextureData",
-            "_ZN11AppPlatform9loadImageER11TextureDataRKSs",
-            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
-            "_ZN19AppPlatform_android16_loadImageViaJNIER11TextureDataRKSs",
-            "_ZN10ImageUtils17loadImageFromFileER11TextureDataRKSs",
-            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai",
-            "_ZN13GeometryGroup11getGeometryERKSs",
-            "_ZN13GeometryGroup14tryGetGeometryERKSs",
-            "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
-            "_ZN9UIControl18_resolvePostCreateEv",
-            "_ZN14GamePadManager16getGamePadsInUseEv",
-            "_ZN14GamePadManager20getConnectedGamePadsEv",
-            "_ZN13GamePadMapper4tickER15InputEventQueue",
-            "_ZN13GamePadMapper8tickTurnER15InputEventQueue",
-            "_ZNK7GamePad11isConnectedEv",
-            "_ZNK7GamePad7isInUseEv",
-            "_ZN6Screen15controllerEventEv",
-            "_ZN6Screen27_processControllerDirectionEi",
-            "_ZN11MenuGamePad12getDirectionEi",
-            "_ZN11MenuGamePad4getXEi",
-            "_ZN11MenuGamePad4getYEi",
-            "_ZN11MenuGamePad9isTouchedEi",
-            "_ZN11MenuPointer10setPressedEb",
-            "_ZN11MenuPointer4getXEv",
-            "_ZN11MenuPointer4getYEv",
-            "_ZN11MenuPointer4setXEs",
-            "_ZN11MenuPointer4setYEs",
-            "_ZN11MenuPointer9isPressedEv",
-            "_ZN10Multitouch4feedEccssi",
-            "_ZN11MouseDevice4feedEccss",
-            "_ZN11MouseDevice4feedEccssss",
-            "_ZN14KeyboardMapper21clearInputDeviceQueueEv",
-            "_ZN14KeyboardMapper4tickER15InputEventQueue",
-            "_ZN11MouseMapper21clearInputDeviceQueueEv",
-            "_ZN11MouseMapper4tickER15InputEventQueue",
-            "_ZN11TouchMapper21clearInputDeviceQueueEv",
-            "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv",
-            "_ZN19TestAutoInputMapper4tickER15InputEventQueue",
-            "_ZN18DeviceButtonMapper4tickER15InputEventQueue",
-            "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv",
-            "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue",
-            "_ZN11MouseDevice12isButtonDownEi",
-            "_ZN11MouseDevice14getButtonStateEi",
-            "_ZN11MouseDevice14getEventButtonEv",
-            "_ZN11MouseDevice16wasFirstMovementEv",
-            "_ZN11MouseDevice19getEventButtonStateEv",
-            "_ZN11MouseDevice4getXEv",
-            "_ZN11MouseDevice4getYEv",
-            "_ZN11MouseDevice4nextEv",
-            "_ZN11MouseDevice5getDXEv",
-            "_ZN11MouseDevice5getDYEv",
-            "_ZN11MouseDevice5resetEv",
-            "_ZN11MouseDevice6reset2Ev",
-            "_ZN11MouseDevice6rewindEv",
-            "_ZN11MouseDevice8getEventEv",
-            "_ZN10Multitouch10isReleasedEi",
-            "_ZN10Multitouch11isEdgeTouchEi",
-            "_ZN10Multitouch13isPointerDownEi",
-            "_ZN10Multitouch15resetThisUpdateEv",
-            "_ZN10Multitouch19getActivePointerIdsEPPKi",
-            "_ZN10Multitouch19isPressedThisUpdateEi",
-            "_ZN10Multitouch20isReleasedThisUpdateEi",
-            "_ZN10Multitouch25getFirstActivePointerIdExEv",
-            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi",
-            "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv",
-            "_ZN10Multitouch4nextEv",
-            "_ZN10Multitouch5resetEv",
-            "_ZN10Multitouch6commitEv",
-            "_ZN10Multitouch9isPressedEi",
-            "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f",
-            "_ZN3mce16RenderContextOGL17unbindAllTexturesEv",
-            "_ZN12ProfilerLite4tickEbb",
-            "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd",
-            "_ZN18MinecraftTelemetry4tickEv",
-            "_ZN18MinecraftTelemetry15forceSendEventsEv",
-            "_ZN19RakNetServerLocator11findServersEi",
-            "_ZN6Social11Multiplayer18needToHandleInviteEv",
-            "_ZN6Social11Multiplayer4tickEb",
-            "_ZN6Social11Multiplayer22tickMultiplayerManagerEv",
-            "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE",
-            "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE",
-            "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE",
-            "_ZN6Social11UserManager4tickEv",
-            "_ZNK6Social11UserManager10isSignedInEv",
-            "_ZN9RealmsAPI6updateEv",
         ] {
             assert!(describe_hle_import(name).is_some(), "{name}");
         }
     }
 
     #[test]
-    fn keeps_minecraft_game_logic_facades_native_by_default() {
+    fn rejects_game_logic_hle_descriptors() {
         for name in [
             "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
             "_ZN3mce12TextureGroup10getTextureERK11TextureData",
@@ -12681,8 +16613,8 @@ mod tests {
             "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb",
             "_ZN18MinecraftTelemetry4tickEv",
         ] {
-            assert!(describe_hle_import(name).is_some());
-            assert!(!should_link_hle_symbol(name));
+            assert!(describe_hle_import(name).is_none(), "{name}");
+            assert!(!should_link_hle_symbol(name), "{name}");
         }
 
         for name in [
@@ -12696,7 +16628,6 @@ mod tests {
             assert!(should_link_hle_symbol(name), "{name}");
         }
     }
-
     #[test]
     fn initializes_function_and_data_symbols() {
         let mut memory = MappedMemory::new();
@@ -12798,6 +16729,79 @@ mod tests {
         initialize_hle_symbol(&mut memory, empty_rep, 0x1200).unwrap();
         assert_eq!(memory.load32(0x1200).unwrap(), 0);
         assert_eq!(memory.load8(0x120c).unwrap(), 0);
+
+        let stdio = describe_hle_import("__sF").unwrap();
+        assert_eq!(
+            stdio.shape,
+            HleSymbolShape::Data {
+                size: BIONIC_FILE_SIZE * 3,
+                init: HleDataInit::BionicStdio,
+            }
+        );
+        initialize_hle_symbol(&mut memory, stdio, 0x1300).unwrap();
+        for (fd, expected_flags) in [
+            (0u32, BIONIC_FILE_FLAG_SRD),
+            (1u32, BIONIC_FILE_FLAG_SWR),
+            (2u32, BIONIC_FILE_FLAG_SWR | BIONIC_FILE_FLAG_SNBF),
+        ] {
+            let stream = 0x1300 + fd * BIONIC_FILE_SIZE;
+            assert_eq!(
+                memory.load16(stream + FAKE_FILE_FLAGS_OFFSET).unwrap(),
+                expected_flags
+            );
+            assert_eq!(
+                memory.load16(stream + FAKE_FILE_FD_OFFSET).unwrap(),
+                fd as u16
+            );
+        }
+    }
+
+    #[test]
+    fn bionic_standard_streams_write_and_close_with_real_file_state() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x3000).unwrap();
+        memory.load_bytes(0x1700, b"hello\0").unwrap();
+        let stdio = describe_hle_import("__sF").unwrap();
+        initialize_hle_symbol(&mut memory, stdio, 0x1100).unwrap();
+        let stdin = 0x1100;
+        let stdout = 0x1100 + BIONIC_FILE_SIZE;
+        let mut cpu = Cpu::new();
+        cpu.set_reg(14, 0x3000);
+        let mut hle = HleRuntime::new(0x1000, 0x2000, 0x1000);
+
+        cpu.set_reg(0, 0x1700);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 5);
+        cpu.set_reg(3, stdout);
+        hle.dispatch("fwrite", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 5);
+
+        cpu.set_reg(0, 0x1700);
+        cpu.set_reg(1, stdout);
+        hle.dispatch("fputs", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, stdin);
+        hle.dispatch("fflush", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EBADF);
+
+        cpu.set_reg(0, stdout);
+        hle.dispatch("fclose", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load16(stdout + FAKE_FILE_FLAGS_OFFSET).unwrap(), 0);
+
+        cpu.set_reg(0, 0x1700);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 5);
+        cpu.set_reg(3, stdout);
+        hle.dispatch("fwrite", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1000).unwrap(), EBADF);
+
+        cpu.set_reg(0, stdout);
+        hle.dispatch("fclose", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
     }
 
     #[test]
@@ -12902,7 +16906,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_egl_facade_outputs() {
+    fn enforces_egl_lifecycle_handles_attributes_and_thread_ownership() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x4000).unwrap();
         let mut cpu = Cpu::new();
@@ -12914,8 +16918,16 @@ mod tests {
         cpu.set_reg(1, EGL_VENDOR);
         hle.dispatch("eglQueryString", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(load_c_string(&mut memory, cpu.reg(0), 32).unwrap(), "AEMU");
-        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(cpu.reg(0), 0);
+        hle.dispatch("eglGetError", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), EGL_BAD_DISPLAY);
+        hle.dispatch("eglGetError", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), EGL_SUCCESS);
+
+        cpu.set_reg(0, 0);
+        hle.dispatch("eglGetDisplay", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), EGL_DISPLAY_HANDLE);
 
         cpu.set_reg(14, 0x2004);
         cpu.set_reg(0, EGL_DISPLAY_HANDLE);
@@ -12927,13 +16939,33 @@ mod tests {
         assert_eq!(memory.load32(0x1100).unwrap(), 1);
         assert_eq!(memory.load32(0x1104).unwrap(), 4);
 
-        memory.store32(0x1200, 0x1124).unwrap();
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_VENDOR);
+        hle.dispatch("eglQueryString", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(load_c_string(&mut memory, cpu.reg(0), 32).unwrap(), "AEMU");
+
+        let config_attributes = [
+            EGL_RENDERABLE_TYPE,
+            EGL_OPENGL_ES2_BIT,
+            EGL_SURFACE_TYPE,
+            EGL_WINDOW_BIT,
+            EGL_RED_SIZE,
+            8,
+            EGL_DEPTH_SIZE,
+            24,
+            EGL_NONE,
+        ];
+        for (index, value) in config_attributes.into_iter().enumerate() {
+            memory.store32(0x1200 + index as u32 * 4, value).unwrap();
+        }
+        memory.store32(0x1800, 0x1124).unwrap();
         cpu.set_reg(14, 0x2008);
         cpu.set_reg(0, EGL_DISPLAY_HANDLE);
-        cpu.set_reg(1, 0);
+        cpu.set_reg(1, 0x1200);
         cpu.set_reg(2, 0x1120);
         cpu.set_reg(3, 1);
-        cpu.set_reg(13, 0x1200);
+        cpu.set_reg(13, 0x1800);
         hle.dispatch("eglChooseConfig", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 1);
@@ -12952,12 +16984,35 @@ mod tests {
             ANDROID_WINDOW_FORMAT_RGBA_8888
         );
 
-        cpu.set_reg(14, 0x2010);
-        cpu.set_reg(2, EGL_RENDERABLE_TYPE);
+        memory.store32(0x1134, 0xfeed_beef).unwrap();
+        cpu.set_reg(2, 0xdead_beef);
         cpu.set_reg(3, 0x1134);
         hle.dispatch("eglGetConfigAttrib", &mut cpu, &mut memory)
             .unwrap();
-        assert_ne!(memory.load32(0x1134).unwrap() & EGL_OPENGL_ES2_BIT, 0);
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1134).unwrap(), 0xfeed_beef);
+        hle.dispatch("eglGetError", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), EGL_BAD_ATTRIBUTE);
+
+        memory.store32(0x1280, EGL_CONTEXT_CLIENT_VERSION).unwrap();
+        memory.store32(0x1284, 2).unwrap();
+        memory.store32(0x1288, EGL_NONE).unwrap();
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_CONFIG_HANDLE);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 0x1280);
+        hle.dispatch("eglCreateContext", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), EGL_CONTEXT_HANDLE);
+
+        hle.set_native_window(0x7777, 800, 450, ANDROID_WINDOW_FORMAT_RGBA_8888);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_CONFIG_HANDLE);
+        cpu.set_reg(2, 0x7777);
+        cpu.set_reg(3, 0);
+        hle.dispatch("eglCreateWindowSurface", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), EGL_SURFACE_HANDLE);
 
         cpu.set_reg(14, 0x2014);
         cpu.set_reg(0, EGL_DISPLAY_HANDLE);
@@ -12966,18 +17021,134 @@ mod tests {
         cpu.set_reg(3, 0x1140);
         hle.dispatch("eglQuerySurface", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x1140).unwrap(), EGL_DEFAULT_SURFACE_WIDTH);
+        assert_eq!(memory.load32(0x1140).unwrap(), 800);
 
         cpu.set_reg(14, 0x2018);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_SURFACE_HANDLE);
         cpu.set_reg(2, EGL_HEIGHT);
         cpu.set_reg(3, 0x1144);
         hle.dispatch("eglQuerySurface", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x1144).unwrap(), EGL_DEFAULT_SURFACE_HEIGHT);
+        assert_eq!(memory.load32(0x1144).unwrap(), 450);
+
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_SURFACE_HANDLE);
+        cpu.set_reg(2, EGL_SURFACE_HANDLE);
+        cpu.set_reg(3, EGL_CONTEXT_HANDLE);
+        hle.dispatch("eglMakeCurrent", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, EGL_DRAW);
+        hle.dispatch("eglGetCurrentSurface", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), EGL_SURFACE_HANDLE);
+
+        hle.set_current_pthread(7);
+        hle.dispatch("eglGetCurrentContext", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_SURFACE_HANDLE);
+        cpu.set_reg(2, EGL_SURFACE_HANDLE);
+        cpu.set_reg(3, EGL_CONTEXT_HANDLE);
+        hle.dispatch("eglMakeCurrent", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        hle.dispatch("eglGetError", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), EGL_BAD_ACCESS);
+
+        hle.set_current_pthread(1);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_SURFACE_HANDLE);
+        hle.dispatch("eglDestroySurface", &mut cpu, &mut memory)
+            .unwrap();
+        assert!(hle.egl_state.surface_destroy_pending);
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, EGL_CONTEXT_HANDLE);
+        hle.dispatch("eglDestroyContext", &mut cpu, &mut memory)
+            .unwrap();
+        assert!(hle.egl_state.context_destroy_pending);
+
+        cpu.set_reg(0, EGL_DISPLAY_HANDLE);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0);
+        cpu.set_reg(3, 0);
+        hle.dispatch("eglMakeCurrent", &mut cpu, &mut memory)
+            .unwrap();
+        assert!(!hle.egl_state.surface_alive);
+        assert!(!hle.egl_state.context_alive);
     }
 
     #[test]
-    fn dispatches_gles_string_facade_outputs() {
+    fn models_motion_input_and_key_accessor_values() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x3000).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+
+        cpu.set_reg(0, 0x1234);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("AInputQueue_getEvent", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), EAGAIN.wrapping_neg());
+
+        hle.push_pointer_event(9, HlePointerPhase::Down, 123.5, 45.25, 0.75);
+        cpu.set_reg(0, 0x1234);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("AInputQueue_getEvent", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        let event = memory.load32(0x1100).unwrap();
+        assert_ne!(event, 0);
+
+        cpu.set_reg(0, event);
+        cpu.set_reg(1, AMOTION_EVENT_AXIS_PRESSURE);
+        cpu.set_reg(2, 0);
+        hle.dispatch("AMotionEvent_getAxisValue", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), 0.75);
+
+        cpu.set_reg(0, event);
+        hle.dispatch("AKeyEvent_getAction", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), AMOTION_EVENT_ACTION_DOWN);
+        cpu.set_reg(0, event);
+        hle.dispatch("AKeyEvent_getKeyCode", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, event);
+        hle.dispatch("AKeyEvent_getMetaState", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, event);
+        hle.dispatch("AKeyEvent_getRepeatCount", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, event);
+        cpu.set_reg(1, 99);
+        hle.dispatch("AMotionEvent_getRawX", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(f32::from_bits(cpu.reg(0)), 123.5);
+
+        cpu.set_reg(0, 0x1234);
+        cpu.set_reg(1, event);
+        cpu.set_reg(2, 1);
+        hle.dispatch("AInputQueue_finishEvent", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(0, event);
+        assert!(matches!(
+            hle.dispatch("AMotionEvent_getAction", &mut cpu, &mut memory),
+            Err(HleError::Abort(_))
+        ));
+    }
+
+    #[test]
+    fn dispatches_gles_string_queries() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x4000).unwrap();
         let mut cpu = Cpu::new();
@@ -12985,6 +17156,7 @@ mod tests {
         cpu.set_reg(14, 0x2000);
         cpu.set_reg(0, GL_VERSION);
         let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+        make_test_gles_current(&mut hle);
 
         hle.dispatch("glGetString", &mut cpu, &mut memory).unwrap();
         assert_ne!(cpu.reg(0), 0);
@@ -13012,16 +17184,29 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_gles_shader_query_facade_outputs() {
+    fn reports_failed_gles_shader_compilation_and_program_linking() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x5000).unwrap();
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(13, 0x1800);
         let mut hle = HleRuntime::new(0, 0x3000, 0x2000);
+        make_test_gles_current(&mut hle);
+
+        cpu.set_reg(14, 0x1ff0);
+        hle.dispatch("glCreateProgram", &mut cpu, &mut memory)
+            .unwrap();
+        let program = cpu.reg(0);
+
+        cpu.set_reg(14, 0x1ff4);
+        cpu.set_reg(0, 0x8b31);
+        hle.dispatch("glCreateShader", &mut cpu, &mut memory)
+            .unwrap();
+        let shader = cpu.reg(0);
 
         memory.store32(0x1100, 0xcccc_cccc).unwrap();
         cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, program);
         cpu.set_reg(1, GL_ACTIVE_UNIFORMS);
         cpu.set_reg(2, 0x1100);
         hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
@@ -13030,52 +17215,85 @@ mod tests {
         assert_eq!(cpu.pc(), 0x2000);
 
         cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, program);
         cpu.set_reg(1, GL_LINK_STATUS);
         cpu.set_reg(2, 0x1104);
         hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x1104).unwrap(), 1);
+        assert_eq!(memory.load32(0x1104).unwrap(), 0);
+
+        cpu.set_reg(14, 0x2006);
+        cpu.set_reg(0, program);
+        hle.dispatch("glLinkProgram", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x2007);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, GL_LINK_STATUS);
+        cpu.set_reg(2, 0x1104);
+        hle.dispatch("glGetProgramiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1104).unwrap(), 0);
 
         cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, shader);
         cpu.set_reg(1, GL_COMPILE_STATUS);
         cpu.set_reg(2, 0x1108);
         hle.dispatch("glGetShaderiv", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x1108).unwrap(), 1);
+        assert_eq!(memory.load32(0x1108).unwrap(), 0);
 
-        memory.store32(0x1800, 0x1110).unwrap();
-        memory.store32(0x1804, 0x1114).unwrap();
-        memory.store32(0x1808, 0x1118).unwrap();
-        memory.store8(0x1118, b'x').unwrap();
-        cpu.set_reg(14, 0x200c);
-        cpu.set_reg(2, 4);
-        cpu.set_reg(3, 0x110c);
-        hle.dispatch("glGetActiveUniform", &mut cpu, &mut memory)
+        cpu.set_reg(14, 0x2009);
+        cpu.set_reg(0, shader);
+        hle.dispatch("glCompileShader", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x110c).unwrap(), 0);
-        assert_eq!(memory.load32(0x1110).unwrap(), 0);
-        assert_eq!(memory.load32(0x1114).unwrap(), 0);
-        assert_eq!(memory.load8(0x1118).unwrap(), 0);
 
-        memory.store32(0x1120, 0xcccc_cccc).unwrap();
-        memory.store8(0x1124, b'x').unwrap();
-        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(14, 0x200a);
+        cpu.set_reg(0, shader);
+        cpu.set_reg(1, GL_COMPILE_STATUS);
+        cpu.set_reg(2, 0x1108);
+        hle.dispatch("glGetShaderiv", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load32(0x1108).unwrap(), 0);
+
+        cpu.set_reg(14, 0x200c);
+        cpu.set_reg(0, program);
+        cpu.set_reg(1, 128);
         cpu.set_reg(2, 0x1120);
-        cpu.set_reg(3, 0x1124);
+        cpu.set_reg(3, 0x1140);
         hle.dispatch("glGetProgramInfoLog", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x1120).unwrap(), 0);
-        assert_eq!(memory.load8(0x1124).unwrap(), 0);
+        assert!(memory.load32(0x1120).unwrap() > 0);
+        assert!(
+            load_c_string(&mut memory, 0x1140, 128)
+                .unwrap()
+                .contains("vertex shader")
+        );
+
+        cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, shader);
+        cpu.set_reg(1, 128);
+        cpu.set_reg(2, 0x1124);
+        cpu.set_reg(3, 0x11c0);
+        hle.dispatch("glGetShaderInfoLog", &mut cpu, &mut memory)
+            .unwrap();
+        assert!(memory.load32(0x1124).unwrap() > 0);
+        assert!(
+            load_c_string(&mut memory, 0x11c0, 128)
+                .unwrap()
+                .contains("empty")
+        );
     }
 
     #[test]
-    fn dispatches_gles_shader_reflection_facade_outputs() {
+    fn dispatches_gles_shader_reflection_outputs() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x9000).unwrap();
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(13, 0x1800);
         let mut hle = HleRuntime::new(0, 0x3000, 0x5000);
+        make_test_gles_current(&mut hle);
         const GL_FRAGMENT_SHADER: u32 = 0x8b30;
         const GL_VERTEX_SHADER: u32 = 0x8b31;
 
@@ -13101,6 +17319,10 @@ mod tests {
         cpu.set_reg(3, 0x1104);
         hle.dispatch("glShaderSource", &mut cpu, &mut memory)
             .unwrap();
+        cpu.set_reg(14, 0x2006);
+        cpu.set_reg(0, vertex_shader);
+        hle.dispatch("glCompileShader", &mut cpu, &mut memory)
+            .unwrap();
 
         cpu.set_reg(14, 0x2008);
         cpu.set_reg(0, GL_FRAGMENT_SHADER);
@@ -13125,6 +17347,10 @@ mod tests {
         cpu.set_reg(2, 0x1110);
         cpu.set_reg(3, 0x1114);
         hle.dispatch("glShaderSource", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(14, 0x200e);
+        cpu.set_reg(0, fragment_shader);
+        hle.dispatch("glCompileShader", &mut cpu, &mut memory)
             .unwrap();
 
         cpu.set_reg(14, 0x2010);
@@ -13223,8 +17449,10 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+        make_test_gles_current(&mut hle);
 
         cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, GL_VERTEX_SHADER);
         cpu.set_reg(1, GL_HIGH_FLOAT);
         cpu.set_reg(2, 0x1100);
         cpu.set_reg(3, 0x1108);
@@ -13236,13 +17464,15 @@ mod tests {
         assert_eq!(cpu.pc(), 0x2000);
 
         cpu.set_reg(14, 0x2004);
+        cpu.set_reg(0, GL_TEXTURE_2D);
         cpu.set_reg(1, GL_TEXTURE_MIN_FILTER);
         cpu.set_reg(2, 0x1110);
         hle.dispatch("glGetTexParameteriv", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(memory.load32(0x1110).unwrap(), GL_LINEAR);
+        assert_eq!(memory.load32(0x1110).unwrap(), GL_NEAREST_MIPMAP_LINEAR);
 
         cpu.set_reg(14, 0x2008);
+        cpu.set_reg(0, GL_TEXTURE_2D);
         cpu.set_reg(1, GL_TEXTURE_WRAP_S);
         cpu.set_reg(2, 0x1114);
         hle.dispatch("glGetTexParameteriv", &mut cpu, &mut memory)
@@ -13251,12 +17481,13 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_gles_object_name_facade_outputs() {
+    fn dispatches_gles_object_name_lifecycle() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x2000).unwrap();
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+        make_test_gles_current(&mut hle);
 
         cpu.set_reg(14, 0x2000);
         cpu.set_reg(0, 3);
@@ -13278,6 +17509,17 @@ mod tests {
         cpu.set_reg(14, 0x2008);
         cpu.set_reg(0, memory.load32(0x1100).unwrap());
         hle.dispatch("glIsTexture", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(14, 0x200a);
+        cpu.set_reg(0, GL_TEXTURE_2D);
+        cpu.set_reg(1, memory.load32(0x1100).unwrap());
+        hle.dispatch("glBindTexture", &mut cpu, &mut memory)
+            .unwrap();
+
+        cpu.set_reg(14, 0x200b);
+        cpu.set_reg(0, memory.load32(0x1100).unwrap());
+        hle.dispatch("glIsTexture", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 1);
 
         cpu.set_reg(14, 0x200c);
@@ -13286,9 +17528,94 @@ mod tests {
         assert_eq!(cpu.reg(0), 0);
 
         cpu.set_reg(14, 0x2010);
+        cpu.set_reg(0, GL_FRAMEBUFFER);
         hle.dispatch("glCheckFramebufferStatus", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), GL_FRAMEBUFFER_COMPLETE);
+    }
+
+    #[test]
+    fn preserves_gles_errors_lifetimes_and_active_attribute_payloads() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x3000).unwrap();
+        memory.load_bytes(0x1100, &[1; 12]).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        let mut hle = HleRuntime::new(0, 0x3000, 0x1000);
+        make_test_gles_current(&mut hle);
+
+        cpu.set_reg(0, 0xffff_ffff);
+        hle.dispatch("glActiveTexture", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(0, 0xdead_beef);
+        hle.dispatch("glUseProgram", &mut cpu, &mut memory).unwrap();
+        hle.dispatch("glGetError", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), GL_INVALID_ENUM);
+        hle.dispatch("glGetError", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), GL_NO_ERROR);
+
+        hle.gl_framebuffers.push(7);
+        hle.gl_bound_framebuffer = 7;
+        assert_eq!(
+            hle.gl_framebuffer_status(),
+            GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
+        );
+
+        hle.gl_programs.push(GlProgram {
+            name: 9,
+            shaders: Vec::new(),
+            uniforms: Vec::new(),
+            attributes: vec![GlesActive {
+                name: "POSITION".to_string(),
+                size: 1,
+                ty: GL_FLOAT_VEC3,
+                location: 0,
+            }],
+            linked: true,
+            info_log: String::new(),
+            delete_pending: false,
+        });
+        hle.gl_current_program = 9;
+        hle.gl_vertex_attribs.extend([
+            GuestVertexAttrib {
+                index: 0,
+                size: 3,
+                ty: GL_FLOAT,
+                stride: 0,
+                pointer: 0x1100,
+                array_buffer: 0,
+                enabled: true,
+            },
+            GuestVertexAttrib {
+                index: 2,
+                size: 3,
+                ty: GL_FLOAT,
+                stride: 0,
+                pointer: 0,
+                array_buffer: 0,
+                enabled: true,
+            },
+        ]);
+        let payloads = hle
+            .gles_client_attrib_payloads(&mut memory, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].index, 0);
+        assert_eq!(payloads[0].payload.as_deref(), Some(&[1; 12][..]));
+
+        cpu.set_reg(0, 9);
+        hle.dispatch("glDeleteProgram", &mut cpu, &mut memory)
+            .unwrap();
+        assert!(hle.gl_programs.iter().any(|program| program.name == 9));
+        cpu.set_reg(0, 0);
+        hle.dispatch("glUseProgram", &mut cpu, &mut memory).unwrap();
+        assert!(hle.gl_programs.iter().all(|program| program.name != 9));
+
+        assert_eq!(
+            gles_index_payload_vertex_count(0, GL_UNSIGNED_SHORT, &[]),
+            Some(0)
+        );
     }
 
     #[test]
@@ -13298,6 +17625,17 @@ mod tests {
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+        make_test_gles_current(&mut hle);
+        hle.gl_programs.push(GlProgram {
+            name: 9,
+            shaders: Vec::new(),
+            uniforms: Vec::new(),
+            attributes: Vec::new(),
+            linked: true,
+            info_log: String::new(),
+            delete_pending: false,
+        });
+        hle.gl_current_program = 9;
 
         cpu.set_reg(14, 0x2000);
         cpu.set_reg(0, 0.25f32.to_bits());
@@ -13375,6 +17713,26 @@ mod tests {
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(13, 0x1800);
         let mut hle = HleRuntime::new(0, 0x2000, 0x1000);
+        make_test_gles_current(&mut hle);
+        hle.gl_programs.push(GlProgram {
+            name: 9,
+            shaders: Vec::new(),
+            uniforms: vec![GlesActive {
+                name: "MATRIX".to_string(),
+                size: 1,
+                ty: GL_FLOAT_MAT4,
+                location: 2,
+            }],
+            attributes: Vec::new(),
+            linked: true,
+            info_log: String::new(),
+            delete_pending: false,
+        });
+        hle.gl_textures.push(7);
+        hle.gl_buffers.push(GuestGlBuffer {
+            name: 3,
+            data: Vec::new(),
+        });
 
         cpu.set_reg(14, 0x2000);
         cpu.set_reg(0, 9);
@@ -13412,10 +17770,10 @@ mod tests {
         cpu.set_reg(3, 2);
         hle.dispatch("glTexImage2D", &mut cpu, &mut memory).unwrap();
 
-        let tex_sub_payload: Vec<u8> = (32..40).collect();
+        let tex_sub_payload: Vec<u8> = (32..36).collect();
         memory.load_bytes(0x2120, &tex_sub_payload).unwrap();
         memory.store32(0x1800, 1).unwrap();
-        memory.store32(0x1804, 2).unwrap();
+        memory.store32(0x1804, 1).unwrap();
         memory.store32(0x1808, 0x1908).unwrap();
         memory.store32(0x180c, 0x1401).unwrap();
         memory.store32(0x1810, 0x2120).unwrap();
@@ -13513,7 +17871,7 @@ mod tests {
                     xoffset: 0,
                     yoffset: 1,
                     width: 1,
-                    height: 2,
+                    height: 1,
                     format: 0x1908,
                     ty: 0x1401,
                     pixels: 0x2120,
@@ -13564,7 +17922,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_android_configuration_locale_facade() {
+    fn dispatches_stateful_android_configuration_locale() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x4000).unwrap();
         let mut cpu = Cpu::new();
@@ -13596,8 +17954,15 @@ mod tests {
 
         cpu.set_reg(14, 0x200c);
         cpu.set_reg(0, config);
+        cpu.set_reg(1, 0x1200);
         hle.dispatch("AConfiguration_fromAssetManager", &mut cpu, &mut memory)
             .unwrap();
+        assert_eq!(
+            hle.require_android_configuration("test", config)
+                .unwrap()
+                .asset_manager,
+            0x1200
+        );
         assert_eq!(cpu.pc(), 0x200c);
 
         cpu.set_reg(14, 0x2010);
@@ -13605,6 +17970,13 @@ mod tests {
         hle.dispatch("AConfiguration_delete", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.pc(), 0x2010);
+
+        cpu.set_reg(0, config);
+        cpu.set_reg(1, 0x1100);
+        assert!(matches!(
+            hle.dispatch("AConfiguration_getLanguage", &mut cpu, &mut memory),
+            Err(HleError::Abort(_))
+        ));
     }
 
     #[test]
@@ -13922,6 +18294,20 @@ mod tests {
         hle.dispatch("gettimeofday", &mut cpu, &mut memory).unwrap();
         assert_eq!(memory.load32(0x1120).unwrap(), FAKE_TIME_BASE_SECS as u32);
         assert_eq!(memory.load32(0x1124).unwrap(), 2_000);
+
+        cpu.set_reg(0, 99);
+        cpu.set_reg(1, 0x1100);
+        hle.dispatch("clock_gettime", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EINVAL);
+
+        cpu.set_reg(0, 1);
+        cpu.set_reg(1, 0);
+        hle.dispatch("clock_gettime", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EFAULT);
     }
 
     #[test]
@@ -14013,26 +18399,33 @@ mod tests {
     }
 
     #[test]
-    fn pthread_create_marks_only_native_app_thread_arg_running() {
+    fn pthread_create_schedules_every_valid_guest_start_routine() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(14, 0x2000);
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
-        hle.set_native_activity(0x1100);
-
         let app = 0x1200;
         memory.store32(app + 0x0c, 0x1100).unwrap();
+        memory.store32(app + 0x6c, 0x55aa_aa55).unwrap();
         cpu.set_reg(0, 0x1300);
         cpu.set_reg(2, 0x2201);
         cpu.set_reg(3, app);
         hle.dispatch("pthread_create", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
-        assert_ne!(memory.load32(0x1300).unwrap(), 0);
-        assert_eq!(memory.load32(app + 0x6c).unwrap(), 1);
-        assert!(hle.take_created_pthreads().is_empty());
+        let app_thread_id = memory.load32(0x1300).unwrap();
+        assert_ne!(app_thread_id, 0);
+        assert_eq!(memory.load32(app + 0x6c).unwrap(), 0x55aa_aa55);
+        assert_eq!(
+            hle.take_created_pthreads(),
+            vec![CreatedPthread {
+                id: app_thread_id,
+                start: 0x2201,
+                arg: app,
+            }]
+        );
 
         let worker_arg = 0x1400;
         memory.store32(worker_arg + 0x0c, 0xfeed_beef).unwrap();
@@ -14077,7 +18470,7 @@ mod tests {
         hle.dispatch("ALooper_pollAll", &mut cpu, &mut memory)
             .unwrap();
 
-        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(cpu.reg(0), ALOOPER_POLL_TIMEOUT);
         assert_eq!(memory.load32(0x1100).unwrap(), u32::MAX);
         assert_eq!(memory.load32(0x1104).unwrap(), 0);
         assert_eq!(memory.load32(0x1108).unwrap(), 0);
@@ -14092,7 +18485,8 @@ mod tests {
         cpu.set_reg(14, 0x2000);
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
 
-        hle.queue_alooper_event(0x1234_5678);
+        memory.store32(0x1200, 2).unwrap();
+        hle.queue_alooper_event(0x1200);
 
         cpu.set_reg(0, 0);
         cpu.set_reg(1, 0x1100);
@@ -14101,14 +18495,14 @@ mod tests {
         hle.dispatch("ALooper_pollAll", &mut cpu, &mut memory)
             .unwrap();
 
-        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(cpu.reg(0), 2);
         assert_eq!(memory.load32(0x1100).unwrap(), u32::MAX);
         assert_eq!(memory.load32(0x1104).unwrap(), 0);
-        assert_eq!(memory.load32(0x1108).unwrap(), 0x1234_5678);
+        assert_eq!(memory.load32(0x1108).unwrap(), 0x1200);
 
         hle.dispatch("ALooper_pollAll", &mut cpu, &mut memory)
             .unwrap();
-        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(cpu.reg(0), ALOOPER_POLL_TIMEOUT);
         assert_eq!(memory.load32(0x1108).unwrap(), 0);
     }
 
@@ -14167,6 +18561,11 @@ mod tests {
         cpu.set_reg(0, 8);
         hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), new_ptr);
+
+        cpu.set_reg(0, 0x1000);
+        hle.dispatch("malloc", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1000).unwrap(), ENOMEM);
     }
 
     #[test]
@@ -14423,6 +18822,39 @@ mod tests {
         set_u64_arg(&mut cpu, 2, signed_rhs as u64);
         hle.dispatch("__divdi3", &mut cpu, &mut memory).unwrap();
         assert_eq!(ret_u64(&cpu) as i64, signed_lhs.wrapping_div(signed_rhs));
+
+        for name in [
+            "__aeabi_idiv",
+            "__aeabi_uidiv",
+            "__aeabi_idivmod",
+            "__aeabi_uidivmod",
+            "__modsi3",
+            "__umodsi3",
+            "__divsi3",
+            "__udivsi3",
+        ] {
+            cpu.set_reg(0, 43);
+            cpu.set_reg(1, 0);
+            assert!(matches!(
+                hle.dispatch(name, &mut cpu, &mut memory),
+                Err(HleError::Abort(_))
+            ));
+        }
+        for name in [
+            "__aeabi_ldivmod",
+            "__aeabi_uldivmod",
+            "__divdi3",
+            "__udivdi3",
+            "__moddi3",
+            "__umoddi3",
+        ] {
+            set_u64_arg(&mut cpu, 0, 43);
+            set_u64_arg(&mut cpu, 2, 0);
+            assert!(matches!(
+                hle.dispatch(name, &mut cpu, &mut memory),
+                Err(HleError::Abort(_))
+            ));
+        }
     }
 
     #[test]
@@ -14725,411 +19157,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_minecraft_webtoken_copy_ctor_for_null_source() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x5000).unwrap();
-
-        let dest = 0x1200;
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, dest);
-        cpu.set_reg(1, 0);
-        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x2000);
-
-        hle.dispatch("_ZN8WebTokenC2ERKS_", &mut cpu, &mut memory)
-            .unwrap();
-
-        assert_eq!(load_test_cxx_string(&mut memory, dest), b"");
-        assert_eq!(load_test_cxx_string(&mut memory, dest + 0x18), b"");
-        assert_eq!(load_test_cxx_string(&mut memory, dest + 0x30), b"");
-        assert_eq!(memory.load_bytes_for_test(dest + 0x08, 16), &[0; 16]);
-        assert_eq!(memory.load_bytes_for_test(dest + 0x20, 16), &[0; 16]);
-        assert_eq!(cpu.reg(0), dest);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-    }
-
-    #[test]
-    fn dispatches_minecraft_texture_group_pair_facade() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x50000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2000);
-        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x48000);
-
-        hle.dispatch(
-            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        let pair = cpu.reg(0);
-        assert_ne!(pair, 0);
-        assert_eq!(memory.load32(pair).unwrap(), FAKE_TEXTURE_SIDE);
-        assert_eq!(memory.load32(pair + 0x04).unwrap(), FAKE_TEXTURE_SIDE);
-        assert_eq!(memory.load32(pair + 0x08).unwrap(), 0x1c);
-        assert_eq!(memory.load8(pair + 0x20).unwrap(), 0);
-        assert_eq!(memory.load8(pair + 0x21).unwrap(), 1);
-        assert_eq!(memory.load32(pair + 0x24).unwrap(), 0);
-        assert_eq!(memory.load32(pair + 0x28).unwrap(), GL_TEXTURE_2D);
-        assert_eq!(memory.load32(pair + 0x30).unwrap(), GL_RGBA);
-        assert_eq!(memory.load32(pair + 0x34).unwrap(), GL_UNSIGNED_BYTE);
-        assert_eq!(memory.load32(pair + 0x38).unwrap(), FAKE_TEXTURE_SIDE);
-        assert_eq!(memory.load32(pair + 0x3c).unwrap(), FAKE_TEXTURE_SIDE);
-        let pixels = memory.load32(pair + 0x40).unwrap();
-        assert_ne!(pixels, 0);
-        assert_eq!(
-            memory.load32(pixels - CXX_STRING_REP_HEADER_SIZE).unwrap(),
-            FAKE_TEXTURE_BYTES
-        );
-        assert_eq!(memory.load32(pixels - 8).unwrap(), FAKE_TEXTURE_BYTES);
-        assert_eq!(memory.load8(pixels + 3).unwrap(), 0xff);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert!(hle.take_gles_events().is_empty());
-
-        cpu.set_reg(14, 0x2004);
-        hle.dispatch(
-            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), pair);
-        assert_eq!(cpu.pc(), 0x2004);
-        assert!(hle.take_gles_events().is_empty());
-    }
-
-    #[test]
-    fn dispatches_minecraft_texture_group_texture_data_facade() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x50000).unwrap();
-
-        let out = 0x1200;
-        let texture_data = 0x1400;
-        let pixels = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x48000);
-        hle.store_cxx_string_bytes(&mut memory, texture_data + 8, &pixels, pixels.len() as u32)
-            .unwrap();
-        memory.store32(texture_data, 2).unwrap();
-        memory.store32(texture_data + 4, 1).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, out);
-        cpu.set_reg(1, 0x5555);
-        cpu.set_reg(2, texture_data);
-
-        hle.dispatch(
-            "_ZN3mce12TextureGroup10getTextureERK11TextureData",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        assert_eq!(cpu.reg(0), out);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-        assert_eq!(memory.load32(out).unwrap(), 0);
-        let texture = memory.load32(out + 4).unwrap();
-        assert_ne!(texture, 0);
-        assert_eq!(memory.load8(texture + 0x20).unwrap(), 1);
-        assert_eq!(memory.load8(texture + 0x21).unwrap(), 1);
-        assert_eq!(memory.load32(texture + 0x24).unwrap(), 1);
-        assert_eq!(memory.load32(texture + 0x28).unwrap(), GL_TEXTURE_2D);
-        assert_eq!(load_test_cxx_string(&mut memory, out + 0x0c), b"InMemory");
-
-        let events = hle.take_gles_events();
-        assert_eq!(
-            events.first(),
-            Some(&GlesEvent::BindTexture {
-                target: GL_TEXTURE_2D,
-                texture: 1,
-            })
-        );
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                GlesEvent::TexParameteri {
-                    target: GL_TEXTURE_2D,
-                    name: GL_TEXTURE_MIN_FILTER,
-                    value: GL_LINEAR,
-                }
-            )
-        }));
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                GlesEvent::TexImage2D {
-                    target: GL_TEXTURE_2D,
-                    width: 2,
-                    height: 1,
-                    format: GL_RGBA,
-                    ty: GL_UNSIGNED_BYTE,
-                    payload: Some(payload),
-                    ..
-                } if payload.as_slice() == pixels
-            )
-        }));
-    }
-
-    #[test]
-    fn minecraft_texture_candidates_include_vanilla_resource_pack() {
-        let candidates = texture_asset_entry_candidates(&ResourceLocationDebug {
-            path: "textures/blocks/dirt".to_string(),
-            package: "InUserPackage".to_string(),
-        });
-
-        assert!(
-            candidates.contains(&"assets/resourcepacks/vanilla/images/blocks/dirt.png".to_string())
-        );
-        assert!(candidates.contains(&"assets/images/textures/blocks/dirt.png".to_string()));
-    }
-
-    #[test]
-    fn minecraft_texture_candidates_include_dotted_resource_names() {
-        let candidates = texture_asset_entry_candidates(&ResourceLocationDebug {
-            path: "block.sapling.oak".to_string(),
-            package: "InUserPackage".to_string(),
-        });
-
-        assert!(
-            candidates.contains(
-                &"assets/resourcepacks/vanilla/images/blocks/sapling_oak.png".to_string()
-            )
-        );
-        assert!(
-            candidates.contains(
-                &"assets/resourcepacks/vanilla/images/blocks/sapling_oak.tga".to_string()
-            )
-        );
-
-        let atlas = texture_asset_entry_candidates(&ResourceLocationDebug {
-            path: "atlas.terrain".to_string(),
-            package: "InUserPackage".to_string(),
-        });
-        assert!(atlas.contains(&"assets/images/terrain-atlas_mip3.tga".to_string()));
-    }
-
-    #[test]
-    fn minecraft_texture_alias_candidates_try_expected_archive_entry_first() {
-        let candidates = texture_alias_entry_candidates("images/blocks/sapling_oak.png");
-        assert_eq!(
-            candidates.first().map(String::as_str),
-            Some("assets/resourcepacks/vanilla/images/blocks/sapling_oak.png")
-        );
-
-        let app_candidates = texture_alias_entry_candidates("assets/images/terrain-atlas_mip3.tga");
-        assert_eq!(
-            app_candidates.first().map(String::as_str),
-            Some("assets/images/terrain-atlas_mip3.tga")
-        );
-    }
-
-    #[test]
-    fn dispatches_minecraft_texture_group_loads_resourcepack_alias() {
-        let apk_bytes = stored_zip_with_files(&[
-            (
-                "assets/resourcepacks/vanilla/resources.json",
-                br#"{"resources":{"textures":{"block.sapling.oak":"images/blocks/sapling_oak.png"}}}"#,
-            ),
-            (
-                "assets/resourcepacks/vanilla/images/blocks/sapling_oak.png",
-                one_by_one_rgba_png(),
-            ),
-        ]);
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x50000).unwrap();
-
-        let resource = 0x1200;
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(1, resource);
-        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x48000);
-        hle.set_apk_bytes(apk_bytes);
-        hle.store_cxx_string_bytes(&mut memory, resource, b"block.sapling.oak", 17)
-            .unwrap();
-        hle.store_cxx_string_bytes(&mut memory, resource + 4, b"InUserPackage", 13)
-            .unwrap();
-
-        hle.dispatch(
-            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        let pair = cpu.reg(0);
-        assert_eq!(memory.load32(pair).unwrap(), 1);
-        assert_eq!(memory.load32(pair + 0x04).unwrap(), 1);
-        let pixels = memory.load32(pair + 0x40).unwrap();
-        assert_eq!(
-            memory.load32(pixels - CXX_STRING_REP_HEADER_SIZE).unwrap(),
-            4
-        );
-        assert_eq!(memory.load32(pixels - 8).unwrap(), 4);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-    }
-
-    #[test]
-    fn minecraft_font_texture_expands_to_render_atlas() {
-        let mut rgba = vec![0u8; 128 * 128 * 4];
-        rgba[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
-        let texture = DecodedTexture {
-            width: 128,
-            height: 128,
-            rgba,
-            source: "assets/images/font/default8.png".to_string(),
-        };
-
-        let expanded =
-            maybe_expand_minecraft_font_texture("InAppPackageImages:font/default8.png", texture);
-
-        assert_eq!(expanded.width, 256);
-        assert_eq!(expanded.height, 256);
-        assert_eq!(&expanded.rgba[0..4], &[0x11, 0x22, 0x33, 0x44]);
-        assert_eq!(&expanded.rgba[4..8], &[0x11, 0x22, 0x33, 0x44]);
-        assert_eq!(
-            &expanded.rgba[(256 * 4)..(256 * 4 + 4)],
-            &[0x11, 0x22, 0x33, 0x44]
-        );
-    }
-
-    #[test]
-    fn minecraft_font_widths_scan_original_8x8_cells() {
-        let mut rgba = vec![0u8; 128 * 128 * 4];
-        let code = b'A' as usize;
-        let cell_x = (code & 0x0f) * 8;
-        let cell_y = (code >> 4) * 8;
-        for y in 0..8usize {
-            for x in 0..4usize {
-                let offset = ((cell_y + y) * 128 + cell_x + x) * 4;
-                rgba[offset] = 0xff;
-                rgba[offset + 3] = 0xff;
-            }
-        }
-
-        let widths = minecraft_font_widths_from_rgba(128, 128, &rgba);
-
-        assert_eq!(widths[0x20], 4);
-        assert_eq!(widths[code], 5);
-    }
-
-    #[test]
-    fn dispatches_minecraft_font_init_facade() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x50000).unwrap();
-
-        let font = 0x2000;
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x3001);
-        cpu.set_reg(0, font);
-        let mut hle = HleRuntime::new(0x1000, 0x10000, 0x30000);
-
-        hle.dispatch("_ZN4Font4initEv", &mut cpu, &mut memory)
-            .unwrap();
-
-        assert_eq!(memory.load32(font + 0x234 + 0x20 * 4).unwrap(), 4);
-        assert_eq!(
-            memory.load32(font + 0x634 + 0x20 * 4).unwrap(),
-            4.0f32.to_bits()
-        );
-        let unicode = memory.load32(font + 0xa64).unwrap();
-        assert_ne!(unicode, 0);
-        assert_eq!(
-            memory.load32(unicode - CXX_STRING_REP_HEADER_SIZE).unwrap(),
-            0x1_0000
-        );
-        assert_eq!(
-            memory.load32(font + 0x34 + 6 * 16 + 4).unwrap(),
-            1.0f32.to_bits()
-        );
-        assert_eq!(cpu.pc(), 0x3000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-    }
-
-    #[test]
     fn minecraft_image_candidates_include_images_root() {
-        let candidates = image_asset_entry_candidates("gui/title.png", ImageFormat::Png);
+        let candidates = image_asset_entry_candidates("gui/title.png");
 
         assert!(candidates.contains(&"assets/images/gui/title.png".to_string()));
         assert!(candidates.contains(&"assets/gui/title.png".to_string()));
-    }
-
-    #[test]
-    fn dispatches_minecraft_app_platform_load_png_from_apk_asset() {
-        let apk_bytes =
-            stored_zip_with_one_file("assets/images/gui/title.png", one_by_one_rgba_png());
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x8000).unwrap();
-
-        let path = 0x1100;
-        let texture_data = 0x1200;
-        let mut hle = HleRuntime::new(0, 0x3000, 0x5000);
-        hle.set_apk_bytes(apk_bytes);
-        hle.store_cxx_string_bytes(&mut memory, path, b"gui/title.png", 13)
-            .unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x4444);
-        cpu.set_reg(1, texture_data);
-        cpu.set_reg(2, path);
-        hle.dispatch(
-            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-        assert_eq!(memory.load32(texture_data).unwrap(), 1);
-        assert_eq!(memory.load32(texture_data + 4).unwrap(), 1);
-        assert_eq!(
-            load_test_cxx_string(&mut memory, texture_data + 8),
-            [0x11, 0x22, 0x33, 0x44]
-        );
-    }
-
-    #[test]
-    fn dispatches_minecraft_image_utils_load_image_from_memory() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x8000).unwrap();
-        memory.load_bytes(0x1400, one_by_one_rgba_png()).unwrap();
-
-        let texture_data = 0x1200;
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, texture_data);
-        cpu.set_reg(1, 0x1400);
-        cpu.set_reg(2, one_by_one_rgba_png().len() as u32);
-        let mut hle = HleRuntime::new(0, 0x3000, 0x5000);
-
-        hle.dispatch(
-            "_ZN10ImageUtils19loadImageFromMemoryER11TextureDataPai",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(memory.load32(texture_data).unwrap(), 1);
-        assert_eq!(memory.load32(texture_data + 4).unwrap(), 1);
-        assert_eq!(
-            load_test_cxx_string(&mut memory, texture_data + 8),
-            [0x11, 0x22, 0x33, 0x44]
-        );
     }
 
     #[test]
@@ -15142,877 +19174,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_minecraft_texture_group_is_loaded_facade() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x1000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x1100);
-        cpu.set_reg(1, 0x1200);
-        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
-
-        let descriptor =
-            describe_hle_import("_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation").unwrap();
-        assert_eq!(descriptor.kind, HleSymbolKind::Target);
-        assert_eq!(descriptor.behavior, HleCallBehavior::Implemented);
-
-        hle.dispatch(
-            "_ZNK3mce12TextureGroup8isLoadedERK16ResourceLocation",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-    }
-
-    #[test]
-    fn dispatches_minecraft_geometry_group_facade() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x5000).unwrap();
-
-        let out = 0x1200;
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, out);
-        cpu.set_reg(1, 0x1300);
-        cpu.set_reg(2, 0x1400);
-        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x2000);
-
-        hle.dispatch(
-            "_ZN13GeometryGroup11getGeometryERKSs",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        let geometry = memory.load32(out + 4).unwrap();
-        assert_eq!(memory.load32(out).unwrap(), 0);
-        assert_ne!(geometry, 0);
-        assert_eq!(memory.load32(geometry + 0x14).unwrap(), 0);
-        assert_eq!(cpu.reg(0), out);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-
-        cpu.set_reg(14, 0x2004);
-        cpu.set_reg(0, out + 8);
-        hle.dispatch(
-            "_ZN13GeometryGroup14tryGetGeometryERKSs",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(memory.load32(out + 12).unwrap(), geometry);
-        assert_eq!(cpu.pc(), 0x2004);
-    }
-
-    #[test]
-    fn dispatches_minecraft_ui_control_resolve_facades() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
-
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0);
-        cpu.set_reg(1, 0x1200);
-        hle.dispatch(
-            "_ZN9UIControl20_resolveControlNamesERKSt10shared_ptrIS_E",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2004);
-        cpu.set_reg(0, 0);
-        hle.dispatch("_ZN9UIControl18_resolvePostCreateEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        assert_eq!(cpu.pc(), 0x2004);
-    }
-
-    #[test]
-    fn dispatches_profiler_facades() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x1000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
-
-        hle.dispatch(
-            "_ZN12ProfilerLite9_endScopeENS_5ScopeEdd",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2101);
-        cpu.set_reg(0, 1);
-        cpu.set_reg(1, 1);
-        hle.dispatch("_ZN12ProfilerLite4tickEbb", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        assert_eq!(cpu.pc(), 0x2100);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-    }
-
-    #[test]
     fn keeps_worker_pool_coroutines_native() {
         assert!(describe_hle_import("_ZN10WorkerPool17processCoroutinesEd").is_none());
-    }
-
-    #[test]
-    fn dispatches_no_input_facades() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
-
-        for (idx, name) in [
-            "_ZN14KeyboardMapper21clearInputDeviceQueueEv",
-            "_ZN14KeyboardMapper4tickER15InputEventQueue",
-            "_ZN11MouseMapper21clearInputDeviceQueueEv",
-            "_ZN11MouseMapper4tickER15InputEventQueue",
-            "_ZN11TouchMapper21clearInputDeviceQueueEv",
-            "_ZN19TestAutoInputMapper21clearInputDeviceQueueEv",
-            "_ZN19TestAutoInputMapper4tickER15InputEventQueue",
-            "_ZN18DeviceButtonMapper4tickER15InputEventQueue",
-            "_ZN22GazeGestureVoiceMapper21clearInputDeviceQueueEv",
-            "_ZN22GazeGestureVoiceMapper4tickER15InputEventQueue",
-            "_ZN11MouseDevice12isButtonDownEi",
-            "_ZN11MouseDevice14getButtonStateEi",
-            "_ZN11MouseDevice14getEventButtonEv",
-            "_ZN11MouseDevice16wasFirstMovementEv",
-            "_ZN11MouseDevice19getEventButtonStateEv",
-            "_ZN11MouseDevice4getXEv",
-            "_ZN11MouseDevice4getYEv",
-            "_ZN11MouseDevice4nextEv",
-            "_ZN11MouseDevice5getDXEv",
-            "_ZN11MouseDevice5getDYEv",
-            "_ZN11MouseDevice5resetEv",
-            "_ZN11MouseDevice6reset2Ev",
-            "_ZN11MouseDevice6rewindEv",
-            "_ZN11MouseDevice8getEventEv",
-            "_ZN10Multitouch10isReleasedEi",
-            "_ZN10Multitouch11isEdgeTouchEi",
-            "_ZN10Multitouch13isPointerDownEi",
-            "_ZN10Multitouch15resetThisUpdateEv",
-            "_ZN10Multitouch19isPressedThisUpdateEi",
-            "_ZN10Multitouch20isReleasedThisUpdateEi",
-            "_ZN10Multitouch4nextEv",
-            "_ZN10Multitouch5resetEv",
-            "_ZN10Multitouch6commitEv",
-            "_ZN10Multitouch9isPressedEi",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            cpu.set_isa(Isa::Arm);
-            cpu.set_reg(14, 0x2201 + (idx as u32) * 4);
-            cpu.set_reg(0, u32::MAX);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), 0);
-            assert_eq!(cpu.pc(), 0x2200 + (idx as u32) * 4);
-            assert_eq!(cpu.isa(), Isa::Thumb);
-        }
-
-        for (idx, name) in [
-            "_ZN10Multitouch19getActivePointerIdsEPPKi",
-            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let out = 0x1100 + (idx as u32) * 0x10;
-            memory.store32(out, 0xaaaa_aaaa).unwrap();
-            cpu.set_isa(Isa::Thumb);
-            cpu.set_reg(14, 0x2601 + (idx as u32) * 4);
-            cpu.set_reg(0, out);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), 0);
-            assert_eq!(memory.load32(out).unwrap(), 0);
-            assert_eq!(cpu.pc(), 0x2600 + (idx as u32) * 4);
-            assert_eq!(cpu.isa(), Isa::Thumb);
-        }
-
-        for (idx, name) in [
-            "_ZN10Multitouch25getFirstActivePointerIdExEv",
-            "_ZN10Multitouch35getFirstActivePointerIdExThisUpdateEv",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            cpu.set_isa(Isa::Arm);
-            cpu.set_reg(14, 0x2701 + (idx as u32) * 4);
-            cpu.set_reg(0, 0);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), u32::MAX);
-            assert_eq!(cpu.pc(), 0x2700 + (idx as u32) * 4);
-            assert_eq!(cpu.isa(), Isa::Thumb);
-        }
-    }
-
-    #[test]
-    fn dispatches_injected_pointer_to_minecraft_input_facades() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x4000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x1000);
-        hle.push_pointer_event(0, HlePointerPhase::Down, 123.0, 45.0, 1.0);
-
-        cpu.set_reg(14, 0x2000);
-        cpu.set_reg(0, 0);
-        hle.dispatch("_ZN10Multitouch13isPointerDownEi", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-
-        cpu.set_reg(14, 0x2004);
-        cpu.set_reg(0, 0);
-        hle.dispatch(
-            "_ZN10Multitouch19isPressedThisUpdateEi",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-
-        cpu.set_reg(14, 0x2008);
-        hle.dispatch(
-            "_ZN10Multitouch25getFirstActivePointerIdExEv",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-
-        memory.store32(0x1100, 0).unwrap();
-        cpu.set_reg(14, 0x200c);
-        cpu.set_reg(0, 0x1100);
-        hle.dispatch(
-            "_ZN10Multitouch19getActivePointerIdsEPPKi",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        let ids = memory.load32(0x1100).unwrap();
-        assert_ne!(ids, 0);
-        assert_eq!(memory.load32(ids).unwrap(), 0);
-
-        cpu.set_reg(14, 0x2010);
-        hle.dispatch("_ZN11MouseDevice4getXEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 123);
-
-        cpu.set_reg(14, 0x2012);
-        hle.dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 123);
-
-        cpu.set_reg(14, 0x2016);
-        hle.dispatch("_ZN11MenuPointer4getYEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 45);
-
-        cpu.set_reg(14, 0x201a);
-        hle.dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-
-        cpu.set_reg(14, 0x2014);
-        hle.dispatch("_ZN10Multitouch6commitEv", &mut cpu, &mut memory)
-            .unwrap();
-
-        cpu.set_reg(14, 0x2018);
-        hle.dispatch(
-            "_ZN10Multitouch19isPressedThisUpdateEi",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-
-        cpu.set_reg(14, 0x201c);
-        hle.dispatch("_ZN10Multitouch6commitEv", &mut cpu, &mut memory)
-            .unwrap();
-
-        cpu.set_reg(14, 0x2020);
-        hle.dispatch(
-            "_ZN10Multitouch19isPressedThisUpdateEi",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-
-        hle.push_pointer_event(0, HlePointerPhase::Up, 123.0, 45.0, 0.0);
-        cpu.set_reg(14, 0x2024);
-        hle.dispatch(
-            "_ZN10Multitouch20isReleasedThisUpdateEi",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-
-        memory.store32(0x1110, 0).unwrap();
-        cpu.set_reg(14, 0x2028);
-        cpu.set_reg(0, 0x1110);
-        hle.dispatch(
-            "_ZN10Multitouch29getActivePointerIdsThisUpdateEPPKi",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        let ids = memory.load32(0x1110).unwrap();
-        assert_ne!(ids, 0);
-        assert_eq!(memory.load32(ids).unwrap(), 0);
-
-        cpu.set_reg(14, 0x202c);
-        cpu.set_reg(0, (-7i16) as u16 as u32);
-        hle.dispatch("_ZN11MenuPointer4setXEs", &mut cpu, &mut memory)
-            .unwrap();
-        cpu.set_reg(14, 0x2030);
-        cpu.set_reg(0, 88);
-        hle.dispatch("_ZN11MenuPointer4setYEs", &mut cpu, &mut memory)
-            .unwrap();
-        cpu.set_reg(14, 0x2028);
-        cpu.set_reg(0, 1);
-        hle.dispatch("_ZN11MenuPointer10setPressedEb", &mut cpu, &mut memory)
-            .unwrap();
-        cpu.set_reg(14, 0x202c);
-        hle.dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), (-7i32) as u32);
-        cpu.set_reg(14, 0x2030);
-        hle.dispatch("_ZN11MenuPointer4getYEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 88);
-        cpu.set_reg(14, 0x2034);
-        hle.dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-
-        let mut input_hle = HleRuntime::new(0, 0x3800, 0x800);
-        input_hle.set_input_poll_source(0x1400);
-        input_hle.push_pointer_event(7, HlePointerPhase::Down, 321.0, 222.0, 1.0);
-        memory.store32(0x1110, 0).unwrap();
-        cpu.set_reg(14, 0x2040);
-        cpu.set_reg(0, 0x4444);
-        cpu.set_reg(1, 0x1110);
-        input_hle
-            .dispatch("AInputQueue_getEvent", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        let event = memory.load32(0x1110).unwrap();
-        assert_ne!(event, 0);
-
-        cpu.set_reg(14, 0x2044);
-        cpu.set_reg(0, event);
-        input_hle
-            .dispatch("AInputEvent_getType", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), AINPUT_EVENT_TYPE_MOTION);
-        cpu.set_reg(14, 0x2048);
-        cpu.set_reg(0, event);
-        input_hle
-            .dispatch("AInputEvent_getSource", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), AINPUT_SOURCE_TOUCHSCREEN);
-        cpu.set_reg(14, 0x204c);
-        cpu.set_reg(0, event);
-        input_hle
-            .dispatch("AMotionEvent_getAction", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), AMOTION_EVENT_ACTION_DOWN);
-        cpu.set_reg(14, 0x2050);
-        cpu.set_reg(0, event);
-        input_hle
-            .dispatch("AMotionEvent_getPointerCount", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        cpu.set_reg(14, 0x2054);
-        cpu.set_reg(0, event);
-        cpu.set_reg(1, 0);
-        input_hle
-            .dispatch("AMotionEvent_getPointerId", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 7);
-        cpu.set_reg(14, 0x2058);
-        cpu.set_reg(0, event);
-        cpu.set_reg(1, 0);
-        input_hle
-            .dispatch("AMotionEvent_getX", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(f32::from_bits(cpu.reg(0)), 321.0);
-        cpu.set_reg(14, 0x205c);
-        cpu.set_reg(0, event);
-        cpu.set_reg(1, 0);
-        input_hle
-            .dispatch("AMotionEvent_getY", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(f32::from_bits(cpu.reg(0)), 222.0);
-        cpu.set_reg(14, 0x2060);
-        cpu.set_reg(0, 0x4444);
-        cpu.set_reg(1, event);
-        cpu.set_reg(2, 1);
-        input_hle
-            .dispatch("AInputQueue_finishEvent", &mut cpu, &mut memory)
-            .unwrap();
-
-        cpu.set_reg(13, 0x3000);
-        memory.store32(0x3000, 4).unwrap();
-        cpu.set_reg(14, 0x2064);
-        cpu.set_reg(0, 1);
-        cpu.set_reg(1, 1);
-        cpu.set_reg(2, 77);
-        cpu.set_reg(3, 66);
-        input_hle
-            .dispatch("_ZN10Multitouch4feedEccssi", &mut cpu, &mut memory)
-            .unwrap();
-        cpu.set_reg(14, 0x2068);
-        input_hle
-            .dispatch("_ZN11MenuPointer4getXEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 77);
-        cpu.set_reg(14, 0x206c);
-        input_hle
-            .dispatch("_ZN11MenuPointer4getYEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 66);
-        cpu.set_reg(14, 0x2070);
-        input_hle
-            .dispatch("_ZN11MenuPointer9isPressedEv", &mut cpu, &mut memory)
-            .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-    }
-
-    #[test]
-    fn dispatches_minecraft_input_queue_pointer_location() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
-
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 2);
-        cpu.set_reg(2, (-12i16) as u16 as u32);
-        cpu.set_reg(3, 345);
-        hle.dispatch(
-            "_ZN15InputEventQueue22enqueuePointerLocationE9InputModess",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-
-        for offset in 0..20 {
-            memory.store8(0x1100 + offset, 0xaa).unwrap();
-        }
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2005);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1100);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(cpu.pc(), 0x2004);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-        assert_eq!(memory.load8(0x1100).unwrap(), 1);
-        assert_eq!(memory.load32(0x1104).unwrap(), 2);
-        assert_eq!(memory.load16(0x1108).unwrap() as i16, -12);
-        assert_eq!(memory.load16(0x110a).unwrap(), 345);
-        for offset in [1, 2, 3, 12, 13, 14, 15, 16, 17, 18, 19] {
-            assert_eq!(memory.load8(0x1100 + offset).unwrap(), 0);
-        }
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2009);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1100);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-    }
-
-    #[test]
-    fn mirrors_host_pointer_to_minecraft_pointer_location_event() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
-        hle.push_pointer_event(0, HlePointerPhase::Down, 279.6, 386.4, 1.0);
-
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1100);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(memory.load8(0x1100).unwrap(), 1);
-        assert_eq!(
-            memory.load32(0x1104).unwrap(),
-            MINECRAFT_TOUCH_INPUT_MODE as u32
-        );
-        assert_eq!(memory.load16(0x1108).unwrap(), 280);
-        assert_eq!(memory.load16(0x110a).unwrap(), 386);
-    }
-
-    #[test]
-    fn dispatches_minecraft_input_queue_button_events() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
-
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, (-3i16) as u16 as u32);
-        hle.dispatch(
-            "_ZN15InputEventQueue28enqueueButtonPressAndReleaseEs",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-
-        for (idx, expected_state) in [1, 0].into_iter().enumerate() {
-            let out = 0x1100 + (idx as u32) * 0x20;
-            cpu.set_isa(Isa::Arm);
-            cpu.set_reg(14, 0x2005 + (idx as u32) * 4);
-            cpu.set_reg(0, 0x4000);
-            cpu.set_reg(1, out);
-            hle.dispatch(
-                "_ZN15InputEventQueue9nextEventER10InputEvent",
-                &mut cpu,
-                &mut memory,
-            )
-            .unwrap();
-            assert_eq!(cpu.reg(0), 1);
-            assert_eq!(memory.load8(out).unwrap(), 0);
-            assert_eq!(memory.load16(out + 4).unwrap() as i16, -3);
-            assert_eq!(memory.load8(out + 6).unwrap(), expected_state);
-            assert_eq!(memory.load8(out + 7).unwrap(), 0);
-        }
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2010);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1100);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 0);
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2014);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 77);
-        cpu.set_reg(2, 2);
-        cpu.set_reg(3, 1);
-        hle.dispatch(
-            "_ZN15InputEventQueue13enqueueButtonEs11ButtonStateb",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2018);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1140);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(memory.load8(0x1140).unwrap(), 0);
-        assert_eq!(memory.load16(0x1144).unwrap(), 77);
-        assert_eq!(memory.load8(0x1146).unwrap(), 2);
-        assert_eq!(memory.load8(0x1147).unwrap(), 1);
-    }
-
-    #[test]
-    fn dispatches_minecraft_input_queue_direction_and_vector_events() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
-
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 9);
-        cpu.set_reg(2, 1.5f32.to_bits());
-        cpu.set_reg(3, (-2.25f32).to_bits());
-        hle.dispatch(
-            "_ZN15InputEventQueue16enqueueDirectionE11DirectionIdff",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2005);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, (-4i16) as u16 as u32);
-        cpu.set_reg(2, 3.25f32.to_bits());
-        cpu.set_reg(3, 4.5f32.to_bits());
-        cpu.set_reg(4, (-5.75f32).to_bits());
-        hle.dispatch(
-            "_ZN15InputEventQueue13enqueueVectorEsfff",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2009);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1100);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(memory.load8(0x1100).unwrap(), 4);
-        assert_eq!(memory.load16(0x1104).unwrap(), 9);
-        assert_eq!(f32::from_bits(memory.load32(0x1108).unwrap()), 1.5);
-        assert_eq!(f32::from_bits(memory.load32(0x110c).unwrap()), -2.25);
-
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x200d);
-        cpu.set_reg(0, 0x4000);
-        cpu.set_reg(1, 0x1120);
-        hle.dispatch(
-            "_ZN15InputEventQueue9nextEventER10InputEvent",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-        assert_eq!(cpu.reg(0), 1);
-        assert_eq!(memory.load8(0x1120).unwrap(), 5);
-        assert_eq!(memory.load16(0x1124).unwrap() as i16, -4);
-        assert_eq!(f32::from_bits(memory.load32(0x1128).unwrap()), 3.25);
-        assert_eq!(f32::from_bits(memory.load32(0x112c).unwrap()), 4.5);
-        assert_eq!(f32::from_bits(memory.load32(0x1130).unwrap()), -5.75);
-    }
-
-    #[test]
-    fn dispatches_minecraft_transform_interpolation() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x4000).unwrap();
-
-        for idx in 0..16 {
-            let offset = (idx as u32) * 4;
-            memory
-                .store32(0x1100 + offset, (idx as f32).to_bits())
-                .unwrap();
-            memory
-                .store32(0x1200 + offset, (100.0 + idx as f32).to_bits())
-                .unwrap();
-        }
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x1300);
-        cpu.set_reg(1, 0x1100);
-        cpu.set_reg(2, 0x1200);
-        cpu.set_reg(3, 0.25f32.to_bits());
-        let mut hle = HleRuntime::new(0, 0x3000, 0x800);
-
-        hle.dispatch(
-            "_ZN3mce11MathUtility21interpolateTransformsERN3glm6detail7tmat4x4IfEERKS4_S7_f",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        assert_eq!(cpu.reg(0), 0x1300);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-        for idx in 0..16 {
-            let offset = (idx as u32) * 4;
-            let value = f32::from_bits(memory.load32(0x1300 + offset).unwrap());
-            assert_eq!(value, 25.0 + idx as f32);
-        }
-    }
-
-    #[test]
-    fn dispatches_minecraft_ogl_unbind_all_textures() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        for slot in 0..8 {
-            memory
-                .store32(0x1100 + 0x7c + slot * 4, 0xffff_ffff)
-                .unwrap();
-        }
-        memory.store32(0x1100 + 0x100, 0x84c0).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        cpu.set_reg(14, 0x2001);
-        cpu.set_reg(0, 0x1100);
-        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
-
-        hle.dispatch(
-            "_ZN3mce16RenderContextOGL17unbindAllTexturesEv",
-            &mut cpu,
-            &mut memory,
-        )
-        .unwrap();
-
-        assert_eq!(cpu.reg(0), 0x1100);
-        assert_eq!(cpu.pc(), 0x2000);
-        assert_eq!(cpu.isa(), Isa::Thumb);
-        for slot in 0..8 {
-            assert_eq!(memory.load32(0x1100 + 0x7c + slot * 4).unwrap(), 0);
-        }
-        assert_eq!(memory.load32(0x1100 + 0x100).unwrap(), 0x84c7);
-    }
-
-    #[test]
-    fn dispatches_no_gamepad_facades() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x2000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Thumb);
-        let mut hle = HleRuntime::new(0, 0x2800, 0x800);
-
-        for (idx, name) in [
-            "_ZN14GamePadManager16getGamePadsInUseEv",
-            "_ZN14GamePadManager20getConnectedGamePadsEv",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let out = 0x1100 + (idx as u32) * 0x20;
-            memory.store32(out, 0xaaaa_aaaa).unwrap();
-            memory.store32(out + 4, 0xbbbb_bbbb).unwrap();
-            memory.store32(out + 8, 0xcccc_cccc).unwrap();
-            cpu.set_isa(Isa::Thumb);
-            cpu.set_reg(14, 0x2401 + (idx as u32) * 4);
-            cpu.set_reg(0, out);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), out);
-            assert_eq!(memory.load32(out).unwrap(), 0);
-            assert_eq!(memory.load32(out + 4).unwrap(), 0);
-            assert_eq!(memory.load32(out + 8).unwrap(), 0);
-            assert_eq!(cpu.pc(), 0x2400 + (idx as u32) * 4);
-            assert_eq!(cpu.isa(), Isa::Thumb);
-        }
-
-        for (idx, name) in [
-            "_ZN13GamePadMapper4tickER15InputEventQueue",
-            "_ZN13GamePadMapper8tickTurnER15InputEventQueue",
-            "_ZNK7GamePad11isConnectedEv",
-            "_ZNK7GamePad7isInUseEv",
-            "_ZN6Screen15controllerEventEv",
-            "_ZN6Screen27_processControllerDirectionEi",
-            "_ZN11MenuGamePad12getDirectionEi",
-            "_ZN11MenuGamePad4getXEi",
-            "_ZN11MenuGamePad4getYEi",
-            "_ZN11MenuGamePad9isTouchedEi",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            cpu.set_isa(Isa::Arm);
-            cpu.set_reg(14, 0x2501 + (idx as u32) * 4);
-            cpu.set_reg(0, u32::MAX);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), 0);
-            assert_eq!(cpu.pc(), 0x2500 + (idx as u32) * 4);
-            assert_eq!(cpu.isa(), Isa::Thumb);
-        }
-    }
-
-    #[test]
-    fn dispatches_no_network_social_tick_facades() {
-        let mut memory = MappedMemory::new();
-        memory.map_zeroed(0x1000, 0x1000).unwrap();
-
-        let mut cpu = Cpu::new();
-        cpu.set_isa(Isa::Arm);
-        let mut hle = HleRuntime::new(0, 0x1800, 0x800);
-
-        for (idx, name) in [
-            "_ZN18MinecraftTelemetry4tickEv",
-            "_ZN18MinecraftTelemetry15forceSendEventsEv",
-            "_ZN6Social11Multiplayer18needToHandleInviteEv",
-            "_ZN6Social11Multiplayer4tickEb",
-            "_ZN6Social11Multiplayer22tickMultiplayerManagerEv",
-            "_ZN6Social11UserManager12silentSigninESt8functionIFvNS_12SignInResultEEE",
-            "_ZN6Social11UserManager21registerSignInHandlerESt8functionIFvvEE",
-            "_ZN6Social11UserManager22registerSignOutHandlerESt8functionIFvvEE",
-            "_ZN6Social11UserManager4tickEv",
-            "_ZNK6Social11UserManager10isSignedInEv",
-            "_ZN9RealmsAPI6updateEv",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            cpu.set_isa(Isa::Arm);
-            cpu.set_reg(14, 0x2201 + (idx as u32) * 4);
-            cpu.set_reg(0, u32::MAX);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), 0);
-            assert_eq!(cpu.pc(), 0x2200 + (idx as u32) * 4);
-            assert_eq!(cpu.isa(), Isa::Thumb);
-        }
     }
 
     #[test]
@@ -16136,13 +19299,83 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_fake_udp_socket_hle_calls() {
+    fn dispatches_bionic_getaddrinfo_and_offline_dns_results() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x4000).unwrap();
+        memory.load_bytes(0x1100, b"127.0.0.1\0").unwrap();
+        memory.load_bytes(0x1120, b"19132\0").unwrap();
+        store32(&mut memory, 0x1200, AI_CANONNAME).unwrap();
+        store32(&mut memory, 0x1204, AF_INET).unwrap();
+        store32(&mut memory, 0x1208, SOCK_DGRAM).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        let mut hle = HleRuntime::new(0x1000, 0x3000, 0x2000);
+
+        for name in ["getaddrinfo", "freeaddrinfo", "gai_strerror"] {
+            assert_eq!(
+                describe_hle_import(name).unwrap().behavior,
+                HleCallBehavior::Implemented,
+                "{name}"
+            );
+        }
+
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 0x1120);
+        cpu.set_reg(2, 0x1200);
+        cpu.set_reg(3, 0x1300);
+        hle.dispatch("getaddrinfo", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        let entry = memory.load32(0x1300).unwrap();
+        assert_ne!(entry, 0);
+        assert_eq!(memory.load32(entry).unwrap(), AI_CANONNAME);
+        assert_eq!(memory.load32(entry + 4).unwrap(), AF_INET);
+        assert_eq!(memory.load32(entry + 8).unwrap(), SOCK_DGRAM);
+        assert_eq!(memory.load32(entry + 12).unwrap(), IPPROTO_UDP);
+        assert_eq!(memory.load32(entry + 16).unwrap(), 16);
+        assert_eq!(memory.load32(entry + 28).unwrap(), 0);
+        let canonical = memory.load32(entry + 20).unwrap();
+        assert_eq!(
+            load_c_string(&mut memory, canonical, 64).unwrap(),
+            "127.0.0.1"
+        );
+        let sockaddr = memory.load32(entry + 24).unwrap();
+        assert_eq!(memory.load16(sockaddr).unwrap(), AF_INET as u16);
+        assert_eq!(
+            memory.load_bytes_for_test(sockaddr + 2, 6),
+            [0x4a, 0xbc, 127, 0, 0, 1]
+        );
+
+        cpu.set_reg(0, entry);
+        hle.dispatch("freeaddrinfo", &mut cpu, &mut memory).unwrap();
+        assert_eq!(hle.heap_allocation_count_for_test(), 0);
+
+        memory.load_bytes(0x1100, b"example.invalid\0").unwrap();
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0x1200);
+        cpu.set_reg(3, 0x1300);
+        hle.dispatch("getaddrinfo", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), EAI_AGAIN);
+        assert_eq!(memory.load32(0x1300).unwrap(), 0);
+
+        cpu.set_reg(0, EAI_AGAIN);
+        hle.dispatch("gai_strerror", &mut cpu, &mut memory).unwrap();
+        assert_eq!(
+            load_c_string(&mut memory, cpu.reg(0), 64).unwrap(),
+            "Temporary failure in name resolution"
+        );
+    }
+
+    #[test]
+    fn dispatches_bounded_local_udp_and_offline_external_calls() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
         memory.load_bytes(0x1200, b"ping").unwrap();
         let mut cpu = Cpu::new();
         cpu.set_isa(Isa::Arm);
         cpu.set_reg(14, 0x2000);
+        cpu.set_reg(13, 0x1400);
         let mut hle = HleRuntime::new(0x1000, 0x1800, 0x400);
 
         assert_eq!(
@@ -16157,6 +19390,40 @@ mod tests {
         let fd = cpu.reg(0);
         assert_eq!(fd, FIRST_FAKE_FD);
 
+        store32(&mut memory, 0x1500, ANDROID_IFREQ_SIZE).unwrap();
+        store32(&mut memory, 0x1504, 0x1520).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, SIOCGIFCONF);
+        cpu.set_reg(2, 0x1500);
+        hle.dispatch("ioctl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1500).unwrap(), ANDROID_IFREQ_SIZE);
+        assert_eq!(memory.load_bytes_for_test(0x1520, 3), b"lo\0");
+        assert_eq!(
+            memory.load16(0x1520 + ANDROID_IFNAMSIZ).unwrap(),
+            AF_INET as u16
+        );
+        assert_eq!(
+            memory.load_bytes_for_test(0x1520 + ANDROID_IFNAMSIZ + 4, 4),
+            [127, 0, 0, 1]
+        );
+
+        store32(&mut memory, 0x1500, 0).unwrap();
+        store32(&mut memory, 0x1504, 0).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, SIOCGIFCONF);
+        cpu.set_reg(2, 0x1500);
+        hle.dispatch("ioctl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1500).unwrap(), ANDROID_IFREQ_SIZE);
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0xdead_beef);
+        cpu.set_reg(2, 0x1500);
+        hle.dispatch("ioctl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), ENOTTY);
+
         cpu.set_reg(0, fd);
         cpu.set_reg(1, F_SETFL);
         cpu.set_reg(2, 0x800);
@@ -16168,11 +19435,108 @@ mod tests {
         hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0x800);
 
-        for name in ["setsockopt", "bind", "connect"] {
-            cpu.set_reg(0, fd);
-            hle.dispatch(name, &mut cpu, &mut memory).unwrap();
-            assert_eq!(cpu.reg(0), 0, "{name}");
-        }
+        store16(&mut memory, 0x1340, AF_INET as u16).unwrap();
+        store16(&mut memory, 0x1342, 0).unwrap();
+        store32(&mut memory, 0x1344, 0).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1340);
+        cpu.set_reg(2, 16);
+        hle.dispatch("bind", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        store32(&mut memory, 0x1380, 16).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1360);
+        cpu.set_reg(2, 0x1380);
+        hle.dispatch("getsockname", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load16(0x1360).unwrap(), AF_INET as u16);
+        assert_ne!(memory.load16(0x1362).unwrap(), 0);
+        assert_eq!(memory.load32(0x1380).unwrap(), 16);
+
+        store32(&mut memory, 0x1400, 0x1360).unwrap();
+        store32(&mut memory, 0x1404, 16).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1200);
+        cpu.set_reg(2, 4);
+        cpu.set_reg(3, 0);
+        hle.dispatch("sendto", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+
+        store32(&mut memory, 0x1240, fd).unwrap();
+        store16(&mut memory, 0x1244, POLLIN).unwrap();
+        store16(&mut memory, 0x1246, 0xffff).unwrap();
+        cpu.set_reg(0, 0x1240);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load16(0x1246).unwrap(), POLLIN);
+
+        store32(&mut memory, 0x1400, 0x1440).unwrap();
+        store32(&mut memory, 0x1404, 0x1460).unwrap();
+        store32(&mut memory, 0x1460, 16).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x1210);
+        cpu.set_reg(2, 16);
+        cpu.set_reg(3, 0);
+        hle.dispatch("recvfrom", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 4);
+        assert_eq!(memory.load_bytes_for_test(0x1210, 4), b"ping");
+        assert_eq!(memory.load16(0x1440).unwrap(), AF_INET as u16);
+        assert_eq!(
+            memory.load16(0x1442).unwrap(),
+            memory.load16(0x1362).unwrap()
+        );
+        assert_eq!(memory.load_bytes_for_test(0x1444, 4), [127, 0, 0, 1]);
+        assert_eq!(memory.load32(0x1460).unwrap(), 16);
+
+        store16(&mut memory, 0x13a0, AF_INET as u16).unwrap();
+        memory.store8(0x13a2, 0x4a).unwrap();
+        memory.store8(0x13a3, 0xbc).unwrap();
+        store32(&mut memory, 0x13a4, u32::from_le_bytes([127, 0, 0, 1])).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x13a0);
+        cpu.set_reg(2, 16);
+        hle.dispatch("connect", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        store32(&mut memory, 0x1380, 16).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, 0x13c0);
+        cpu.set_reg(2, 0x1380);
+        hle.dispatch("getpeername", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load_bytes_for_test(0x13c4, 4), [127, 0, 0, 1]);
+
+        store32(&mut memory, 0x13e0, 1).unwrap();
+        store32(&mut memory, 0x1400, 4).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, SOL_SOCKET);
+        cpu.set_reg(2, SO_BROADCAST);
+        cpu.set_reg(3, 0x13e0);
+        hle.dispatch("setsockopt", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        store32(&mut memory, 0x1410, 4).unwrap();
+        store32(&mut memory, 0x1400, 0x1410).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, SOL_SOCKET);
+        cpu.set_reg(2, SO_BROADCAST);
+        cpu.set_reg(3, 0x1420);
+        hle.dispatch("getsockopt", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1410).unwrap(), 4);
+        assert_eq!(memory.load32(0x1420).unwrap(), 1);
+
+        store32(&mut memory, 0x1410, 4).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, SOL_SOCKET);
+        cpu.set_reg(2, SO_TYPE);
+        cpu.set_reg(3, 0x1420);
+        hle.dispatch("getsockopt", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load32(0x1420).unwrap(), SOCK_DGRAM);
 
         assert_eq!(
             describe_hle_import("inet_ntoa").unwrap().behavior,
@@ -16201,12 +19565,19 @@ mod tests {
         cpu.set_reg(0, fd);
         cpu.set_reg(1, 0x1200);
         cpu.set_reg(2, 4);
+        cpu.set_reg(3, 0);
+        store32(&mut memory, 0x1400, 0x13a0).unwrap();
+        store32(&mut memory, 0x1404, 16).unwrap();
         hle.dispatch("sendto", &mut cpu, &mut memory).unwrap();
-        assert_eq!(cpu.reg(0), 4);
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), ENETUNREACH);
 
+        store32(&mut memory, 0x1400, 0).unwrap();
+        store32(&mut memory, 0x1404, 0).unwrap();
         cpu.set_reg(0, fd);
         cpu.set_reg(1, 0x1210);
         cpu.set_reg(2, 16);
+        cpu.set_reg(3, 0);
         hle.dispatch("recvfrom", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), u32::MAX);
         assert_eq!(memory.load32(0x1000).unwrap(), EAGAIN);
@@ -16221,14 +19592,23 @@ mod tests {
         assert_eq!(cpu.reg(0), 0);
         assert_eq!(memory.load16(0x1246).unwrap(), 0);
 
-        store32(&mut memory, 0x1280, u32::MAX).unwrap();
+        memory.store8(0x1280 + fd / 8, 1 << (fd % 8)).unwrap();
         cpu.set_reg(0, fd + 1);
         cpu.set_reg(1, 0x1280);
         cpu.set_reg(2, 0);
         cpu.set_reg(3, 0);
         hle.dispatch("select", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
-        assert_eq!(memory.load32(0x1280).unwrap(), 0);
+        assert_eq!(memory.load8(0x1280 + fd / 8).unwrap(), 0);
+
+        memory.store8(0x1280, 1 << 1).unwrap();
+        cpu.set_reg(0, 2);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0x1280);
+        cpu.set_reg(3, 0);
+        hle.dispatch("select", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1280).unwrap(), 1 << 1);
 
         cpu.set_reg(0, 1);
         hle.dispatch("epoll_create", &mut cpu, &mut memory).unwrap();
@@ -16248,6 +19628,237 @@ mod tests {
         cpu.set_reg(3, 0);
         hle.dispatch("epoll_wait", &mut cpu, &mut memory).unwrap();
         assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, AF_INET);
+        cpu.set_reg(1, SOCK_STREAM);
+        cpu.set_reg(2, 0);
+        hle.dispatch("socket", &mut cpu, &mut memory).unwrap();
+        let tcp_fd = cpu.reg(0);
+        cpu.set_reg(0, tcp_fd);
+        cpu.set_reg(1, 0x13a0);
+        cpu.set_reg(2, 16);
+        hle.dispatch("connect", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), ENETUNREACH);
+        assert!(matches!(
+            &hle.files[hle.fake_socket_index(tcp_fd).unwrap()].kind,
+            FakeFileKind::Socket {
+                local_addr: None,
+                peer_addr: None,
+                ..
+            }
+        ));
+
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0);
+        cpu.set_reg(2, 0);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+    }
+
+    #[test]
+    fn dispatches_bounded_virtual_file_record_locks() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory
+            .load_bytes(0x1100, b"/sdcard/leveldb.LOCK\0")
+            .unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x3000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, O_CREAT | O_RDWR);
+        cpu.set_reg(2, 0o644);
+        hle.dispatch("open", &mut cpu, &mut memory).unwrap();
+        let fd = cpu.reg(0);
+        assert_eq!(fd, FIRST_FAKE_FD);
+
+        store16(&mut memory, 0x1200 + ARM_FLOCK_TYPE_OFFSET, F_WRLCK).unwrap();
+        store16(
+            &mut memory,
+            0x1200 + ARM_FLOCK_WHENCE_OFFSET,
+            SEEK_SET as u16,
+        )
+        .unwrap();
+        store32(&mut memory, 0x1200 + ARM_FLOCK_START_OFFSET, 0).unwrap();
+        store32(&mut memory, 0x1200 + ARM_FLOCK_LEN_OFFSET, 0).unwrap();
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, F_SETLK);
+        cpu.set_reg(2, 0x1200);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        let virtual_idx = hle.virtual_file_index("/sdcard/leveldb.LOCK").unwrap();
+        assert_eq!(hle.virtual_files[virtual_idx].advisory_lock, Some(F_WRLCK));
+
+        cpu.set_reg(0, fd);
+        cpu.set_reg(1, F_GETLK);
+        cpu.set_reg(2, 0x1200);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(memory.load16(0x1200).unwrap(), F_UNLCK);
+        assert_eq!(hle.virtual_files[virtual_idx].advisory_lock, Some(F_WRLCK));
+
+        cpu.set_reg(0, fd);
+        hle.dispatch("close", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        assert_eq!(hle.virtual_files[virtual_idx].advisory_lock, None);
+
+        cpu.set_reg(0, 0x1100);
+        cpu.set_reg(1, O_RDONLY);
+        cpu.set_reg(2, 0);
+        hle.dispatch("open", &mut cpu, &mut memory).unwrap();
+        let read_only_fd = cpu.reg(0);
+        store16(&mut memory, 0x1200 + ARM_FLOCK_TYPE_OFFSET, F_WRLCK).unwrap();
+        cpu.set_reg(0, read_only_fd);
+        cpu.set_reg(1, F_SETLK);
+        cpu.set_reg(2, 0x1200);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EBADF);
+
+        store32(&mut memory, 0x1200 + ARM_FLOCK_LEN_OFFSET, 1).unwrap();
+        cpu.set_reg(0, read_only_fd);
+        cpu.set_reg(1, F_SETLK);
+        cpu.set_reg(2, 0x1200);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EINVAL);
+    }
+
+    #[test]
+    fn dispatches_pipe_data_and_reports_fd_errors() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x2000).unwrap();
+        memory.load_bytes(0x1200, b"command").unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x3000);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        hle.dispatch("ALooper_forThread", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, 0);
+        hle.dispatch("ALooper_prepare", &mut cpu, &mut memory)
+            .unwrap();
+        let looper = cpu.reg(0);
+        assert_eq!(looper, ALOOPER_HANDLE);
+
+        cpu.set_reg(0, 0x1100);
+        hle.dispatch("pipe", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        let read_fd = memory.load32(0x1100).unwrap();
+        let write_fd = memory.load32(0x1104).unwrap();
+        assert_eq!((read_fd, write_fd), (FIRST_FAKE_FD, FIRST_FAKE_FD + 1));
+
+        cpu.set_reg(13, 0x1400);
+        memory.store32(0x1400, 0).unwrap();
+        memory.store32(0x1404, 0xfeed_beef).unwrap();
+        cpu.set_reg(0, looper);
+        cpu.set_reg(1, read_fd);
+        cpu.set_reg(2, 42);
+        cpu.set_reg(3, ALOOPER_EVENT_INPUT);
+        hle.dispatch("ALooper_addFd", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, 1);
+        hle.dispatch("epoll_create", &mut cpu, &mut memory).unwrap();
+        let epoll_fd = cpu.reg(0);
+        memory.store32(0x1180, EPOLLIN).unwrap();
+        memory.store32(0x1188, 0x89ab_cdef).unwrap();
+        memory.store32(0x118c, 0x0123_4567).unwrap();
+        cpu.set_reg(0, epoll_fd);
+        cpu.set_reg(1, EPOLL_CTL_ADD);
+        cpu.set_reg(2, read_fd);
+        cpu.set_reg(3, 0x1180);
+        hle.dispatch("epoll_ctl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, read_fd);
+        cpu.set_reg(1, F_SETFL);
+        cpu.set_reg(2, O_NONBLOCK);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        store32(&mut memory, 0x1140, read_fd).unwrap();
+        store16(&mut memory, 0x1144, POLLIN).unwrap();
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, write_fd);
+        cpu.set_reg(1, 0x1200);
+        cpu.set_reg(2, 7);
+        hle.dispatch("write", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 7);
+
+        cpu.set_reg(0, 0);
+        cpu.set_reg(1, 0x1160);
+        cpu.set_reg(2, 0x1164);
+        cpu.set_reg(3, 0x1168);
+        hle.dispatch("ALooper_pollOnce", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 42);
+        assert_eq!(memory.load32(0x1160).unwrap(), read_fd);
+        assert_eq!(memory.load32(0x1164).unwrap(), ALOOPER_EVENT_INPUT);
+        assert_eq!(memory.load32(0x1168).unwrap(), 0xfeed_beef);
+
+        cpu.set_reg(0, epoll_fd);
+        cpu.set_reg(1, 0x11a0);
+        cpu.set_reg(2, 1);
+        cpu.set_reg(3, 0);
+        hle.dispatch("epoll_wait", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load32(0x11a0).unwrap(), EPOLLIN);
+        assert_eq!(memory.load32(0x11a8).unwrap(), 0x89ab_cdef);
+        assert_eq!(memory.load32(0x11ac).unwrap(), 0x0123_4567);
+
+        cpu.set_reg(0, looper);
+        cpu.set_reg(1, read_fd);
+        hle.dispatch("ALooper_removeFd", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
+
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load16(0x1146).unwrap(), POLLIN);
+
+        cpu.set_reg(0, read_fd);
+        cpu.set_reg(1, 0x1220);
+        cpu.set_reg(2, 16);
+        hle.dispatch("read", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 7);
+        assert_eq!(memory.load_bytes_for_test(0x1220, 7), b"command");
+
+        cpu.set_reg(0, write_fd);
+        hle.dispatch("close", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 0);
+        cpu.set_reg(0, 0x1140);
+        cpu.set_reg(1, 1);
+        cpu.set_reg(2, 0);
+        hle.dispatch("poll", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load16(0x1146).unwrap(), POLLHUP | POLLIN);
+
+        cpu.set_reg(0, write_fd);
+        hle.dispatch("close", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EBADF);
+
+        cpu.set_reg(0, read_fd);
+        cpu.set_reg(1, 0x7fff);
+        cpu.set_reg(2, 0);
+        hle.dispatch("fcntl", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.reg(0), u32::MAX);
+        assert_eq!(memory.load32(0x1000).unwrap(), EINVAL);
     }
 
     #[test]
@@ -16623,6 +20234,47 @@ mod tests {
     }
 
     #[test]
+    fn perror_formats_bionic_output_and_preserves_errno_on_success() {
+        assert_eq!(
+            format_perror_message(Some(b"open"), ENOENT),
+            b"open: No such file or directory\n"
+        );
+        assert_eq!(
+            format_perror_message(Some(b""), EINVAL),
+            b": Invalid argument\n"
+        );
+        assert_eq!(
+            format_perror_message(None, ENOSYS),
+            b"Function not implemented\n"
+        );
+
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, 0x1000).unwrap();
+        memory.load_bytes(0x1100, b"open\0").unwrap();
+        memory.store32(0x1000, ENOENT).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.set_isa(Isa::Arm);
+        cpu.set_reg(14, 0x2000);
+        cpu.set_reg(0, 0x1100);
+        let mut hle = HleRuntime::new(0x1000, 0x1800, 0x800);
+
+        assert_eq!(
+            describe_hle_import("perror").unwrap().behavior,
+            HleCallBehavior::Implemented
+        );
+        hle.dispatch("perror", &mut cpu, &mut memory).unwrap();
+        assert_eq!(cpu.pc(), 0x2000);
+        assert_eq!(memory.load32(0x1000).unwrap(), ENOENT);
+
+        cpu.set_reg(0, 2);
+        hle.dispatch("close", &mut cpu, &mut memory).unwrap();
+        memory.store32(0x1000, ENOENT).unwrap();
+        cpu.set_reg(0, 0);
+        hle.dispatch("perror", &mut cpu, &mut memory).unwrap();
+        assert_eq!(memory.load32(0x1000).unwrap(), EBADF);
+    }
+
+    #[test]
     fn dispatches_cxa_guard_hle_calls() {
         let mut memory = MappedMemory::new();
         memory.map_zeroed(0x1000, 0x1000).unwrap();
@@ -16635,16 +20287,31 @@ mod tests {
         hle.dispatch("__cxa_guard_acquire", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 1);
+        assert_eq!(memory.load8(0x1101).unwrap(), 1);
 
         cpu.set_reg(0, 0x1100);
         hle.dispatch("__cxa_guard_release", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(memory.load8(0x1100).unwrap(), 1);
+        assert_eq!(memory.load8(0x1101).unwrap(), 0);
 
         cpu.set_reg(0, 0x1100);
         hle.dispatch("__cxa_guard_acquire", &mut cpu, &mut memory)
             .unwrap();
         assert_eq!(cpu.reg(0), 0);
+
+        cpu.set_reg(0, 0x1110);
+        hle.dispatch("__cxa_guard_acquire", &mut cpu, &mut memory)
+            .unwrap();
+        cpu.set_reg(0, 0x1110);
+        hle.dispatch("__cxa_guard_abort", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(memory.load8(0x1110).unwrap(), 0);
+        assert_eq!(memory.load8(0x1111).unwrap(), 0);
+        cpu.set_reg(0, 0x1110);
+        hle.dispatch("__cxa_guard_acquire", &mut cpu, &mut memory)
+            .unwrap();
+        assert_eq!(cpu.reg(0), 1);
     }
 
     trait TestBytes {
@@ -16657,16 +20324,6 @@ mod tests {
                 .map(|idx| self.load8(addr.wrapping_add(idx as u32)).unwrap())
                 .collect()
         }
-    }
-
-    fn one_by_one_rgba_png() -> &'static [u8] {
-        &[
-            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
-            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x78,
-            0x9c, 0x63, 0x10, 0x54, 0x32, 0x76, 0x01, 0x00, 0x01, 0x59, 0x00, 0xab, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0x00, 0x00, 0x00, 0x00,
-        ]
     }
 
     fn stored_zip_with_one_file(name: &str, contents: &[u8]) -> Vec<u8> {

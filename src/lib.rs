@@ -1,5 +1,6 @@
 pub mod apk_plan;
 pub mod armv7a;
+pub(crate) mod dex_index;
 #[cfg(all(feature = "dynarmic", not(target_family = "wasm")))]
 pub mod dynarmic_backend;
 pub mod elf_dynamic;
@@ -17,6 +18,8 @@ pub mod png_util;
 pub mod sdl_shell;
 #[cfg(all(feature = "webgl", target_arch = "wasm32"))]
 pub mod wasm_api;
+#[cfg(all(feature = "wasm-bench", target_arch = "wasm32"))]
+mod wasm_bench;
 pub mod wasm_webgl;
 #[cfg(feature = "sdl2")]
 pub mod ws_harness;

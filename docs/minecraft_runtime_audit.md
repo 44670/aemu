@@ -1,5 +1,25 @@
 # Minecraft Runtime Completion Audit
 
+> Current-state note (2026-07-16): sections below preserve investigation
+> chronology and include obsolete target-HLE experiments. Production no longer
+> registers or dispatches MCPE game/engine methods, no resource bridge calls
+> `onResourcesLoaded`, and no thread allowlist skips guest pthread routines.
+> Desktop and WebAssembly launchers now continue the actual pthread created by
+> native-app-glue; they neither call `android_main` directly nor allocate a
+> fallback `android_app`. That does not close native lifecycle integrity: both
+> launchers directly call target JNI entrypoints, overwrite the guest-created
+> `android_app`, and inject lifecycle poll sources instead of traversing the
+> framework callbacks and app-glue command pipe. See `docs/no_fake_hle.md` for
+> the three-way status: native symbol dispatch is clean, native lifecycle is
+> not, and whole-APK execution remains open because APK-defined Java code is
+> lifted in Rust instead of executed as DEX. The current interpreter run
+> completes 300 frames with 5,979 indexed draws and zero replay GL errors, and
+> the automated interaction gate creates and enters a flat world, remains in
+> gameplay for 36 seconds, then verifies movement, camera control, block
+> placement, and block breaking with zero replay GL errors. The
+> investigation chronology below is retained as history; its former blockers
+> are not the current runtime state.
+
 Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 
 ## Success Criteria
@@ -10,7 +30,8 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 - ARM relocations apply successfully.
 - Native constructors run under the interpreter without unsupported
   instruction traps.
-- The Android lifecycle/native entrypoint can be invoked.
+- The Android lifecycle reaches the native entrypoint through APK Java and the
+  framework callback chain without launcher-injected app state or commands.
 - A bounded MCPE first-frame probe can stop successfully on the first present.
 - EGL/GLES calls reach a host/WebGL-facing implementation instead of no-op
   placeholders.
@@ -26,21 +47,21 @@ Objective: make Minecraft PE APK run in the Rust Android HLE emulator.
 | Test APK path is `/mnt/hgfs/deb13/AndroidGames` | `AGENTS.md`, `docs/minecraft_pe_probe.md`, and CLI probes use that path. | Satisfied |
 | 1:1 guest address map | `src/native_loader.rs`, `src/guest_memory.rs`, `AGENTS.md`. | Satisfied |
 | APK native load/link | `cargo run -- link-apk ... --abi armeabi-v7a` reports loaded and relocated. | Satisfied for local ARMv7 research APK |
-| System import HLE | `src/hle_imports.rs`; local MCPE probe resolves 906 imports with zero unresolved. GLES object-name generation writes texture/buffer/framebuffer/renderbuffer names back to guest memory, GLES shader/program HLE now reflects active uniforms and attributes from MCPE shader source, and the current target facades cover libstdc++ hash helpers, GLES precision/texture-parameter queries, profiler ticks, no-input/gamepad polling, transform interpolation, render-context texture unbind, and no-network social/auth ticks. | Initial coverage |
+| System import HLE | `src/hle_imports.rs`; the local MCPE link resolves 906 imports with zero unresolved. Platform HLE is stateful or fails explicitly; local UDP supports only bounded loopback/self-test traffic, external networking remains unavailable, JNI declarations come from the APK DEX index, and APK-defined native game symbols remain native. APK-defined Java bridge lifts are listed separately in `docs/no_fake_hle.md`. | Native symbol-dispatch gate satisfied; lifecycle and whole-APK gates open |
 | HLE trap dispatch from interpreter | `src/native_runtime.rs` dispatches ARM UDF HLE traps by guest address and linked runtime HLE entries such as `__dynamic_cast`; `run_function_with_args_until_hle` can now turn a selected HLE call into a bounded success condition. | Initial coverage |
 | Constructor runner | `src/native_runtime.rs`; `run-apk-native --abi armeabi-v7a --launch` completes all 1,604 constructors on the local APK. | Satisfied for local ARMv7 research APK |
 | ARMv7/Thumb-2/NEON research probe | The release launch reaches `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, `android_main`, EGL setup, GL string queries, texture name generation, texture upload paths, `glViewport`, `glDepthRangef`, MCPE resource loading, `glDrawElements`, and `eglSwapBuffers` without an undefined NEON trap. | First-frame HLE coverage |
 | Bounded first-frame probe | `tools/mcpe_smoke.py --trace-dir tmp/mcpe-smoke-uidiv-hle-20260517 --frames 1 --timeout 120` reaches `eglSwapBuffers` at step `311218123` and exits 0 at the frame limit after moving `__aeabi_uidiv/__aeabi_uidivmod` to Rust HLE traps. | Satisfied for local ARMv7 research APK |
-| Host/WebGL drawing backend | `src/hle_imports.rs` records a bounded `GlesEvent` stream for shader/program, clear, viewport, draw, swap, buffer, texture, framebuffer/renderbuffer, stencil, uniform, vertex-attrib, client attribute payload, and common render-state calls; `src/sdl_shell.rs` and `src/wasm_webgl.rs` replay the captured stream for SDL2/WebGL. Earlier SDL2 evidence submitted 744 indexed draws with nonzero RGB readback, but the current `tools/mcpe_smoke.py` live baseline records zero indexed draws and black RGB readback. | Current no-draw regression/blocker |
-| SDL2 live frames | `NativeRuntime::continue_until_hle` can resume guest execution after a stopped HLE call. With `DISPLAY=:0 SDL_VIDEO_X11_FORCE_EGL=1`, current `run-apk-native --sdl2-live --steps 600000000` reaches first swap at step `311218123`, advances to frame limit, and reports zero host GL errors. Current 5-frame and 43-swap probes record no draw stream and black RGB readback; older heavy scheduling diagnostics reached real `DrawElements` later in the live loop but were too slow for a reliable smoke. | Live loop works; rendering progression remains blocked |
-| SDL2 WebSocket harness and input | `src/ws_harness.rs` and `tools/ws_cli.py` provide `debug`, `screenshot`, `pointer`, and `tap`. `tools/mcpe_ui_smoke.py` now launches `run-apk-native --sdl2-live --ws`, can wait for frame/draw/readback milestones before running a UI journal, captures PNG screenshots under `tmp/` by default, records `journal.jsonl`, and writes `summary.json` in one command. The current visible-start-screen gate waits for frame 61, 721 `DrawElements`, and nonzero RGB readback before tapping `Not Now`; traced input reaches `AInputQueue_getEvent` and `AMotionEvent_getX/Y`, and the screenshot transitions from the Xbox Live dialog to the main menu. | Start-screen input bridge satisfied; not playable |
+| Host/WebGL drawing backend | `src/hle_imports.rs` records checked guest GLES state and bounded replay events; `src/sdl_shell.rs` and `src/wasm_webgl.rs` replay them for SDL2/WebGL. `tmp/mcpe-strict-jni-20260716-final5` reaches 300 swaps, 5,979 indexed draws, a 406,452-pixel RGB readback, zero skipped client-attribute draws, and zero replay GL errors. | SDL2 gate satisfied; WebGL build gate satisfied |
+| SDL2 live frames | The release AEMU interpreter reaches first swap at guest step `310629057` and completes 300 frames in 31.401 seconds on the real native-app-glue pthread after host lifecycle injection. | Rendering/performance evidence only |
+| SDL2 WebSocket harness and input | `tools/mcpe_ui_smoke.py --preset playable-flat-world` drives the real input queue through Xbox dismissal, Play, Create New World, Advanced, Flat, loading, movement, camera rotation/pitch, stone placement, and long-press breaking. `tmp/mcpe-playable-flat-world-gate-20260716` machine-checks world frames at 6, 21, and 36 seconds plus all four interactions; the final sample has 1,924 frames, 105,475 indexed draws, and zero replay GL errors. | New-world entry and bounded playability gate satisfied |
 | Browser-fed APK bytes | `load_apk_native_libraries_bytes` links APK native libraries from bytes, and `HleRuntime::set_apk_bytes` lets Android asset HLE serve `AAssetManager_open` from the same byte source. | Initial browser data path |
-| Browser MCPE entrypoint | `src/wasm_api.rs` exports `runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)` for wasm builds. It runs the byte-backed APK path through constructors, `JNI_OnLoad`, `nativeRegisterThis`, `ANativeActivity_onCreate`, and `android_main` until `eglSwapBuffers`, then replays captured GLES events into a WebGL 1 canvas and returns draw/readback/error stats. `web/mcpe_first_frame.html` wires that export to a file input and canvas. | Initial browser harness path |
+| Browser MCPE entrypoint | `src/wasm_api.rs` exports `runMcpeFirstFrame(apkBytes, abi, canvasId, maxSteps)` for wasm builds. It uses the same direct `JNI_OnLoad`/`nativeRegisterThis` calls and synthetic lifecycle setup as desktop before continuing the real pthread to `eglSwapBuffers`, then replays GLES events into WebGL 1. | Initial browser harness; lifecycle nonconforming |
 | Browser/WebGL target remains viable | `cargo check --target wasm32-unknown-unknown --no-default-features --features webgl` passes. | Build-gate satisfied |
 | SDL2 desktop target remains viable | `cargo check --features sdl2` passes. | Build-gate satisfied |
-| Local Minecraft PE can run on ARMv7-A interpreter | Current local APK has `armeabi-v7a` libraries; default `run-apk-native` now selects that ABI and the SDL2/live probes reach the current loading-frame blocker. | In progress |
+| Local Minecraft PE can run on ARMv7-A interpreter | The custom interpreter creates and enters a rendered flat world, remains in gameplay through the 36-second stability frame, moves, changes view, places a block, and breaks it without a runtime or rendering failure. Native game/engine symbols execute in the guest, but activity launch/lifecycle is synthesized and selected APK Java methods remain Rust lifts. | Bounded playability smoke satisfied; lifecycle and DEX incomplete |
 
-## Current Blocking Evidence
+## Historical Blocking Evidence
 
 Local profiler-first update on 2026-05-17:
 

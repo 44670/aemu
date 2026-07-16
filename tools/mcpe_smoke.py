@@ -15,6 +15,20 @@ DEFAULT_BINARY = pathlib.Path("target/release/aemu")
 DEFAULT_ABI = "armeabi-v7a"
 DEFAULT_OUT_DIR = pathlib.Path("tmp/mcpe-smoke")
 DEFAULT_STEPS = 600_000_000
+
+
+def parse_step_limit(value):
+    if value.lower() == "inf":
+        return "inf"
+    try:
+        parsed = int(value, 10)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError("steps must be a non-negative integer or inf") from err
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("steps must be a non-negative integer or inf")
+    return parsed
+
+
 MCPE_LIBRARY = "libminecraftpe.so"
 ARMV7_NEON_HWCAP = 0x0008B0D7
 ARMV7_NO_NEON_HWCAP = 0x0008A0D7
@@ -1645,11 +1659,24 @@ def build_arg_parser():
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--trace-dir")
     parser.add_argument("--allow-existing-trace-dir", action="store_true")
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument(
+        "--steps",
+        type=parse_step_limit,
+        default=DEFAULT_STEPS,
+        help="guest step limit per run/frame, or inf",
+    )
     parser.add_argument("--frames", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--display", default=":0")
     parser.add_argument("--gles-event-limit", type=int, default=50000)
+    parser.add_argument(
+        "--gles-event-match",
+        default=(
+            "SwapBuffers,UseProgram,BindTexture,DrawElements,"
+            "TexImage2D,TexSubImage2D"
+        ),
+        help="comma-separated GLES event names recorded in gles_events.jsonl",
+    )
     parser.add_argument(
         "--gles-event-skip",
         type=int,
@@ -1873,9 +1900,7 @@ def main(argv=None):
         if args.profile_pc_limit is not None:
             env["AEMU_PROFILE_PC_LIMIT"] = str(args.profile_pc_limit)
     env["AEMU_TRACE_GLES_EVENTS_JSONL"] = str(trace_dir / "gles_events.jsonl")
-    env["AEMU_TRACE_GLES_EVENTS_MATCH"] = (
-        "SwapBuffers,UseProgram,BindTexture,DrawElements,TexImage2D,TexSubImage2D"
-    )
+    env["AEMU_TRACE_GLES_EVENTS_MATCH"] = args.gles_event_match
     env["AEMU_TRACE_GLES_EVENTS_LIMIT"] = str(args.gles_event_limit)
     if args.gles_event_skip is not None:
         env["AEMU_TRACE_GLES_EVENTS_SKIP"] = str(args.gles_event_skip)

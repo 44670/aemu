@@ -90,11 +90,13 @@ type GlClearColor = unsafe extern "C" fn(f32, f32, f32, f32);
 type GlClearDepthf = unsafe extern "C" fn(f32);
 type GlViewport = unsafe extern "C" fn(i32, i32, i32, i32);
 type GlCreateShader = unsafe extern "C" fn(u32) -> u32;
+type GlDeleteShader = unsafe extern "C" fn(u32);
 type GlShaderSource = unsafe extern "C" fn(u32, i32, *const *const c_char, *const i32);
 type GlCompileShader = unsafe extern "C" fn(u32);
 type GlGetShaderiv = unsafe extern "C" fn(u32, u32, *mut i32);
 type GlGetShaderInfoLog = unsafe extern "C" fn(u32, i32, *mut i32, *mut c_char);
 type GlCreateProgram = unsafe extern "C" fn() -> u32;
+type GlDeleteProgram = unsafe extern "C" fn(u32);
 type GlAttachShader = unsafe extern "C" fn(u32, u32);
 type GlBindAttribLocation = unsafe extern "C" fn(u32, u32, *const c_char);
 type GlLinkProgram = unsafe extern "C" fn(u32);
@@ -103,13 +105,17 @@ type GlGetProgramInfoLog = unsafe extern "C" fn(u32, i32, *mut i32, *mut c_char)
 type GlUseProgram = unsafe extern "C" fn(u32);
 type GlGetUniformLocation = unsafe extern "C" fn(u32, *const c_char) -> i32;
 type GlGenBuffers = unsafe extern "C" fn(i32, *mut u32);
+type GlDeleteBuffers = unsafe extern "C" fn(i32, *const u32);
 type GlBindBuffer = unsafe extern "C" fn(u32, u32);
 type GlBufferData = unsafe extern "C" fn(u32, isize, *const c_void, u32);
 type GlBufferSubData = unsafe extern "C" fn(u32, isize, isize, *const c_void);
 type GlGenTextures = unsafe extern "C" fn(i32, *mut u32);
+type GlDeleteTextures = unsafe extern "C" fn(i32, *const u32);
 type GlBindTexture = unsafe extern "C" fn(u32, u32);
 type GlGenFramebuffers = unsafe extern "C" fn(i32, *mut u32);
 type GlGenRenderbuffers = unsafe extern "C" fn(i32, *mut u32);
+type GlDeleteFramebuffers = unsafe extern "C" fn(i32, *const u32);
+type GlDeleteRenderbuffers = unsafe extern "C" fn(i32, *const u32);
 type GlBindFramebuffer = unsafe extern "C" fn(u32, u32);
 type GlBindRenderbuffer = unsafe extern "C" fn(u32, u32);
 type GlFramebufferTexture2D = unsafe extern "C" fn(u32, u32, u32, u32, i32);
@@ -161,11 +167,13 @@ struct SdlGl {
     clear_depthf: Option<GlClearDepthf>,
     viewport: GlViewport,
     create_shader: GlCreateShader,
+    delete_shader: GlDeleteShader,
     shader_source: GlShaderSource,
     compile_shader: GlCompileShader,
     get_shader_iv: GlGetShaderiv,
     get_shader_info_log: GlGetShaderInfoLog,
     create_program: GlCreateProgram,
+    delete_program: GlDeleteProgram,
     attach_shader: GlAttachShader,
     bind_attrib_location: GlBindAttribLocation,
     link_program: GlLinkProgram,
@@ -174,13 +182,17 @@ struct SdlGl {
     use_program: GlUseProgram,
     get_uniform_location: GlGetUniformLocation,
     gen_buffers: GlGenBuffers,
+    delete_buffers: GlDeleteBuffers,
     bind_buffer: GlBindBuffer,
     buffer_data: GlBufferData,
     buffer_sub_data: GlBufferSubData,
     gen_textures: GlGenTextures,
+    delete_textures: GlDeleteTextures,
     bind_texture: GlBindTexture,
     gen_framebuffers: GlGenFramebuffers,
     gen_renderbuffers: GlGenRenderbuffers,
+    delete_framebuffers: GlDeleteFramebuffers,
+    delete_renderbuffers: GlDeleteRenderbuffers,
     bind_framebuffer: GlBindFramebuffer,
     bind_renderbuffer: GlBindRenderbuffer,
     framebuffer_texture_2d: GlFramebufferTexture2D,
@@ -697,11 +709,13 @@ impl SdlGl {
             clear_depthf: load_optional_gl(video, "glClearDepthf"),
             viewport: load_required_gl(video, "glViewport")?,
             create_shader: load_required_gl(video, "glCreateShader")?,
+            delete_shader: load_required_gl(video, "glDeleteShader")?,
             shader_source: load_required_gl(video, "glShaderSource")?,
             compile_shader: load_required_gl(video, "glCompileShader")?,
             get_shader_iv: load_required_gl(video, "glGetShaderiv")?,
             get_shader_info_log: load_required_gl(video, "glGetShaderInfoLog")?,
             create_program: load_required_gl(video, "glCreateProgram")?,
+            delete_program: load_required_gl(video, "glDeleteProgram")?,
             attach_shader: load_required_gl(video, "glAttachShader")?,
             bind_attrib_location: load_required_gl(video, "glBindAttribLocation")?,
             link_program: load_required_gl(video, "glLinkProgram")?,
@@ -710,13 +724,17 @@ impl SdlGl {
             use_program: load_required_gl(video, "glUseProgram")?,
             get_uniform_location: load_required_gl(video, "glGetUniformLocation")?,
             gen_buffers: load_required_gl(video, "glGenBuffers")?,
+            delete_buffers: load_required_gl(video, "glDeleteBuffers")?,
             bind_buffer: load_required_gl(video, "glBindBuffer")?,
             buffer_data: load_required_gl(video, "glBufferData")?,
             buffer_sub_data: load_required_gl(video, "glBufferSubData")?,
             gen_textures: load_required_gl(video, "glGenTextures")?,
+            delete_textures: load_required_gl(video, "glDeleteTextures")?,
             bind_texture: load_required_gl(video, "glBindTexture")?,
             gen_framebuffers: load_required_gl(video, "glGenFramebuffers")?,
             gen_renderbuffers: load_required_gl(video, "glGenRenderbuffers")?,
+            delete_framebuffers: load_required_gl(video, "glDeleteFramebuffers")?,
+            delete_renderbuffers: load_required_gl(video, "glDeleteRenderbuffers")?,
             bind_framebuffer: load_required_gl(video, "glBindFramebuffer")?,
             bind_renderbuffer: load_required_gl(video, "glBindRenderbuffer")?,
             framebuffer_texture_2d: load_required_gl(video, "glFramebufferTexture2D")?,
@@ -788,9 +806,51 @@ impl Sdl2Host {
                 let host = unsafe { (self.gl.create_shader)(*shader_type) };
                 self.replay.shaders.insert(*shader, host);
             }
+            GlesEvent::DeleteShader { shader } => {
+                if let Some(host) = self.replay.shaders.remove(shader) {
+                    unsafe {
+                        (self.gl.delete_shader)(host);
+                    }
+                }
+            }
             GlesEvent::ShaderSource { shader, source } => {
                 if let Some(host) = self.replay.shaders.get(shader).copied() {
                     self.compile_replay_shader(*shader, host, source)?;
+                }
+            }
+            GlesEvent::DeleteTextures { textures } => {
+                for guest in textures {
+                    if let Some(host) = self.replay.textures.remove(guest) {
+                        unsafe {
+                            (self.gl.delete_textures)(1, &host);
+                        }
+                    }
+                    self.replay.texture_info.remove(guest);
+                    self.replay.bound_textures.retain(|_, bound| bound != guest);
+                }
+            }
+            GlesEvent::DeleteFramebuffers { framebuffers } => {
+                for guest in framebuffers {
+                    if let Some(host) = self.replay.framebuffers.remove(guest) {
+                        unsafe {
+                            (self.gl.delete_framebuffers)(1, &host);
+                        }
+                    }
+                    if self.replay.bound_framebuffer == *guest {
+                        self.replay.bound_framebuffer = 0;
+                    }
+                }
+            }
+            GlesEvent::DeleteRenderbuffers { renderbuffers } => {
+                for guest in renderbuffers {
+                    if let Some(host) = self.replay.renderbuffers.remove(guest) {
+                        unsafe {
+                            (self.gl.delete_renderbuffers)(1, &host);
+                        }
+                    }
+                    if self.replay.bound_renderbuffer == *guest {
+                        self.replay.bound_renderbuffer = 0;
+                    }
                 }
             }
             GlesEvent::CreateProgram { program } => {
@@ -804,6 +864,16 @@ impl Sdl2Host {
                         attributes: Vec::new(),
                     },
                 );
+            }
+            GlesEvent::DeleteProgram { program } => {
+                if let Some(state) = self.replay.programs.remove(program) {
+                    unsafe {
+                        (self.gl.delete_program)(state.host);
+                    }
+                }
+                if self.replay.current_program == *program {
+                    self.replay.current_program = 0;
+                }
             }
             GlesEvent::AttachShader { program, shader } => {
                 let Some(host_program) = self.host_program(*program) else {
@@ -836,6 +906,22 @@ impl Sdl2Host {
                     GL_ARRAY_BUFFER => self.replay.bound_array_buffer = *buffer,
                     GL_ELEMENT_ARRAY_BUFFER => self.replay.bound_element_array_buffer = *buffer,
                     _ => {}
+                }
+            }
+            GlesEvent::DeleteBuffers { buffers } => {
+                for guest in buffers {
+                    if let Some(host) = self.replay.buffers.remove(guest) {
+                        unsafe {
+                            (self.gl.delete_buffers)(1, &host);
+                        }
+                    }
+                    self.replay.buffer_data.remove(guest);
+                    if self.replay.bound_array_buffer == *guest {
+                        self.replay.bound_array_buffer = 0;
+                    }
+                    if self.replay.bound_element_array_buffer == *guest {
+                        self.replay.bound_element_array_buffer = 0;
+                    }
                 }
             }
             GlesEvent::BufferData {
@@ -1526,11 +1612,17 @@ impl Sdl2Host {
         &mut self,
         client_attribs: &[GlesClientAttribPayload],
     ) -> HostResult<bool> {
-        if !self.has_unbacked_client_attrib() {
-            return Ok(true);
-        }
-        for (index, enabled) in self.replay.enabled_vertex_attribs.clone() {
-            if !enabled
+        // The guest captures payloads only for attributes consumed by the
+        // current linked program. Stale enabled arrays at inactive locations
+        // must not make an otherwise valid draw disappear.
+        for client_attrib in client_attribs {
+            let index = client_attrib.index;
+            if !self
+                .replay
+                .enabled_vertex_attribs
+                .get(&index)
+                .copied()
+                .unwrap_or(false)
                 || !self
                     .replay
                     .client_side_vertex_attribs
@@ -1538,16 +1630,12 @@ impl Sdl2Host {
                     .copied()
                     .unwrap_or(false)
             {
-                continue;
+                return Ok(false);
             }
             let Some(attrib) = self.replay.vertex_attribs.get(&index).copied() else {
                 return Ok(false);
             };
-            let Some(payload) = client_attribs
-                .iter()
-                .find(|payload| payload.index == index)
-                .and_then(|payload| payload.payload.as_deref())
-            else {
+            let Some(payload) = client_attrib.payload.as_deref() else {
                 return Ok(false);
             };
             let buffer = self.client_attrib_buffer(index);
@@ -2343,21 +2431,6 @@ impl Sdl2Host {
             );
         }
         gl_log_string(&log, written)
-    }
-
-    fn has_unbacked_client_attrib(&self) -> bool {
-        self.replay
-            .enabled_vertex_attribs
-            .iter()
-            .any(|(index, enabled)| {
-                *enabled
-                    && self
-                        .replay
-                        .client_side_vertex_attribs
-                        .get(index)
-                        .copied()
-                        .unwrap_or(false)
-            })
     }
 
     fn draw_indices_ptr(&self, indices: u32, payload: Option<&[u8]>) -> Option<*const c_void> {

@@ -490,14 +490,10 @@ fn collect_hle_symbols(
             }
         }
         for symbol in &object.defined_symbols {
-            if should_link_hle_symbol(&symbol.name)
+            if is_defined_hle_override_symbol(&symbol.name)
                 && let Some(descriptor) = describe_hle_import(&symbol.name)
             {
-                if descriptor.kind == HleSymbolKind::Target
-                    || is_defined_hle_override_symbol(&symbol.name)
-                {
-                    by_name.entry(symbol.name.clone()).or_insert(descriptor);
-                }
+                by_name.entry(symbol.name.clone()).or_insert(descriptor);
             }
         }
     }
@@ -667,7 +663,7 @@ fn apply_relocations(
 }
 
 fn hle_symbol_overrides_native(symbol: &HleSymbol) -> bool {
-    symbol.kind == HleSymbolKind::Target || is_defined_hle_override_symbol(&symbol.name)
+    is_defined_hle_override_symbol(&symbol.name)
 }
 
 fn should_prefer_native_symbol_over_hle(name: &str) -> bool {
@@ -999,22 +995,62 @@ mod tests {
 
     #[test]
     fn local_minecraft_link_has_no_game_logic_hle_symbols_when_present() {
-        let apk = Path::new("/mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk");
-        if !apk.exists() {
+        let apk = std::env::var_os("AEMU_MCPE_APK")
+            .map(PathBuf::from)
+            .or_else(|| {
+                [
+                    Path::new("/home/john/tmp/hgfs-deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk"),
+                    Path::new("/mnt/hgfs/deb13/AndroidGames/MineCraftPE-a0.15.0.1.apk"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file())
+                .map(Path::to_path_buf)
+            });
+        let Some(apk) = apk else {
             return;
-        }
+        };
         let config = NativeLoadConfig {
             abi: "armeabi-v7a".to_string(),
             ..NativeLoadConfig::default()
         };
-        let report = load_apk_native_libraries_with_config(apk, &config).unwrap();
+        let report = load_apk_native_libraries_with_config(&apk, &config).unwrap();
 
-        assert!(
-            report
-                .hle_symbols
-                .iter()
-                .all(|symbol| symbol.kind != HleSymbolKind::Target)
-        );
+        let game = report
+            .objects
+            .iter()
+            .find(|object| object.library_name == "libminecraftpe.so")
+            .expect("local MCPE APK must contain libminecraftpe.so");
+        for symbol in &game.defined_symbols {
+            let compiler_override = is_defined_hle_override_symbol(&symbol.name);
+            assert!(
+                compiler_override || report.hle_symbols.iter().all(|hle| hle.name != symbol.name),
+                "game-defined symbol was admitted to HLE: {}",
+                symbol.name
+            );
+            assert!(
+                report.resolved_imports.iter().all(|resolved| {
+                    resolved.name != symbol.name
+                        || compiler_override
+                        || matches!(&resolved.source, NativeSymbolSource::Native { .. })
+                }),
+                "game-defined symbol was not bound to native code: {}",
+                symbol.name
+            );
+        }
+
+        for name in [
+            "_ZN3mce12TextureGroup14getTexturePairERK16ResourceLocation",
+            "_ZN4Font4initEv",
+            "_ZN11AppPlatform7loadPNGER11TextureDataRKSs",
+            "_ZN18MinecraftTelemetry4tickEv",
+        ] {
+            assert!(describe_hle_import(name).is_none(), "{name}");
+            assert!(report.hle_symbols.iter().all(|symbol| symbol.name != name));
+            assert!(report.resolved_imports.iter().all(|resolved| {
+                resolved.name != name
+                    || matches!(resolved.source, NativeSymbolSource::Native { .. })
+            }));
+        }
     }
 
     struct TestRelocation {

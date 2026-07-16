@@ -356,6 +356,11 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn read16_checked(&self, addr: u32) -> Result<u16> {
+        let off = page_offset(addr);
+        if off <= PAGE_SIZE - 2 {
+            let index = self.page_index_for_addr(addr)?;
+            return Ok(self.pages[index].read16(off));
+        }
         self.ensure_mapped_small(addr, 2)?;
         let b0 = self.read8_checked(addr)?;
         let b1 = self.read8_checked(addr.wrapping_add(1))?;
@@ -365,6 +370,11 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn read32_checked(&self, addr: u32) -> Result<u32> {
+        let off = page_offset(addr);
+        if off <= PAGE_SIZE - 4 {
+            let index = self.page_index_for_addr(addr)?;
+            return Ok(self.pages[index].read32(off));
+        }
         self.ensure_mapped_small(addr, 4)?;
         let b0 = self.read8_checked(addr)?;
         let b1 = self.read8_checked(addr.wrapping_add(1))?;
@@ -384,6 +394,12 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn write16_checked(&mut self, addr: u32, value: u16) -> Result<()> {
+        let off = page_offset(addr);
+        if off <= PAGE_SIZE - 2 {
+            let index = self.page_index_for_addr(addr)?;
+            self.pages[index].write16(off, value);
+            return Ok(());
+        }
         self.ensure_mapped_small(addr, 2)?;
         for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
             self.write8_checked(addr.wrapping_add(idx as u32), byte)?;
@@ -394,6 +410,12 @@ impl MappedMemory {
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn write32_checked(&mut self, addr: u32, value: u32) -> Result<()> {
+        let off = page_offset(addr);
+        if off <= PAGE_SIZE - 4 {
+            let index = self.page_index_for_addr(addr)?;
+            self.pages[index].write32(off, value);
+            return Ok(());
+        }
         self.ensure_mapped_small(addr, 4)?;
         for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
             self.write8_checked(addr.wrapping_add(idx as u32), byte)?;
@@ -605,6 +627,38 @@ impl MappedPage {
 
     #[inline(always)]
     #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
+    fn read16(&self, off: usize) -> u16 {
+        match &self.storage {
+            #[cfg(target_os = "linux")]
+            PageStorage::Identity => unsafe {
+                u16::from_le(std::ptr::read_unaligned(
+                    (self.base + off as u32) as usize as *const u16,
+                ))
+            },
+            PageStorage::Owned(bytes) => {
+                u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap())
+            }
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
+    fn read32(&self, off: usize) -> u32 {
+        match &self.storage {
+            #[cfg(target_os = "linux")]
+            PageStorage::Identity => unsafe {
+                u32::from_le(std::ptr::read_unaligned(
+                    (self.base + off as u32) as usize as *const u32,
+                ))
+            },
+            PageStorage::Owned(bytes) => {
+                u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
+            }
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
     fn write8(&mut self, off: usize, value: u8) {
         match &mut self.storage {
             #[cfg(target_os = "linux")]
@@ -612,6 +666,40 @@ impl MappedPage {
                 std::ptr::write((self.base + off as u32) as usize as *mut u8, value);
             },
             PageStorage::Owned(bytes) => bytes[off] = value,
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
+    fn write16(&mut self, off: usize, value: u16) {
+        match &mut self.storage {
+            #[cfg(target_os = "linux")]
+            PageStorage::Identity => unsafe {
+                std::ptr::write_unaligned(
+                    (self.base + off as u32) as usize as *mut u16,
+                    value.to_le(),
+                );
+            },
+            PageStorage::Owned(bytes) => {
+                bytes[off..off + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(all(target_os = "linux", not(debug_assertions))))]
+    fn write32(&mut self, off: usize, value: u32) {
+        match &mut self.storage {
+            #[cfg(target_os = "linux")]
+            PageStorage::Identity => unsafe {
+                std::ptr::write_unaligned(
+                    (self.base + off as u32) as usize as *mut u32,
+                    value.to_le(),
+                );
+            },
+            PageStorage::Owned(bytes) => {
+                bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            }
         }
     }
 
@@ -801,6 +889,25 @@ mod tests {
         );
         assert_eq!(snapshots[1].base, 0x3000);
         assert_eq!(&snapshots[1].bytes[0x02..0x04], &0x5566u16.to_le_bytes());
+    }
+
+    #[test]
+    fn word_accesses_preserve_same_page_and_cross_page_little_endian_layout() {
+        let mut memory = MappedMemory::new();
+        memory.map_zeroed(0x1000, PAGE_SIZE * 2).unwrap();
+
+        memory.store16(0x1101, 0x1122).unwrap();
+        memory.store32(0x1203, 0x3344_5566).unwrap();
+        memory.store16(0x1fff, 0x7788).unwrap();
+        assert_eq!(memory.load16(0x1fff).unwrap(), 0x7788);
+        assert_eq!(memory.load8(0x2000).unwrap(), 0x77);
+        memory.store32(0x1ffd, 0x99aa_bbcc).unwrap();
+
+        assert_eq!(memory.load16(0x1101).unwrap(), 0x1122);
+        assert_eq!(memory.load32(0x1203).unwrap(), 0x3344_5566);
+        assert_eq!(memory.load16(0x1fff).unwrap(), 0x99aa);
+        assert_eq!(memory.load32(0x1ffd).unwrap(), 0x99aa_bbcc);
+        assert_eq!(memory.load8(0x2000).unwrap(), 0x99);
     }
 
     #[test]
