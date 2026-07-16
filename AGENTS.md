@@ -13,6 +13,26 @@ This is not a full Android emulator and not a modern APK compatibility layer.
 Prefer high-level emulation of the Android native app surface, system services,
 EGL/GLES, audio, input, files, and assets needed by specific old games.
 
+## Current Status
+
+- The authoritative runtime remains the custom Rust interpreter. Dynarmic is
+  an optional native-only experiment and never substitutes for interpreter or
+  WebAssembly acceptance.
+- The local ARMv7 Minecraft PE artifact reaches a bounded playable flat world
+  under the release interpreter. The canonical UI gate creates the world,
+  remains in gameplay, moves, changes view, places a block, and breaks it while
+  rejecting replay GL errors and skipped client-attribute draws.
+- This playability result does not close the whole-APK correctness gate.
+  Native symbol dispatch is clean, but the launcher still injects part of the
+  Android lifecycle and selected APK-defined Java methods are semantic Rust
+  lifts rather than executed DEX. Keep these three gates separate.
+- Audio remains unsupported. An unavailable audio service must fail explicitly
+  rather than report fabricated completion.
+- `docs/no_fake_hle.md` is the current correctness audit,
+  `docs/minecraft_runtime_audit.md` separates current evidence from historical
+  investigation, and `docs/interpreter_release_pipeline.md` records the
+  retained no-cache performance batch.
+
 ## Technology Direction
 
 - Keep this as one Rust crate unless the user explicitly asks to split it.
@@ -94,6 +114,10 @@ or turn an unsupported operation into generic success.
 - Target-specific symbol registries, environment-controlled game hooks,
   resource-completion bridges, and selective thread allowlists are forbidden,
   including diagnostic and test-only variants.
+- APK-defined Java methods are APK logic and ultimately execute through the
+  DEX/activity path. Existing declaration-checked Rust semantic lifts are
+  explicitly recorded incomplete state, not precedent for adding more lifts
+  or claiming whole-APK correctness.
 - Any exception to these rules needs an explicit current platform requirement,
   a semantic test, and a link audit proving it cannot capture game code.
 
@@ -158,17 +182,30 @@ Dynarmic notes:
 
 Implementation shape:
 
-- Decode guest instructions into small internal operations or cached decoded
-  basic blocks.
-- Keep execution interpreter-only for browser compatibility.
+- Keep one authoritative direct ARM/Thumb/VFP/NEON decoder and one set of
+  semantic leaves. Do not add a PC-indexed decoded-instruction cache,
+  decoded-op cache, basic-block cache, executable-page tracking, threaded-code
+  engine, parallel decoder, or JIT.
+- Ordinary release execution stays in the fused `Cpu::run_release_batch` loop
+  with CPU and budget state resident. Runtime, HLE, scheduler, diagnostics,
+  formatting, and errors run only on exact side exits. Diagnostic and
+  one-instruction callers continue to use the same decoder through outlined
+  wrappers.
+- Hierarchical direct routing may bypass unrelated decoder probes only when it
+  reaches the existing authoritative semantic leaf and differential tests
+  prove that every excluded special encoding still takes the canonical route.
 - Keep guest memory access behind explicit checked read/write helpers.
 - Keep Linux/Android syscalls and imported shared-library symbols in HLE layers,
   not inside the CPU core.
-- Track CPU coverage and known gaps in `docs/armv6_status.md`; do not treat
-  green unit tests as proof of full ARMv6 completion without updating that
-  checklist.
-- Use `docs/armv6_completion_audit.md` for the current prompt-to-artifact
-  completion audit before deciding whether the ARMv6 interpreter goal is done.
+- Inline only after matched native, WebAssembly, and end-to-end measurements
+  plus linked objdump inspection show a retained gain. Do not perform broad
+  `#[inline(always)]` passes or spend code size on unmeasured machinery.
+- Track validated CPU behavior in `docs/armv7a_cpu_validation.md`; green unit
+  tests alone do not prove complete ARMv6 or ARMv7 architecture coverage.
+- Use `docs/interpreter_release_pipeline.md` for generated-code and benchmark
+  evidence and `docs/dynarmic_backend_eval.md` for the optional backend's
+  limits. Historical measurements are tied to their recorded binaries and are
+  not claims about a later source tree.
 
 ## Native Library Inspection
 
@@ -231,16 +268,33 @@ against the linked native object. It records parsed live-frame stats plus GLES
 swap/draw counts in `summary.json`; use `--min-gles-events`,
 `--min-gles-swaps`, `--min-gles-draw-elements`, `--min-sdl-draw-pngs`,
 `--min-readback-rgb`, and `--max-gl-errors` to turn those artifacts into
-regression gates. For known blocker tracking, pass explicit expectations such
-as:
+regression gates.
+
+The current end-to-end interaction gate is:
+
+```sh
+tools/mcpe_ui_smoke.py --cpu-backend aemu --preset playable-flat-world
+```
+
+Any loader, launch, scheduler, HLE, EGL/GLES, input, or JNI change that can
+affect MCPE must rerun this gate in release-interpreter mode. Counters alone are
+not acceptance: inspect the machine-checked world and interaction screenshots.
+
+### Historical MCPE Diagnostics
+
+The following presets reproduce earlier failures and remain useful for
+regression localization. They are not descriptions of the current blocker and
+must not replace the canonical playability and no-fake gates. For historical
+blocker tracking, pass explicit expectations such as:
 
 ```sh
 tools/mcpe_smoke.py --expect-stage android_main --expect-exit nonzero \
   --expect-crash-pc 0x71673170 --expect-fault-address 0x10
 ```
 
-For the current MCPE certificate/WebToken blocker, use the built-in native trace
-preset instead of hand-writing `AEMU_TRACE_NATIVE_*` environment variables:
+For the historical MCPE certificate/WebToken failure, use the built-in native
+trace preset instead of hand-writing `AEMU_TRACE_NATIVE_*` environment
+variables:
 
 ```sh
 tools/mcpe_smoke.py --native-trace-preset webtoken \
@@ -375,11 +429,10 @@ tools/mcpe_smoke.py --native-trace-preset bn-div-loop \
 tools/trace_query.py tmp/mcpe-smoke-<stamp> bn-div-loop-check
 ```
 
-After the OpenSSL division path checks out, `font-texture-pair` narrows the
-current native `Font::init` crash. It traces the `TextureGroup::getTexturePair`
-lookups for `font/default8.png` and `font/ascii_sga.png`; the known blocker is
-that `default8.png` returns a native pair but `ascii_sga.png` currently returns
-null and `Font::init` dereferences it at `0x70c3cad4`:
+The historical `font-texture-pair` preset reproduces the former native
+`Font::init` crash. It traces the `TextureGroup::getTexturePair` lookups for
+`font/default8.png` and `font/ascii_sga.png`; the old failure returned null for
+`ascii_sga.png` and dereferenced it at `0x70c3cad4`:
 
 ```sh
 tools/mcpe_smoke.py --native-trace-preset font-texture-pair \
@@ -438,6 +491,8 @@ exact imported-symbol match; for example `=read` avoids matching `pthread_*`.
 Native event byte samples use `--native-event-bytes PC:*reg+offset,len` for a
 32-bit pointer dereference or `PC:reg+offset,len` for a direct guest address.
 
+### Current SDL2 and Browser Frontends
+
 The shell currently creates a GLES2-style SDL2 context and normalizes
 keyboard, mouse, touch, resize, and quit events through `src/host.rs`.
 `run-apk-native --sdl2` implies `--until-swap` for now and replays the recorded
@@ -460,15 +515,15 @@ tools/ws_cli.py --url ws://127.0.0.1:8766 screenshot --out tmp/aemu-ws-screensho
 tools/ws_cli.py --url ws://127.0.0.1:8766 tap 427 240
 ```
 
-Current live rendering reaches MCPE's first `eglSwapBuffers`, replays frames in
-SDL2, and the harness captures framebuffer screenshots directly as PNG; no PPM
-or conversion step is expected. A run on
-`DISPLAY=:0` has been verified past frame 2000 without the previous HLE
-`std::string` heap exhaustion. WebSocket/SDL2 pointer events enter the guest
-through the Android `AInputQueue`/`AMotionEvent` model. The old MCPE
+Current live rendering reaches and interacts with a native flat world under
+the release interpreter. The harness captures framebuffer screenshots directly
+as PNG; no PPM conversion is expected. WebSocket/SDL2 pointer events enter the
+guest through the Android `AInputQueue`/`AMotionEvent` model. The old MCPE
 `Multitouch::feed` target hook has been removed. MCPE texture, geometry, UI,
 resource, input, and world logic stays native; audio remains unsupported and
-must fail explicitly when reached rather than report fake completion.
+must fail explicitly when reached rather than report fake completion. This is
+bounded playability evidence only; lifecycle and DEX execution remain open as
+described in `docs/no_fake_hle.md`.
 Browser/WebGL replay scaffolding lives in `src/wasm_webgl.rs`; WebGL 1 remains
 the default target for GLES2 guest rendering. The wasm-only host mirrors the
 SDL2 replay state model with guest-to-host GL object maps, payload upload,
@@ -617,11 +672,11 @@ event. `AEMU_TRACE_NATIVE_EVENT_CXX_STRING` uses the same syntax as
 object/lifecycle state with GLES import events without scraping large stderr
 traces.
 
-Do not treat HLE or patching of MCPE engine methods such as `TextureGroup`,
-`Font`, or render-object methods as the long-term fix. Those hooks are only
-allowed as temporary diagnostics or compatibility scaffolding while tracing the
-real boundary problem. The durable target is correct CPU/object ABI behavior and
-correct Android/OpenGL ES HLE at the system/import boundary.
+Do not HLE or patch MCPE engine methods such as `TextureGroup`, `Font`, or
+render-object methods, including for diagnostic or test-only builds. Trace
+their native execution at exact PCs without replacing it. The durable target
+is correct CPU/object ABI behavior and correct Android/OpenGL ES HLE at the
+system/import boundary.
 
 Targeted guest object tracing:
 
@@ -701,6 +756,37 @@ The current research and milestone plan lives in:
 ```text
 docs/research_plan.md
 ```
+
+## Required Gates
+
+Run these before every commit:
+
+```sh
+cargo fmt --check
+git diff --check
+cargo test
+cargo check --features sdl2
+cargo check --target wasm32-unknown-unknown --no-default-features --features webgl
+```
+
+For interpreter hot-path changes, also build and exercise the release
+WebAssembly benchmark and compare the same native MCPE endpoint. Record guest
+steps, output/GLES identity, wall and process CPU time, artifact size, and
+linked objdump evidence; a microbenchmark alone cannot retain a change.
+
+```sh
+cargo build --release --lib --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-bench
+node tools/wasm_cpu_bench.mjs \
+  target/wasm32-unknown-unknown/release/aemu.wasm
+```
+
+For changes to APK loading, lifecycle, threading, JNI, HLE, EGL/GLES, input, or
+presentation, build release SDL2 and run the relevant bounded smoke. A change
+that can affect the interactive MCPE path must pass
+`tools/mcpe_ui_smoke.py --cpu-backend aemu --preset playable-flat-world`;
+preserve separate symbol-dispatch, native-lifecycle, and DEX/whole-APK
+results.
 
 ## Engineering Approach
 
